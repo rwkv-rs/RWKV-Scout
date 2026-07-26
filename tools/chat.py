@@ -1,4 +1,6 @@
-"""Simple local conversational fallback for non-research prompts."""
+"""Direct local-model answers for prompts that do not require retrieval."""
+
+from __future__ import annotations
 
 import re
 
@@ -7,27 +9,26 @@ from tools.registry import ToolRegistry
 
 
 def _clean_visible_answer(text: str) -> str:
-    text = text or ""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    return text.replace("</think>", "").strip()
+    value = text or ""
+    value = re.sub(r"<think>[\s\S]*?</think>", "", value, flags=re.IGNORECASE)
+    return value.replace("</think>", "").strip()
 
 
 def _deterministic_non_research_answer(query: str) -> str | None:
-    """Handle small, closed-world prompts without web search or model drift."""
+    """Answer tiny closed-world prompts without triggering a web search."""
     text = (query or "").strip()
-
-    arithmetic = re.search(r"(\d+)\s*(?:[×x*]|乘以)\s*(\d+)", text, flags=re.IGNORECASE)
+    arithmetic = re.search(r"(\d+)\s*(?:[xX*×]|乘以)\s*(\d+)", text)
     if arithmetic:
         return str(int(arithmetic.group(1)) * int(arithmetic.group(2)))
 
     if "翻译成英文" in text or "翻译为英文" in text:
-        source = re.split(r"[：:]", text, maxsplit=1)[-1].strip(" 。.\t")
+        source = re.split(r"[：:]", text, maxsplit=1)[-1].strip(" 。！？!?\t")
         translations = {
             "今天天气很好": "The weather is nice today.",
             "你好": "Hello.",
             "谢谢": "Thank you.",
         }
-        return translations.get(source) or "未提供待翻译的文本。"
+        return translations.get(source)
 
     if "摘要" in text and "文本" in text:
         match = re.search(r"文本[：:](.+)", text, flags=re.DOTALL)
@@ -41,8 +42,8 @@ def _deterministic_non_research_answer(query: str) -> str | None:
     name="answer_user",
     phase="ALL",
     signature="""[Tool] answer_user
-- 功能: 对不需要检索或文件分析的普通对话直接回答。
-- 参数: 无""",
+- Purpose: answer a non-research user prompt directly with the local model.
+- Safety: do not search or invent evidence for closed-world prompts.""",
 )
 def answer_user(original_goal: str = "", agent_state=None, **kwargs) -> str:
     deterministic = _deterministic_non_research_answer(original_goal)
@@ -52,25 +53,23 @@ def answer_user(original_goal: str = "", agent_state=None, **kwargs) -> str:
             agent_state.final_result = deterministic
         return deterministic
 
-    llm = LLMClient()
-    response = llm.chat_completion(
+    response = LLMClient().chat_completion(
         [
             {
                 "role": "system",
-                "content": "你是本地研究助手。直接、清晰地回答用户，不要输出隐藏思维过程或 <think> 标签。",
+                "content": (
+                    "You are a local research assistant. Answer directly and clearly. "
+                    "Do not expose hidden reasoning or <think> tags."
+                ),
             },
             {"role": "user", "content": original_goal},
         ]
     ).content
     answer = _clean_visible_answer(response)
-    # A small local model can still emit a visible reasoning draft even when
-    # instructed not to. Never expose that draft as the user-facing answer.
-    lowered = answer.casefold()
-    if answer.lstrip().startswith(">") or any(
-        marker in lowered
-        for marker in ("we need to determine", "the user asks", "analysis:", "reasoning:")
-    ):
-        answer = "无法生成简洁的直接答案。"
+    # Preserve the exact model output for audit. Never replace visible model
+    # output with a synthetic success/failure sentence.
+    if not answer:
+        answer = "Local RWKV returned an empty answer."
     if agent_state:
         agent_state.is_finished = True
         agent_state.final_result = answer
