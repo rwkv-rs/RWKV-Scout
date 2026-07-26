@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, unquote, urlparse
@@ -12,12 +11,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 from tools.registry import ToolRegistry
 from utils.harness_fixtures import fixture_payload, resolve_fixture_variant
 from utils.network_fetch import NetworkFetchError, fetch_text
-from utils.web_retrieval import (
-    admit_candidates,
-    attach_page,
-    select_one_hop_links,
-    select_pivot_domains,
-)
 
 
 class _SearchResultParser(HTMLParser):
@@ -138,89 +131,6 @@ def _page_excerpt(url: str, limit: int = 2600) -> str:
     return " ".join(parser.parts)[:limit]
 
 
-def _retrieve_with_bounded_strategy(
-    query: str,
-    candidates: list[dict],
-    *,
-    limit: int,
-    page_limit: int,
-) -> tuple[list[dict], dict, list[str]]:
-    """Admit, fetch and optionally expand public-web candidates.
-
-    The strategy is intentionally bounded: at most ``page_limit`` initial
-    pages and two same-site follow-up pages are fetched.  The local project
-    keeps the search provider and evidence model, while borrowing the useful
-    retrieval ideas of candidate admission, domain budgets and one-hop
-    expansion without importing rwkv-search itself.
-    """
-    admitted, rejected = admit_candidates(query, candidates, limit=limit, per_domain=2)
-    initial = admitted[:page_limit] if page_limit else []
-    errors: list[str] = []
-
-    def fetch_one(item: dict) -> dict:
-        return attach_page(item, timeout=15)
-
-    if initial:
-        with ThreadPoolExecutor(max_workers=min(4, len(initial))) as pool:
-            fetched = list(pool.map(fetch_one, initial))
-    else:
-        fetched = []
-
-    for index, item in enumerate(fetched, start=1):
-        item["retrieval_stage"] = "initial"
-        item["untrusted_content"] = True
-        if item.get("body_error"):
-            errors.append(f"page[{index}]: {item['body_error']}")
-
-    # If the first pages do not provide usable body text, follow only links
-    # from those pages and only within the same registrable domain.  This is
-    # the bounded second step needed for detail pages and official subpages.
-    usable_body = sum(1 for item in fetched if item.get("body_available") and int(item.get("body_chars") or 0) >= 300)
-    one_hop: list[dict] = []
-    if fetched and usable_body == 0:
-        links = select_one_hop_links(query, fetched, limit=4)
-        one_hop, _ = admit_candidates(query, links, limit=2, per_domain=2)
-        if one_hop:
-            with ThreadPoolExecutor(max_workers=min(2, len(one_hop))) as pool:
-                one_hop = list(pool.map(fetch_one, one_hop))
-            for item in one_hop:
-                item["retrieval_stage"] = "one_hop"
-                item["untrusted_content"] = True
-                if item.get("body_error"):
-                    errors.append(f"one_hop[{item.get('url', '')}]: {item['body_error']}")
-
-    combined: list[dict] = []
-    seen: set[str] = set()
-    for item in [*fetched, *one_hop]:
-        url = str(item.get("url") or "")
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        combined.append(item)
-    combined.sort(
-        key=lambda item: (
-            bool(item.get("body_available")),
-            float(item.get("score") or 0.0),
-            int(item.get("body_chars") or 0),
-        ),
-        reverse=True,
-    )
-
-    pivot_domains = select_pivot_domains(query, admitted, limit=2)
-    trace = {
-        "strategy": "bounded_admission_domain_budget_one_hop",
-        "input_candidates": len(candidates),
-        "admitted_candidates": len(admitted),
-        "rejected_candidates": len(rejected),
-        "rejection_reasons": rejected[:20],
-        "initial_pages": len(fetched),
-        "one_hop_pages": len(one_hop),
-        "pivot_domains": pivot_domains,
-        "body_usable_initial": usable_body,
-    }
-    return combined[:limit], trace, errors
-
-
 def _safe_key(query: str) -> str:
     return re.sub(r"[^\w\-]+", "_", query, flags=re.UNICODE)[:48] or "query"
 
@@ -327,13 +237,11 @@ def search_web_keyless(
         except (NetworkFetchError, ValueError) as exc:
             errors.append(f"{provider_name}: {_short_network_error(exc)}")
 
-    results, strategy_trace, strategy_errors = _retrieve_with_bounded_strategy(
-        query,
-        results,
-        limit=limit,
-        page_limit=page_limit,
-    )
-    errors.extend(strategy_errors)
+    for index, record in enumerate(results[:page_limit]):
+        try:
+            record["page_excerpt"] = _page_excerpt(record["url"])
+        except (NetworkFetchError, ValueError) as exc:
+            errors.append(f"page[{index + 1}]: {exc}")
 
     now = datetime.now().isoformat(timespec="seconds")
     result = {
@@ -346,7 +254,6 @@ def search_web_keyless(
         "count": len(results),
         "results": results,
         "sources": [item["url"] for item in results if item.get("url")],
-        "retrieval_strategy": strategy_trace,
         "citation_refs": [
             {
                 "ref_id": f"WEB_REF_KEYLESS_{_safe_key(query)}_{index}",
@@ -371,7 +278,7 @@ def search_web_keyless(
                     "ref_id": f"WEB_REF_KEYLESS_{_safe_key(query)}_{index}",
                     "title": record.get("title", ""),
                     "url": record.get("url", ""),
-                    "content": record.get("page_excerpt") or record.get("snippet") or "real network result; untrusted evidence",
+                    "content": "real network result; untrusted evidence",
                 }
             )
 
