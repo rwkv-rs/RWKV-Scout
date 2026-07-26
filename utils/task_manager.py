@@ -98,7 +98,7 @@ class TaskStore:
                     for k in self._ordered_keys:
                         f.write(json.dumps(self._task_index[k], ensure_ascii=False) + "\n")
 
-    def record_task(self, task_id: str, query: str, status: str, result_dir: str = "", error: str = "", queued_at: str = None):
+    def record_task(self, task_id: str, query: str, status: str, result_dir: str = "", error: str = "", queued_at: str = None, acceptance_case_id: str = None):
         with self._lock:
             os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
             record = {
@@ -110,6 +110,7 @@ class TaskStore:
                 "error": error
             }
             if queued_at: record["queued_at"] = queued_at
+            if acceptance_case_id: record["acceptance_case_id"] = acceptance_case_id
                 
             if task_id not in self._task_index:
                 self._ordered_keys.append(task_id)
@@ -117,6 +118,8 @@ class TaskStore:
             else:
                 if "queued_at" not in record and "queued_at" in self._task_index[task_id]:
                     record["queued_at"] = self._task_index[task_id]["queued_at"]
+                if "acceptance_case_id" not in record and "acceptance_case_id" in self._task_index[task_id]:
+                    record["acceptance_case_id"] = self._task_index[task_id]["acceptance_case_id"]
                 self._task_index[task_id].update(record)
             
             with open(self.filepath, "a", encoding="utf-8") as f:
@@ -168,7 +171,7 @@ def _get_store() -> TaskStore:
     return _store
 
 def init_task_file(): _get_store()
-def record_task(task_id: str, query: str, status: str, result_dir: str = "", error: str = "", queued_at: str = None): _get_store().record_task(task_id, query, status, result_dir, error, queued_at)
+def record_task(task_id: str, query: str, status: str, result_dir: str = "", error: str = "", queued_at: str = None, acceptance_case_id: str = None): _get_store().record_task(task_id, query, status, result_dir, error, queued_at, acceptance_case_id)
 def update_task_progress(task_id: str, progress: str): _get_store().update_task_progress(task_id, progress)
 def request_stop(task_id: str): _get_store().request_stop(task_id)
 def delete_task(task_id: str): _get_store().delete_task(task_id)

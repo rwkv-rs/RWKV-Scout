@@ -1,5 +1,6 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import {
+  MessageCircle,
   Search,
   SquarePen,
   StopCircle,
@@ -103,6 +104,7 @@ export function AppSidebar({
   onKeywordChange,
   onSelect,
   onNewRun,
+  onOpenChat,
   onStop,
   onDelete,
   ...props
@@ -153,10 +155,20 @@ export function AppSidebar({
         </div>
 
         <div className="px-2.5 pb-2.5 space-y-2">
+          <div className="grid grid-cols-2 gap-2">
           <Button className="h-8 w-full justify-start rounded-md px-2.5 text-[13px]" onClick={onNewRun}>
             <SquarePen className="size-3.5" />
             新建任务
           </Button>
+          <Button
+            variant="outline"
+            className="h-8 justify-start rounded-md px-2.5 text-[12px]"
+            onClick={onOpenChat}
+          >
+            <MessageCircle className="size-3.5" />
+            聊天
+          </Button>
+          </div>
           <div className="relative">
             <Search className="pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2 text-sidebar-foreground/30" />
             <Input

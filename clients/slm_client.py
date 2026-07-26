@@ -2,7 +2,8 @@
 import json
 import requests
 import time
-from config import get_slm_endpoint, get_slm_password
+import concurrent.futures
+from config import get_slm_endpoint, get_slm_password, get_slm_protocol, get_slm_concurrency, get_llm_model
 from utils.chunker import get_token_count
 from utils.token_tracker import global_token_tracker
 
@@ -45,6 +46,9 @@ class SLMClient:
         return results
 
     def _batch_generate_direct(self, contents: list[str]) -> list[str]:
+        if get_slm_protocol() == "openai":
+            return self._openai_generate(contents)
+
         payload = {
             "contents": contents,
             "max_tokens": 2400,       
@@ -130,3 +134,40 @@ class SLMClient:
                 raise RuntimeError(f"网络异常，重试 {max_retries} 次后彻底失败: {str(e)}")
             except RuntimeError as e:
                 raise e
+
+    def _openai_generate(self, contents: list[str]) -> list[str]:
+        """Call a local OpenAI-compatible server one prompt at a time.
+
+        The OpenAI-compatible endpoint does not accept the legacy RWKV
+        `contents` batch payload, so the local path preserves ordering while
+        using a small bounded worker pool.
+        """
+
+        def generate_one(content: str) -> str:
+            request_headers = dict(self.headers)
+            if self.password:
+                request_headers["Authorization"] = f"Bearer {self.password}"
+            payload = {
+                "model": get_llm_model() or "rwkv7-g1h-1.5b",
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": 2400,
+                "temperature": 0.2,
+                "stream": False,
+            }
+            response = requests.post(self.endpoint, json=payload, headers=request_headers, timeout=180)
+            if response.status_code != 200:
+                raise RuntimeError(f"HTTP {response.status_code} - {response.text[:1000]}")
+            data = response.json()
+            choices = data.get("choices") or []
+            if not choices:
+                raise RuntimeError("本地模型未返回 choices")
+            message = choices[0].get("message") or {}
+            return message.get("content") or choices[0].get("text", "")
+
+        worker_count = min(max(1, get_slm_concurrency()), len(contents))
+        results = [""] * len(contents)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {executor.submit(generate_one, content): index for index, content in enumerate(contents)}
+            for future in concurrent.futures.as_completed(futures):
+                results[futures[future]] = future.result()
+        return results

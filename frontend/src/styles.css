@@ -59,6 +59,242 @@
   --spacing: 0.25rem;
 }
 
+@layer components {
+  .acceptance-metrics {
+    @apply border-border/80 bg-card/95 shadow-sm;
+  }
+
+  .acceptance-metrics-header {
+    @apply flex flex-row items-center justify-between gap-3 border-b border-border/70 px-5 py-3.5;
+  }
+
+  .acceptance-metric-grid {
+    @apply grid grid-cols-2 gap-2 py-4 sm:grid-cols-4 xl:grid-cols-8;
+  }
+
+  .acceptance-metric {
+    @apply flex min-h-16 flex-col justify-between rounded-md bg-muted/45 px-3 py-2;
+  }
+
+  .acceptance-metric span {
+    @apply text-[10px] text-muted-foreground;
+  }
+
+  .acceptance-metric strong {
+    @apply mt-1 font-mono text-base font-semibold tabular-nums text-foreground;
+  }
+
+  .acceptance-comparison {
+    @apply rounded-md border border-primary/20 bg-primary/5 px-3 py-3;
+  }
+
+  .acceptance-comparison-title {
+    @apply text-[11px] font-semibold text-foreground;
+  }
+
+  .acceptance-comparison-grid {
+    @apply mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8;
+  }
+
+  .acceptance-comparison-item {
+    @apply flex flex-col gap-1 rounded bg-background/70 px-2 py-1.5;
+  }
+
+  .acceptance-comparison-item span {
+    @apply text-[10px] text-muted-foreground;
+  }
+
+  .acceptance-comparison-item strong {
+    @apply font-mono text-xs font-semibold tabular-nums text-primary;
+  }
+
+  .acceptance-comparison-note {
+    @apply mt-2 text-[10px] text-muted-foreground;
+  }
+
+  .acceptance-project-comparison {
+    @apply mt-3 overflow-x-auto rounded-md border border-border/70 bg-muted/20 px-3 py-3;
+  }
+
+  .acceptance-project-row {
+    @apply grid min-w-[900px] grid-cols-[1fr_1.2fr_1.8fr_1.8fr] gap-3 border-t border-border/60 py-2 text-[10px] text-muted-foreground;
+  }
+
+  .acceptance-project-row a {
+    @apply text-primary underline underline-offset-2;
+  }
+
+  .acceptance-project-head {
+    @apply border-0 py-1 font-medium;
+  }
+
+  .acceptance-project-note {
+    @apply mt-2 min-w-[900px] text-[10px] text-muted-foreground;
+  }
+
+  .acceptance-audit {
+    @apply mt-3 overflow-hidden rounded-md border border-border/70 bg-card/60 px-3 py-3;
+  }
+
+  .acceptance-audit-summary {
+    @apply mt-2 flex flex-wrap gap-2 text-[10px] font-mono tabular-nums;
+  }
+
+  .audit-pass { @apply text-emerald-600; }
+  .audit-review { @apply text-amber-600; }
+  .audit-fail { @apply text-rose-600; }
+
+  .acceptance-audit-table {
+    @apply mt-2 overflow-x-auto;
+  }
+
+  .acceptance-audit-row {
+    @apply grid min-w-[880px] grid-cols-[0.45fr_0.55fr_1.2fr_4fr] gap-3 border-t border-border/60 py-2 text-[10px] text-muted-foreground;
+  }
+
+  .acceptance-audit-row span:last-child {
+    @apply truncate;
+  }
+
+  .acceptance-audit-head {
+    @apply border-0 py-1 font-medium;
+  }
+
+  .acceptance-baseline-table {
+    @apply overflow-x-auto border-t border-border/70 pt-3;
+  }
+
+  .acceptance-baseline-title {
+    @apply mb-2 flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground;
+  }
+
+  .acceptance-baseline-title-muted {
+    @apply mt-4 border-t border-border/60 pt-3;
+  }
+
+  .acceptance-baseline-row {
+    @apply grid min-w-[620px] grid-cols-[1.2fr_0.9fr_0.9fr_0.8fr_0.8fr_1.5fr] gap-2 border-t border-border/50 py-2 text-[10px] text-muted-foreground;
+  }
+
+  .acceptance-baseline-row-wide {
+    @apply min-w-[980px] grid-cols-[1.45fr_repeat(6,0.82fr)_1.2fr];
+  }
+
+  .acceptance-baseline-row span:not(:first-child) {
+    @apply font-mono tabular-nums;
+  }
+
+  .acceptance-baseline-head {
+    @apply border-0 py-1 font-medium text-muted-foreground;
+  }
+
+  .acceptance-panel {
+    @apply overflow-hidden border-border/80 bg-card/95 shadow-sm;
+  }
+
+  .acceptance-panel-header {
+    @apply flex flex-row items-start justify-between gap-4 border-b border-border/70 px-5 py-4;
+  }
+
+  .acceptance-icon {
+    @apply flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary;
+  }
+
+  .acceptance-summary {
+    @apply grid grid-cols-2 gap-2 border-b border-border/70 py-4 sm:grid-cols-4;
+  }
+
+  .acceptance-summary > div {
+    @apply flex items-baseline gap-2 rounded-md bg-muted/45 px-3 py-2 text-xs text-muted-foreground;
+  }
+
+  .acceptance-summary-number {
+    @apply font-mono text-lg font-semibold tabular-nums text-foreground;
+  }
+
+  .acceptance-toolbar {
+    @apply flex flex-col gap-3 py-4 lg:flex-row lg:items-center lg:justify-between;
+  }
+
+  .acceptance-search-wrap {
+    @apply flex h-8 min-w-0 items-center gap-2 rounded-md border border-border bg-background px-2.5 lg:w-80;
+  }
+
+  .acceptance-search-wrap input {
+    @apply min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground;
+  }
+
+  .acceptance-filters {
+    @apply flex flex-wrap gap-1 rounded-md bg-muted/50 p-1;
+  }
+
+  .acceptance-filters button {
+    @apply rounded px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-background hover:text-foreground;
+  }
+
+  .acceptance-filters button.is-active {
+    @apply bg-background text-foreground shadow-sm;
+  }
+
+  .acceptance-groups {
+    @apply space-y-5;
+  }
+
+  .acceptance-group-heading {
+    @apply flex flex-col gap-1 border-b border-border/60 pb-2 sm:flex-row sm:items-center sm:justify-between;
+  }
+
+  .acceptance-group-label {
+    @apply flex size-5 items-center justify-center rounded bg-foreground text-[10px] font-bold text-background;
+  }
+
+  .acceptance-case-list {
+    @apply divide-y divide-border/60;
+  }
+
+  .acceptance-case {
+    @apply grid items-center gap-3 py-3 lg:grid-cols-[44px_minmax(0,1fr)_120px_auto];
+  }
+
+  .acceptance-case-id {
+    @apply font-mono text-xs font-semibold text-primary;
+  }
+
+  .acceptance-case-status {
+    @apply inline-flex items-center gap-1.5 text-[11px] text-muted-foreground;
+  }
+
+  .acceptance-case-status.is-running {
+    @apply text-amber-700;
+  }
+
+  .acceptance-case-status.is-completed {
+    @apply text-emerald-700;
+  }
+
+  .acceptance-case-status.is-failed {
+    @apply text-rose-700;
+  }
+
+  .acceptance-case-actions {
+    @apply flex items-center justify-end gap-1;
+  }
+
+  @media (max-width: 1023px) {
+    .acceptance-case {
+      @apply items-start;
+    }
+
+    .acceptance-case-status {
+      @apply col-start-2;
+    }
+
+    .acceptance-case-actions {
+      @apply col-start-2 justify-start;
+    }
+  }
+}
+
 @theme inline {
   --font-heading: var(--font-sans);
   --color-foreground: var(--foreground);
@@ -186,6 +422,68 @@
 
   .execution-workspace {
     @apply flex min-h-[420px] flex-1 flex-col overflow-hidden;
+  }
+
+  .execution-event-workspace {
+    @apply overflow-hidden rounded-lg border border-border bg-card;
+  }
+
+  .execution-event-header {
+    @apply flex items-start justify-between gap-4 border-b border-border px-4 py-4 md:px-5;
+  }
+
+  .execution-event-search {
+    @apply h-8 w-56 rounded-md border border-input bg-background px-2.5 text-xs outline-none transition-colors placeholder:text-muted-foreground focus:border-ring focus:ring-2 focus:ring-ring/20;
+  }
+
+  .execution-event-list {
+    @apply divide-y divide-border;
+  }
+
+  .execution-event-row {
+    @apply flex gap-3 px-4 py-4 md:px-5;
+  }
+
+  .execution-event-marker {
+    @apply mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground;
+  }
+
+  .execution-event-marker.is-done {
+    @apply bg-emerald-50 text-emerald-700;
+  }
+
+  .execution-event-marker.is-error {
+    @apply bg-rose-50 text-rose-700;
+  }
+
+  .execution-event-phase {
+    @apply rounded bg-accent px-1.5 py-0.5 text-[10px] text-accent-foreground;
+  }
+
+  .execution-event-details {
+    @apply mt-2 overflow-hidden rounded-md border border-border bg-muted/35;
+  }
+
+  .execution-event-details summary {
+    @apply flex cursor-pointer list-none items-center gap-1 px-2.5 py-1.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground;
+  }
+
+  .execution-event-details summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .execution-event-details[open] summary svg {
+    transform: rotate(180deg);
+  }
+
+  .execution-event-details pre {
+    @apply max-h-96 overflow-auto border-t border-border px-3 py-3 font-mono text-[11px] leading-5 text-foreground/80;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .execution-event-empty {
+    @apply flex items-center gap-2 px-5 py-10 text-sm text-muted-foreground;
   }
 
   .execution-header {

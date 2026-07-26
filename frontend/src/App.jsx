@@ -16,6 +16,7 @@ import {
   Gauge,
   Loader2,
   ListPlus,
+  MessageCircle,
   Play,
   RefreshCw,
   SearchCheck,
@@ -26,10 +27,13 @@ import {
   X,
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
-import { getHistory, getReport, startAnalyze, stopTask, deleteTask, getFiles, deleteFile, getFileContent, uploadFile, getRuntimeConfig, getTokenUsage } from "./api.js";
+  import { getHistory, getReport, getTaskEvents, startAnalyze, sendChat, stopTask, deleteTask, getFiles, deleteFile, getFileContent, uploadFile, getRuntimeConfig, getTokenUsage, getAcceptanceMetrics } from "./api.js";
 import { extractMarkdownOutline, renderMarkdown, reportToMarkdown } from "./markdown.js";
 import { AppSidebar } from "@/components/app-sidebar";
 import { TaskStatusBadge } from "@/components/task-status-badge";
+import ExecutionEventFeed from "@/components/execution-event-feed";
+import AcceptancePanel from "@/components/acceptance-panel";
+import AcceptanceMetrics from "@/components/acceptance-metrics";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -564,6 +568,9 @@ function Composer({
   isAnyRunning,
   isSubmitting,
   asyncEnabled,
+  modelProfiles = [],
+  modelKey = "",
+  onModelChange,
   variant = "compact",
   onOpenFiles,
 }) {
@@ -589,6 +596,25 @@ function Composer({
 
   return (
     <div className={cn("research-composer", isCreateMode && "research-composer-create")}>
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <label htmlFor={isCreateMode ? "new-research-model" : "research-model"} className="shrink-0">
+          本地 RWKV 模型
+        </label>
+        <select
+          id={isCreateMode ? "new-research-model" : "research-model"}
+          value={modelKey}
+          onChange={(event) => onModelChange?.(event.target.value)}
+          disabled={!modelProfiles.length}
+          className="h-8 min-w-44 rounded-md border border-border bg-background px-2 text-xs text-foreground outline-none focus:ring-2 focus:ring-ring disabled:cursor-wait disabled:opacity-60"
+        >
+          {modelProfiles.length ? modelProfiles.map((profile) => (
+            <option key={profile.key} value={profile.key}>
+              {profile.label} · {profile.context_length || 10240} ctx
+            </option>
+          )) : <option value="">正在读取模型配置…</option>}
+        </select>
+        <span>请求将使用 WSL 内部转发，不调用云端 API</span>
+      </div>
       {isCreateMode ? (
         <label htmlFor="new-research-query" className="mb-2 block text-sm font-medium text-foreground">
           研究主题
@@ -1136,6 +1162,9 @@ function LandingState({
   isSubmitting,
   asyncEnabled,
   onAsyncEnabledChange,
+  modelProfiles,
+  modelKey,
+  onModelChange,
   onOpenFiles,
 }) {
   return (
@@ -1154,6 +1183,9 @@ function LandingState({
           isAnyRunning={isAnyRunning}
           isSubmitting={isSubmitting}
           asyncEnabled={asyncEnabled}
+          modelProfiles={modelProfiles}
+          modelKey={modelKey}
+          onModelChange={onModelChange}
           onOpenFiles={onOpenFiles}
         />
 
@@ -1185,6 +1217,156 @@ function LandingState({
   );
 }
 
+function ChatPanel({ modelProfiles, modelKey, onModelChange }) {
+  const [messages, setMessages] = useState([]);
+  const [draft, setDraft] = useState("");
+  const [isSending, setIsSending] = useState(false);
+
+  const activeProfile = modelProfiles.find((profile) => profile.key === modelKey);
+
+  async function submitMessage() {
+    const content = draft.trim();
+    if (!content || isSending || !modelKey) return;
+
+    const userMessage = { role: "user", content };
+    const nextMessages = [...messages, userMessage];
+    setMessages(nextMessages);
+    setDraft("");
+    setIsSending(true);
+
+    try {
+      const response = await sendChat(nextMessages, modelKey);
+      const assistantMessage = response.message || { role: "assistant", content: "" };
+      setMessages((current) => [...current, assistantMessage]);
+    } catch (reason) {
+      setMessages((current) => [
+        ...current,
+        { role: "error", content: `模型请求失败：${reason.message}` },
+      ]);
+    } finally {
+      setIsSending(false);
+    }
+  }
+
+  function handleKeyDown(event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submitMessage();
+    }
+  }
+
+  return (
+    <section className="mx-auto flex min-h-[calc(100vh-7rem)] w-full max-w-4xl flex-col">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-4">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <MessageCircle className="size-4 text-primary" />
+            本地模型聊天
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            直接调用 WSL 内的 RWKV，不经过检索编排；适合先测试模型本身的对话能力。
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={modelKey}
+            onChange={(event) => onModelChange(event.target.value)}
+            disabled={!modelProfiles.length || isSending}
+            aria-label="选择聊天模型"
+            className="h-8 min-w-48 rounded-md border border-border bg-background px-2 text-xs text-foreground outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
+          >
+            {modelProfiles.length ? modelProfiles.map((profile) => (
+              <option key={profile.key} value={profile.key}>
+                {profile.label} · {profile.context_length || 10240} ctx
+              </option>
+            )) : <option value="">正在读取模型配置…</option>}
+          </select>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 rounded-md"
+            disabled={!messages.length || isSending}
+            onClick={() => setMessages([])}
+          >
+            清空
+          </Button>
+        </div>
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col py-5">
+        <div className="flex-1 space-y-3 overflow-y-auto pr-1">
+          {!messages.length ? (
+            <div className="flex min-h-64 flex-col items-center justify-center rounded-md border border-dashed border-border px-6 text-center">
+              <MessageCircle className="size-7 text-muted-foreground/50" />
+              <p className="mt-3 text-sm font-medium">开始一轮本地对话</p>
+              <p className="mt-1 max-w-md text-xs leading-5 text-muted-foreground">
+                例如：解释一下 RWKV 和 Transformer 的主要区别，或直接输入你想测试的提示词。
+              </p>
+              <span className="mt-3 font-mono text-[10px] text-muted-foreground/70">
+                {activeProfile?.model || "等待模型配置"}
+              </span>
+            </div>
+          ) : messages.map((message, index) => (
+            <div
+              key={`${message.role}-${index}`}
+              className={cn(
+                "flex",
+                message.role === "user" ? "justify-end" : "justify-start",
+              )}
+            >
+              <div
+                className={cn(
+                  "max-w-[85%] whitespace-pre-wrap rounded-md px-3 py-2.5 text-sm leading-6",
+                  message.role === "user"
+                    ? "bg-primary text-primary-foreground"
+                    : message.role === "error"
+                      ? "border border-rose-200 bg-rose-50 text-rose-700"
+                      : "border border-border bg-muted/45 text-foreground",
+                )}
+              >
+                {message.content}
+              </div>
+            </div>
+          ))}
+          {isSending ? (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              {activeProfile?.label || "本地模型"} 正在生成…
+            </div>
+          ) : null}
+        </div>
+
+        <div className="mt-5 rounded-md border border-border bg-card p-3">
+          <Textarea
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="输入消息，Enter 发送，Shift + Enter 换行"
+            aria-label="输入聊天消息"
+            rows={3}
+            disabled={isSending || !modelProfiles.length}
+            className="min-h-20 resize-none border-0 px-0 py-0 text-sm shadow-none focus-visible:ring-0"
+          />
+          <div className="mt-3 flex items-center justify-between border-t border-border pt-3">
+            <span className="text-[11px] text-muted-foreground">
+              不会触发联网检索，也不会写入研究任务历史
+            </span>
+            <Button
+              size="sm"
+              className="h-8 rounded-md"
+              disabled={isSending || !draft.trim() || !modelProfiles.length}
+              onClick={submitMessage}
+            >
+              {isSending ? <Loader2 className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />}
+              发送
+            </Button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export function App() {
   const [history, setHistory] = useState([]);
   const [tokenUsage, setTokenUsage] = useState({ tasks: {} });
@@ -1195,10 +1377,23 @@ export function App() {
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isQueueOpen, setIsQueueOpen] = useState(false);
+  const [executionEvents, setExecutionEvents] = useState([]);
+  const [acceptanceLinks, setAcceptanceLinks] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("rwkv_acceptance_links") || "{}");
+    } catch {
+      return {};
+    }
+  });
+  const [acceptanceMetrics, setAcceptanceMetrics] = useState(null);
+  const [modelProfiles, setModelProfiles] = useState([]);
+  const [modelKey, setModelKey] = useState(() => localStorage.getItem("rwkv_model_key") || "local_7b");
+  const [chatOpen, setChatOpen] = useState(false);
   const mainScrollRef = useRef(null);
   const reportSurfaceRef = useRef(null);
   const asyncPreferenceLoadedRef = useRef(false);
   const prevStatusRef = useRef(null);
+  const eventCursorRef = useRef(0);
 
   const [asyncEnabled, setAsyncEnabled] = useState(() => {
     try {
@@ -1260,6 +1455,7 @@ export function App() {
       const items = await getHistory();
       setHistory(items);
       setTokenUsage(await getTokenUsage());
+        setAcceptanceMetrics(await getAcceptanceMetrics());
 
       const nextId = (selectFirst || !activeId) ? items[0]?.id : activeId;
 
@@ -1278,8 +1474,20 @@ export function App() {
     try {
       setHistory(await getHistory());
       setTokenUsage(await getTokenUsage());
+        setAcceptanceMetrics(await getAcceptanceMetrics());
     } catch {}
   }, []);
+
+  const pollExecutionEvents = useCallback(async () => {
+    if (!activeId) return;
+    try {
+      const payload = await getTaskEvents(activeId, eventCursorRef.current);
+      if (payload.events?.length) {
+        eventCursorRef.current = payload.next_seq || eventCursorRef.current;
+        setExecutionEvents((current) => [...current, ...payload.events]);
+      }
+    } catch {}
+  }, [activeId]);
 
   useEffect(() => {
     localStorage.setItem("rwkv_task_queue", JSON.stringify(taskQueue));
@@ -1289,16 +1497,34 @@ export function App() {
   }, [taskQueue]);
 
   useEffect(() => {
+    localStorage.setItem("rwkv_acceptance_links", JSON.stringify(acceptanceLinks));
+  }, [acceptanceLinks]);
+
+  useEffect(() => {
     if (asyncPreferenceLoadedRef.current) {
       localStorage.setItem("rwkv_async_parallel_enabled", JSON.stringify(asyncEnabled));
     }
   }, [asyncEnabled]);
 
   useEffect(() => {
+    if (modelKey) localStorage.setItem("rwkv_model_key", modelKey);
+  }, [modelKey]);
+
+  useEffect(() => {
     async function loadRuntimeConfig() {
       try {
         const config = await getRuntimeConfig();
         const saved = localStorage.getItem("rwkv_async_parallel_enabled");
+
+        if (Array.isArray(config.models) && config.models.length) {
+          setModelProfiles(config.models);
+          const savedModel = localStorage.getItem("rwkv_model_key");
+          const available = config.models.some((profile) => profile.key === savedModel);
+          const defaultModel = config.models.some((profile) => profile.key === config.default_model)
+            ? config.default_model
+            : config.models[0].key;
+          setModelKey(available ? savedModel : defaultModel);
+        }
 
         if (saved === null && typeof config.slm_async_enabled === "boolean") {
           asyncPreferenceLoadedRef.current = true;
@@ -1315,6 +1541,16 @@ export function App() {
     const timer = setInterval(pollHistory, 3000);
     return () => clearInterval(timer);
   }, [pollHistory]);
+
+  useEffect(() => {
+    eventCursorRef.current = 0;
+    setExecutionEvents([]);
+    if (!activeId) return undefined;
+
+    pollExecutionEvents();
+    const timer = setInterval(pollExecutionEvents, 1200);
+    return () => clearInterval(timer);
+  }, [activeId, pollExecutionEvents]);
 
   useEffect(() => {
     if (activeTaskItem) {
@@ -1401,6 +1637,14 @@ export function App() {
   }, []);
 
   function handleNewRun() {
+    setChatOpen(false);
+    setActiveId(null);
+    setReport(null);
+    setError("");
+  }
+
+  function handleOpenChat() {
+    setChatOpen(true);
     setActiveId(null);
     setReport(null);
     setError("");
@@ -1425,9 +1669,18 @@ export function App() {
     try {
       const response = await startAnalyze({
         query: taskObj.query,
+        model_key: taskObj.modelKey || modelKey,
         queued_at: taskObj.queuedAt,
         slm_async_enabled: asyncEnabled,
+        acceptance_case_id: taskObj.caseId || null,
       });
+
+      if (taskObj.caseId && response.task_id) {
+        setAcceptanceLinks((current) => ({
+          ...current,
+          [taskObj.caseId]: { taskId: response.task_id, query: taskObj.query, submittedAt: new Date().toISOString() },
+        }));
+      }
 
       toast.success("任务已提交");
       await handleNewTaskSubmitted(response.task_id);
@@ -1438,8 +1691,8 @@ export function App() {
     }
   }
 
-  async function handleQuerySubmit(newQuery) {
-    const taskObj = { query: newQuery, queuedAt: formatCurrentTime() };
+  async function handleQuerySubmit(newQuery, caseId = null) {
+    const taskObj = { query: newQuery, caseId, modelKey, queuedAt: formatCurrentTime() };
 
     if (!asyncEnabled && (isAnyRunning || isSubmitting)) {
       setTaskQueue((current) => [...current, taskObj]);
@@ -1496,7 +1749,7 @@ export function App() {
     setAsyncEnabled(value);
   }
 
-  const currentTitle = activeId
+  const currentTitle = chatOpen ? "本地模型聊天" : activeId
     ? getTaskLabel(activeTaskItem)
     : "准备新的研究任务";
 
@@ -1510,6 +1763,7 @@ export function App() {
           onKeywordChange={setKeyword}
           onSelect={selectReport}
           onNewRun={handleNewRun}
+          onOpenChat={handleOpenChat}
           onStop={handleStopTask}
           onDelete={handleDeleteTask}
         />
@@ -1539,7 +1793,16 @@ export function App() {
                 >
                   <RefreshCw className="size-4" />
                 </Button>
-                {report ? (
+                {chatOpen ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mr-1 rounded-md"
+                    onClick={handleNewRun}
+                  >
+                    返回研究
+                  </Button>
+                ) : report ? (
                   <Button size="sm" className="ml-1 rounded-md" onClick={copyMarkdown}>
                     <Copy className="size-4" />
                     <span className="hidden sm:inline">复制报告</span>
@@ -1551,6 +1814,14 @@ export function App() {
 
           <main ref={mainScrollRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
             <div className="mx-auto flex min-h-full w-full max-w-[1680px] flex-col gap-5 px-5 py-5 md:px-8 lg:px-10">
+              {chatOpen ? (
+                <ChatPanel
+                  modelProfiles={modelProfiles}
+                  modelKey={modelKey}
+                  onModelChange={setModelKey}
+                />
+              ) : (
+                <>
               {error ? (
                 <Card className="border-rose-200 bg-rose-50 text-rose-700">
                   <CardContent className="px-4 py-3 text-sm">{error}</CardContent>
@@ -1567,7 +1838,9 @@ export function App() {
                 />
               ) : null}
 
-              {activeId && activeTaskItem?.status === "running" ? (
+              {activeId && executionEvents.length ? (
+                <ExecutionEventFeed events={executionEvents} />
+              ) : activeId && activeTaskItem?.status === "running" ? (
                 <ExecutionFeed
                   progress={activeTaskItem.progress}
                   onStop={() => handleStopTask(activeTaskItem.id)}
@@ -1575,12 +1848,24 @@ export function App() {
                 />
               ) : null}
 
+                <AcceptanceMetrics data={acceptanceMetrics} />
+
+              <AcceptancePanel
+                history={history}
+                links={acceptanceLinks}
+                onRun={(test) => handleQuerySubmit(test.prompt, test.id)}
+                onOpen={(taskId) => selectReport(taskId)}
+              />
+
               {!activeId ? (
                 <LandingState
                   onSubmit={handleQuerySubmit}
                   isAnyRunning={isAnyRunning}
                   isSubmitting={isSubmitting}
                   asyncEnabled={asyncEnabled}
+                  modelProfiles={modelProfiles}
+                  modelKey={modelKey}
+                  onModelChange={setModelKey}
                   onAsyncEnabledChange={handleAsyncEnabledChange}
                   onOpenFiles={() => setFileManagerOpen(true)}
                 />
@@ -1611,6 +1896,8 @@ export function App() {
                   </div>
                 </div>
               ) : null}
+                </>
+              )}
             </div>
           </main>
 
@@ -1622,6 +1909,9 @@ export function App() {
                   isAnyRunning={isAnyRunning}
                   isSubmitting={isSubmitting}
                   asyncEnabled={asyncEnabled}
+                  modelProfiles={modelProfiles}
+                  modelKey={modelKey}
+                  onModelChange={setModelKey}
                 />
               </div>
             </div>

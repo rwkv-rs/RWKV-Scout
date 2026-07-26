@@ -63,15 +63,41 @@ class Analyzer:
             {"role": "system", "content": sys_prompt},
             {"role": "user", "content": f"总体目标: {user_query}\n当前环境状态:\n{env_context}"}
         ]
+        local_max_tokens = None
+        if self.llm.provider == "local":
+            # G1h is used as a routing model here. Keep the contract compact
+            # so the model cannot spend its whole budget on free-form prose.
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Return exactly one JSON object and no explanation. "
+                        "Keys: intent_mode, refined_query, missing_information, next_phase. "
+                        "intent_mode must be BROAD_ANALYSIS or DEEP_RESEARCH; "
+                        "next_phase must be DISCOVERY, EXTRACTION, or SYNTHESIS."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Goal: {user_query}\nEnvironment summary:\n{env_context[:2400]}",
+                },
+            ]
+            local_max_tokens = 256
         
         try:
-            resp = self.llm.client.chat.completions.create(
-                model=self.llm.model, messages=messages
-            ).choices[0].message.content
-            
-            match = re.search(r'\{.*\}', resp, re.DOTALL)
-            clean_json = match.group(0) if match else resp
-            return json.loads(clean_json)
+            resp = self.llm.chat_completion(messages, max_tokens=local_max_tokens).content
+            raw = resp.split("</think>")[-1].strip()
+            decoder = json.JSONDecoder()
+            for start, char in enumerate(raw):
+                if char != "{":
+                    continue
+                try:
+                    candidate, _ = decoder.raw_decode(raw[start:])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(candidate, dict):
+                    return candidate
+            raise ValueError("local analyzer did not return a complete JSON object")
         except Exception as e:
             return {
                 "intent_mode": "BROAD_ANALYSIS",

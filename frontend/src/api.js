@@ -26,11 +26,19 @@ export async function getHistory() {
     title: item.title || item.task_id || item.id,
     query: item.query || "",
     status: item.status || "ready",
+    acceptance_case_id: item.acceptance_case_id || "",
     progress: item.progress || "",
     updated_at: item.timestamp || item.updated_at || "-",
     queued_at: item.queued_at || "",  // ✨ 这里就是映射过来的排队时间
     path: item.result_dir || item.path || ""
   }));
+}
+
+export async function getTaskEvents(id, after = 0) {
+  const payload = await apiFetch(
+    `/frontend-api/history/${encodeURIComponent(id)}/events?after=${after}`,
+  );
+  return payload.data || { events: [], next_seq: after };
 }
 
 export async function getReport(id) {
@@ -47,6 +55,16 @@ export async function getReport(id) {
   for (const record of records) {
     if (record.record_type === "global_citation_map") {
       report.sources = record.data || [];
+    } else if (record.record_type === "retrieval_result") {
+      report.markdown = record.answer || record.data?.answer || "";
+      report.sources = (record.data?.citation_refs || []).map((item, index) => ({
+        index: index + 1,
+        ref_id: item.ref_id,
+        title: item.title,
+        url: item.url,
+        source: item.source || "web",
+      }));
+      report.retrieval = record;
     } else if (record.record_type === "report_node") {
       report.nodes.push({
         id: record.node_id,
@@ -69,6 +87,15 @@ export async function startAnalyze(body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export async function sendChat(messages, modelKey, maxTokens = 1024) {
+  const payload = await apiFetch("/frontend-api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, model_key: modelKey, max_tokens: maxTokens }),
+  });
+  return payload.data || {};
 }
 
 export async function getRuntimeConfig() {
@@ -136,4 +163,9 @@ export async function uploadFile(fileList) {
 export async function getTokenUsage() {
   const payload = await apiFetch("/frontend-api/tokens");
   return payload.data || { tasks: {} };
+}
+
+export async function getAcceptanceMetrics() {
+  const payload = await apiFetch("/frontend-api/metrics/acceptance");
+  return payload.data || null;
 }

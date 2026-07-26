@@ -60,8 +60,37 @@ def get_llm_model() -> str:
     provider = get_llm_provider()
     return LLM_ENDPOINTS.get(provider, {}).get("model", "")
 
+def is_local_provider(provider: str | None = None) -> bool:
+    """Return whether a provider points at one of the local RWKV servers."""
+    return (provider or get_llm_provider()).startswith("local")
+
+def get_model_profiles() -> list[dict]:
+    """Expose only the local model choices that the frontend may select."""
+    profiles = []
+    for key, value in LLM_ENDPOINTS.items():
+        if not isinstance(value, dict) or not value.get("ui_visible"):
+            continue
+        profiles.append({
+            "key": key,
+            "label": value.get("label", key),
+            "base_url": value.get("base_url", ""),
+            "model": value.get("model", ""),
+            "context_length": value.get("context_length", 10240),
+        })
+    return profiles
+
+def get_model_profile(key: str | None = None) -> dict:
+    selected = key or get_llm_provider()
+    profile = LLM_ENDPOINTS.get(selected)
+    if not isinstance(profile, dict) or not profile.get("ui_visible"):
+        raise ValueError(f"Unknown local model profile: {selected}")
+    return profile
+
 def get_slm_endpoint() -> str:
     return override_slm_endpoint.get() or SLM_CONFIG.get("endpoint", "")
+
+def get_slm_protocol() -> str:
+    return str(SLM_CONFIG.get("protocol", "rwkv_lightning"))
 
 def get_slm_password() -> str:
     return override_slm_password.get() or SLM_CONFIG.get("password", "")

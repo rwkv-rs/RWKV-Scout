@@ -2,19 +2,31 @@
 import os
 import shutil
 import json
+import sys
 import uvicorn
 import uuid
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Form
-from fastapi.responses import PlainTextResponse, FileResponse
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Form, HTTPException
+from fastapi.responses import PlainTextResponse, FileResponse, HTMLResponse
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Any, Optional, List
 import config
 from agent.orchestrator import Orchestrator
 from utils.task_manager import record_task, get_all_tasks, request_stop, delete_task, is_task_stopped
 from utils.token_tracker import global_token_tracker, current_task_id
+from utils.task_events import get_task_events
+from utils.harness_fixtures import fixture_payload
+from utils.acceptance_metrics import compute_acceptance_metrics
 from main import setup_env
 import glob
+
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 setup_env()
 
@@ -25,6 +37,8 @@ app = FastAPI(title="RWKV-ECRA Agent API", description="支持前端隔离请求
 # =====================================
 class AnalyzeRequest(BaseModel):
     query: str
+    acceptance_case_id: Optional[str] = None
+    model_key: Optional[str] = None
     llm_api_key: Optional[str] = None
     llm_base_url: Optional[str] = None
     llm_provider: Optional[str] = None
@@ -32,6 +46,11 @@ class AnalyzeRequest(BaseModel):
     slm_password: Optional[str] = None
     queued_at: Optional[str] = None  
     slm_async_enabled: Optional[bool] = None
+
+class ChatRequest(BaseModel):
+    messages: List[dict[str, Any]]
+    model_key: Optional[str] = None
+    max_tokens: int = 1024
 
 # =====================================
 # 2. 基础系统接口 (上传与清理)
@@ -168,15 +187,20 @@ def background_analyze(task_id: str, req: AnalyzeRequest, task_output_dir: str):
     if req.slm_endpoint: config.override_slm_endpoint.set(req.slm_endpoint)
     if req.slm_password is not None: config.override_slm_password.set(req.slm_password)
     if req.slm_async_enabled is not None: config.override_slm_async_enabled.set(req.slm_async_enabled)
+    if req.model_key:
+        profile = config.get_model_profile(req.model_key)
+        config.override_llm_provider.set(req.model_key)
+        config.override_llm_url.set(profile["base_url"])
+        config.override_slm_endpoint.set(profile["base_url"].rstrip("/") + "/chat/completions")
 
     try:
         agent = Orchestrator()
         result = agent.run(user_query=req.query, task_id=task_id)
         if not is_task_stopped(task_id):
-            record_task(task_id, req.query, "completed", task_output_dir)
+            record_task(task_id, req.query, "completed", task_output_dir, acceptance_case_id=req.acceptance_case_id)
     except Exception as e:
         if not is_task_stopped(task_id):
-            record_task(task_id, req.query, "failed", task_output_dir, str(e))
+            record_task(task_id, req.query, "failed", task_output_dir, str(e), acceptance_case_id=req.acceptance_case_id)
     finally:
         config.override_llm_key.set(None)
         config.override_llm_url.set(None)
@@ -191,6 +215,8 @@ def get_frontend_config():
     return {
         "code": 200,
         "data": {
+            "default_model": config.DEFAULT_LLM_PROVIDER,
+            "models": config.get_model_profiles(),
             "slm_async_enabled": config.get_slm_async_enabled(),
             "slm_concurrency": config.get_slm_concurrency(),
             "slm_async_parallelism": config.get_slm_async_parallelism(),
@@ -198,13 +224,65 @@ def get_frontend_config():
         }
     }
 
+@app.post("/frontend-api/chat")
+def chat_endpoint(req: ChatRequest):
+    """Direct local-model chat for interactive frontend testing."""
+    if not req.messages:
+        raise HTTPException(status_code=400, detail="messages cannot be empty")
+
+    model_key = req.model_key or config.DEFAULT_LLM_PROVIDER
+    provider_token = config.override_llm_provider.set(model_key)
+    url_token = None
+    slm_token = None
+    try:
+        profile = config.get_model_profile(model_key)
+        url_token = config.override_llm_url.set(profile["base_url"])
+        slm_token = config.override_slm_endpoint.set(profile["base_url"].rstrip("/") + "/chat/completions")
+        from clients.llm_client import LLMClient
+
+        message = LLMClient().chat_completion(
+            messages=req.messages,
+            max_tokens=max(1, min(int(req.max_tokens), 4096)),
+        )
+        return {
+            "code": 200,
+            "data": {
+                "model_key": model_key,
+                "model": profile["model"],
+                "message": {
+                    "role": getattr(message, "role", "assistant"),
+                    "content": getattr(message, "content", "") or "",
+                },
+            },
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"local model request failed: {exc}") from exc
+    finally:
+        if slm_token is not None:
+            config.override_slm_endpoint.reset(slm_token)
+        if url_token is not None:
+            config.override_llm_url.reset(url_token)
+        config.override_llm_provider.reset(provider_token)
+
+
+@app.get("/frontend-api/harness-fixtures/{variant}")
+def get_harness_fixture(variant: str):
+    return HTMLResponse(fixture_payload(variant)["html"])
+
+@app.get("/frontend-api/metrics/acceptance")
+def get_acceptance_metrics():
+    return {"code": 200, "data": compute_acceptance_metrics(get_all_tasks())}
+
+
 @app.post("/api/v1/analyze")
 @app.post("/frontend-api/analyze")
 def analyze_endpoint(req: AnalyzeRequest, bg_tasks: BackgroundTasks):
     task_id = f"TASK_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     task_output_dir = os.path.join(config.DATA_PIPELINE["output_directory"], task_id)
     
-    record_task(task_id, req.query, "running", task_output_dir, queued_at=req.queued_at)
+    record_task(task_id, req.query, "running", task_output_dir, queued_at=req.queued_at, acceptance_case_id=req.acceptance_case_id)
     bg_tasks.add_task(background_analyze, task_id, req, task_output_dir)
     
     return {
@@ -220,6 +298,15 @@ def analyze_endpoint(req: AnalyzeRequest, bg_tasks: BackgroundTasks):
 @app.get("/frontend-api/history")
 def get_task_history():
     return {"code": 200, "data": get_all_tasks()}
+
+@app.get("/frontend-api/history/{task_id}/events")
+def get_task_events_endpoint(task_id: str, after: int = 0):
+    events = get_task_events(task_id, max(0, after))
+    public_events = []
+    for event in events:
+        public_events.append(event)
+    next_seq = public_events[-1]["seq"] if public_events else max(0, after)
+    return {"code": 200, "data": {"events": public_events, "next_seq": next_seq}}
 
 @app.post("/api/v1/analyze/{task_id}/stop")
 @app.post("/frontend-api/analyze/{task_id}/stop")
@@ -266,7 +353,8 @@ def get_task_report(task_id: str):
         with open(target, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
-                    report_data.append(json.loads(line.strip()))
+                    record = json.loads(line.strip())
+                    report_data.append(record)
         return {"code": 200, "data": report_data}
         
     if md_candidates:

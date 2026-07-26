@@ -12,6 +12,13 @@ from typing import Dict, Set
 
 from agent.analyzer import Analyzer
 from agent.planner import Planner
+from agent.retrieval_synthesis import synthesize_retrieval_answer
+from agent.retrieval_loop import (
+    compact_observation,
+    execute_parallel_candidates,
+    generate_query_candidates,
+    merge_retrieval_results,
+)
 from utils.tracker import EventTracker
 from clients.slm_client import SLMClient
 from config import TRACKING, DATA_PIPELINE, get_slm_async_batch_wait_ms, get_slm_async_enabled, get_slm_async_parallelism, get_slm_concurrency
@@ -19,9 +26,14 @@ from tools.registry import ToolRegistry
 from utils.chunker import get_token_count
 from utils.token_tracker import global_token_tracker
 from utils.task_manager import is_task_stopped, update_task_progress
+from utils.task_events import append_task_event
 from workflows.report_flow import generate_final_aggregate_reports
 import tools.static_ops 
 import tools.web_search
+import tools.weather
+import tools.chat
+import tools.paper_search
+import tools.web_search_keyless
 import workflows.map_reduce_flow
 import workflows.memory_query_flow
 import workflows.report_flow
@@ -280,6 +292,143 @@ class Orchestrator:
         self.analyzer = Analyzer()
         self.planner = Planner()
 
+    def _retrieval_context(self) -> dict:
+        return {
+            "original_goal": self.state.user_query,
+            "path_to_id": self.state.path_to_id,
+            "id_to_path": self.state.id_to_path,
+            "working_memory": self.state.working_memory,
+            "tracker": self.tracker,
+            "agent_state": None,
+            "task_id": self.state.task_id,
+            "slm_scheduler": GLOBAL_SLM_INPUT_SCHEDULER,
+        }
+
+    def _run_rwkv_search_round(
+        self,
+        user_query: str,
+        action: str,
+        args: dict,
+        *,
+        step: int,
+        round_name: str,
+        previous_query: str = "",
+        observation: dict | None = None,
+    ) -> tuple[dict, list[str], dict]:
+        plan = generate_query_candidates(
+            self.analyzer.llm,
+            user_query,
+            action=action,
+            scope=str(args.get("scope") or ""),
+            observation=observation,
+            previous_query=previous_query,
+            max_candidates=3 if not previous_query else 2,
+        )
+        candidates = list(plan.get("queries") or [user_query])
+        append_task_event(
+            self.state.task_id,
+            "query_candidates",
+            step=step,
+            phase="DISCOVERY",
+            round=round_name,
+            action=action,
+            source=plan.get("source"),
+            queries=candidates,
+            raw_model_output=plan.get("raw_model_output", ""),
+            planner_error=plan.get("error", ""),
+        )
+        for candidate in candidates:
+            append_task_event(
+                self.state.task_id,
+                "tool_call",
+                step=step,
+                phase="DISCOVERY",
+                action=action,
+                args={**args, "query": candidate},
+                round=round_name,
+                query_source=plan.get("source"),
+            )
+        rows = execute_parallel_candidates(action, candidates, args, self._retrieval_context())
+        for candidate, value in rows:
+            append_task_event(
+                self.state.task_id,
+                "tool_result",
+                step=step,
+                phase="DISCOVERY",
+                action=action,
+                result=json.dumps(value, ensure_ascii=False, indent=2),
+                real_network=bool(value.get("real_network", True)),
+                round=round_name,
+                query=candidate,
+            )
+        merged = merge_retrieval_results(
+            user_query,
+            action,
+            rows,
+            scope=str(args.get("scope") or ""),
+        )
+        append_task_event(
+            self.state.task_id,
+            "candidate_merge",
+            step=step,
+            phase="DISCOVERY",
+            round=round_name,
+            action=action,
+            data={
+                "query_count": len(candidates),
+                "queries": candidates,
+                "result_count": merged.get("count", 0),
+                "round_count": merged.get("round_count", 1),
+            },
+        )
+        return merged, candidates, plan
+
+    def _finish_rwkv_retrieval(self, user_query: str, action: str, data: dict, step: int) -> str:
+        append_task_event(
+            self.state.task_id,
+            "synthesis_start",
+            step=step,
+            phase="SYNTHESIS",
+            action=action,
+            evidence_count=len(data.get("results") or []),
+            round_count=data.get("round_count", 1),
+        )
+        synthesis = synthesize_retrieval_answer(user_query, data, llm=self.analyzer.llm)
+        self.state.is_finished = True
+        self.state.final_result = synthesis.get("content") or ""
+        append_task_event(
+            self.state.task_id,
+            "synthesis",
+            step=step,
+            phase="SYNTHESIS",
+            content=self.state.final_result,
+            mode=synthesis.get("mode"),
+            evidence_count=synthesis.get("evidence_count", 0),
+            citation_refs=synthesis.get("citation_refs") or [],
+        )
+        append_task_event(
+            self.state.task_id,
+            "final",
+            status="completed",
+            content=self.state.final_result,
+            action=action,
+            mode=synthesis.get("mode"),
+            round_count=data.get("round_count", 1),
+        )
+        report_path = os.path.join(self.state.task_output_dir, "retrieval_report.jsonl")
+        with open(report_path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "record_type": "retrieval_result",
+                "task_id": self.state.task_id,
+                "query": user_query,
+                "action": action,
+                "real_network": bool(data.get("real_network", True)),
+                "answer": self.state.final_result,
+                "answer_mode": synthesis.get("mode"),
+                "data": data,
+            }, ensure_ascii=False) + "\n")
+        return self.state.final_result
+
     def run(self, user_query: str, task_id: str = None) -> str:
         self.state.task_id = task_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.state.task_output_dir = os.path.join(DATA_PIPELINE.get("output_directory", "./data/output"), self.state.task_id)
@@ -287,6 +436,7 @@ class Orchestrator:
         
         self.tracker.track("User_Input", input_data=user_query, output_data=None)
         self.state.user_query = user_query
+        append_task_event(self.state.task_id, "user_input", content=user_query)
         
         debug_dir = DATA_PIPELINE.get("debug_directory", "./data/debug_slm")
         os.makedirs(debug_dir, exist_ok=True)
@@ -310,14 +460,22 @@ class Orchestrator:
             "compress_working_memory": "执行工作记忆压缩",
             "generate_final_aggregate_reports": "排版聚合最终研报",
             "execute_web_search": "执行互联网检索",
+            "search_papers": "检索论文数据源",
             "finish_task": "任务逻辑闭环退出",
             "none": "思考下一步方向"
         }
 
+        step_count = 0
         progress_log = []
         def push_progress(msg: str):
             progress_log.append(msg)
             update_task_progress(self.state.task_id, "\n".join(progress_log))
+            append_task_event(
+                self.state.task_id,
+                "progress",
+                step=step_count,
+                message=msg,
+            )
 
         push_progress("🚀 正在初始化环境，构建工作区内存与检索本地文件...")
 
@@ -334,177 +492,370 @@ class Orchestrator:
             self.state.last_feedback = "目录为空。"
             push_progress(f"环境就绪：本地工作区目录为空。\n")
             
-        step_count = 0
-        MAX_STEPS = 40 
-        
-        while step_count < MAX_STEPS:
-            if is_task_stopped(self.state.task_id):
-                self.state.last_feedback = "任务已被用户手动终止。"
-                self.state.is_finished = True
-                self.state.final_result = "执行中止: 任务已被手动停止。"
-                push_progress("\n⚠️ 任务被手动中止。")
-                return self.state.final_result
-                
-            step_count += 1
+        # Scholarly and live-web requests have a deterministic, auditable
+        # retrieval path.  Keep the local RWKV analysis as a trace signal, but
+        # do not make a network retrieval wait on the legacy file-research
+        # loop or on a second free-form planner generation.
+        direct_plan = self.planner.plan_next_action(user_query, {}, "", "DISCOVERY")
+        if direct_plan.get("action") == "multi_hop_research":
+            first_action = str((direct_plan.get("args") or {}).get("first_action") or "search_web_keyless")
+            scope = str((direct_plan.get("args") or {}).get("scope") or "paper")
+            append_task_event(
+                self.state.task_id,
+                "plan",
+                step=1,
+                phase="DISCOVERY",
+                action="multi_hop_research",
+                args={"first_action": first_action, "scope": scope},
+                router=direct_plan.get("router", "static_multi_hop_cue"),
+            )
+            append_task_event(
+                self.state.task_id,
+                "planner_start",
+                step=1,
+                phase="DISCOVERY",
+                query=user_query,
+                router_hint=direct_plan.get("router", "static_multi_hop_cue"),
+            )
+            first_args = {
+                "scope": scope,
+                "max_results": 8,
+            } if first_action == "search_papers" else {
+                "max_results": 6,
+                "fetch_pages": 3,
+            }
+            first_data, first_queries, _ = self._run_rwkv_search_round(
+                user_query,
+                first_action,
+                first_args,
+                step=1,
+                round_name="initial",
+            )
+            followup_action = (
+                "search_web_keyless"
+                if any(term in user_query.lower() for term in ["\u673a\u6784", "institution", "\u5b98\u65b9\u6570\u636e", "\u4ea4\u96c6"])
+                else first_action
+            )
+            followup_args = {
+                "scope": scope,
+                "max_results": 8,
+            } if followup_action == "search_papers" else {
+                "max_results": 6,
+                "fetch_pages": 3,
+            }
+            append_task_event(
+                self.state.task_id,
+                "planner_start",
+                step=2,
+                phase="DISCOVERY",
+                query=user_query,
+                router_hint="rwkv_followup_from_initial_evidence",
+            )
+            second_data, second_queries, _ = self._run_rwkv_search_round(
+                user_query,
+                followup_action,
+                followup_args,
+                step=2,
+                round_name="followup",
+                previous_query=first_queries[0] if first_queries else user_query,
+                observation=first_data,
+            )
+            merged = merge_retrieval_results(
+                user_query,
+                followup_action,
+                [
+                    (first_queries[0] if first_queries else user_query, first_data),
+                    (second_queries[0] if second_queries else user_query, second_data),
+                ],
+                scope=scope,
+            )
+            merged["round_count"] = 2
+            merged["candidate_queries"] = [*first_queries, *second_queries]
+            append_task_event(
+                self.state.task_id,
+                "multi_hop_merge",
+                step=2,
+                phase="DISCOVERY",
+                data={
+                    "round_count": 2,
+                    "first_queries": first_queries,
+                    "second_queries": second_queries,
+                    "result_count": merged.get("count", 0),
+                },
+            )
+            return self._finish_rwkv_retrieval(user_query, followup_action, merged, 3)
+
+        if direct_plan.get("action") in {"search_papers", "search_web_keyless"}:
+            action = direct_plan["action"]
+            args = dict(direct_plan.get("args") or {})
+            append_task_event(
+                self.state.task_id,
+                "planner_start",
+                step=1,
+                phase="DISCOVERY",
+                query=user_query,
+                router_hint=direct_plan.get("router", "local_rwkv_candidate_search"),
+            )
+            append_task_event(
+                self.state.task_id,
+                "plan",
+                step=1,
+                phase="DISCOVERY",
+                action=action,
+                args=args,
+                router=direct_plan.get("router", "local_rwkv_candidate_search"),
+            )
+            data, _, _ = self._run_rwkv_search_round(
+                user_query,
+                action,
+                args,
+                step=1,
+                round_name="initial",
+            )
+            return self._finish_rwkv_retrieval(user_query, action, data, 2)
+
+        # Removed legacy one-shot retrieval branch.  Search actions are handled
+        # only by the RWKV candidate/multi-hop path above.
+        if direct_plan.get("action") == "__legacy_removed__":
+            step_count = 1
             context_text = self.state.to_markdown_context()
-
             try:
-                push_progress(f"[思考步数 {step_count}] 正在分析环境状态与任务缺口...")
-
                 analysis = self.analyzer.analyze_intent_and_phase(user_query, context_text)
-                phase = analysis.get("next_phase", "DISCOVERY")
-                missing_info = analysis.get("missing_information", "无")
-                
-                if "refined_query" in analysis and analysis["refined_query"]:
-                    self.state.refined_query = analysis["refined_query"]
-                    
-                if "entity_audit" in analysis:
-                    self.state.entity_audit.update(analysis["entity_audit"])
-                    
-                abandoned = analysis.get("abandoned_file_ids", {})
-                abandoned_reasons = {}
-                if isinstance(abandoned, list):
-                    self.state.abandoned_file_ids.update(abandoned)
-                    abandoned_reasons = {fid: "未提供屏蔽原因" for fid in abandoned}
-                elif isinstance(abandoned, dict):
-                    self.state.abandoned_file_ids.update(abandoned.keys())
-                    abandoned_reasons = abandoned
-                
-                print(f"\n" + "="*50)
-                print(f"🕵️ [Deep Research 步数 {step_count}]")
-                if abandoned_reasons:
-                    print("🗑️ 本轮新增物理屏蔽拦截:")
-                    for f_id, reason in abandoned_reasons.items():
-                        print(f"   - {f_id}: {reason}")
-                print(f"🔍 实体审计 (Entity Audit):")
-                for ent, desc in analysis.get('entity_audit', {}).items():
-                    print(f"  - {ent}: {desc}")
-                print(f"💧 脱水目标: {self.state.refined_query}")
-                print(f"🎯 缺口提取: {missing_info}")
-                print(f"📍 当前阶段: {phase}")
-                print("="*50)
-                
-                plan = self.planner.plan_next_action(user_query, analysis, context_text, phase)
-                action, args = plan["action"], plan["args"]
-
-                intent = analysis.get("intent_mode", "BROAD_ANALYSIS")
-                
-                if intent == "BROAD_ANALYSIS" and action in ["generate_final_aggregate_reports", "finish_task", "batch_process_individual_reports"]:
-                    missing_extract = []
-                    for fid in self.state.id_to_path.keys():
-                        if fid not in self.state.abandoned_file_ids:
-                            if f"Summary_{fid}" not in self.state.memory_catalog:
-                                missing_extract.append(fid)
-                    
-                    if missing_extract:
-                        print(f"🛑 [全局收网审计] 大模型试图提早结束，但系统资产库比对发现仍有 {len(missing_extract)} 篇文档未提取！已强制扭转路由至 delegate_to_small_models。")
-                        action = "delegate_to_small_models"
-                        args = {"file_ids": missing_extract}
-                        phase = "EXTRACTION"
-
-                if "file_ids" in args:
-                    original_fids = args.get("file_ids", [])
-                    if isinstance(original_fids, str): original_fids = [original_fids]
-                    if not isinstance(original_fids, list): original_fids = []
-                    
-                    has_all_macro = any(str(f).upper() == "ALL" for f in original_fids)
-                    
-                    if has_all_macro or (intent == "BROAD_ANALYSIS" and action in ["preview_document_content", "delegate_to_small_models"]):
-                        all_pending = []
-                        for fid, path in self.state.id_to_path.items():
-                            if fid in self.state.abandoned_file_ids: continue
-                            has_preview = f"Preview_{fid}" in self.state.memory_catalog
-                            has_summary = f"Summary_{fid}" in self.state.memory_catalog
-                            
-                            if action == "preview_document_content":
-                                if not has_preview and not has_summary:
-                                    all_pending.append(fid)
-                            elif action == "delegate_to_small_models":
-                                if not has_summary:
-                                    all_pending.append(fid)
-                            elif has_all_macro:
-                                all_pending.append(fid)
-                                
-                        if all_pending:
-                            for f in all_pending:
-                                if f not in original_fids:
-                                    original_fids.append(f)
-                            
-                            if has_all_macro:
-                                print(f"🌟 [指令解析] 拦截到 'ALL' 通配符，已将其映射为 {len(all_pending)} 个待处理文件！")
-                            else:
-                                print(f"🔧 [静态代码兜底] 检测到存在漏读文件，强制将剩余 {len(all_pending)} 个文件绑定至 {action}！")
-
-                        original_fids = [f for f in original_fids if str(f).upper() != "ALL"]
-                        args["file_ids"] = original_fids
-
-                print(f"[工具调用]: -> {action}()")
-
-                friendly_phase = PHASE_MAP.get(phase, phase)
-                friendly_action = ACTION_MAP.get(action, action)
-                
-                push_progress(f"  ├─ 阶段: {friendly_phase}\n  ├─ 缺口: {missing_info}\n  └─ 动作: 调度工具 [{friendly_action}]")
-                
-                self.tracker.track("Routing", input_data=phase, output_data=plan)
-
-                step_log = f"## 🏃 步骤 {step_count} (阶段: {phase})\n\n"
-                step_log += "### 1. 状态分析 (Analyzer)\n"
-                step_log += f"- **脱水目标**: {self.state.refined_query}\n"
-                step_log += f"- **实体审计**: \n```json\n{json.dumps(analysis.get('entity_audit', {}), ensure_ascii=False, indent=2)}\n```\n"
-                step_log += f"- **缺口提取**: {missing_info}\n\n"
-                step_log += "### 2. 工具路由 (Planner)\n"
-                step_log += f"- **动作**: `{action}`\n"
-                step_log += f"- **参数**: \n```json\n{json.dumps(args, ensure_ascii=False, indent=2)}\n```\n\n"
-                
-                with open(trace_file, "a", encoding="utf-8") as f:
-                    f.write(step_log)
-
-                env_context = {
-                    "original_goal": user_query,  
-                    "path_to_id": self.state.path_to_id,
-                    "id_to_path": self.state.id_to_path,
-                    "working_memory": self.state.working_memory,
-                    "tracker": self.tracker,
-                    "agent_state": self.state,
-                    "task_id": self.state.task_id,
-                    "slm_scheduler": GLOBAL_SLM_INPUT_SCHEDULER
+            except Exception as exc:  # The deterministic retrieval route remains usable.
+                analysis = {
+                    "intent_mode": "DEEP_RESEARCH",
+                    "entity_audit": {},
+                    "refined_query": user_query,
+                    "missing_information": f"local RWKV analysis unavailable: {exc}",
+                    "next_phase": "DISCOVERY",
                 }
-                
-                if "file_ids" in args:
-                    valid_fids = []
-                    for fid in args.get("file_ids", []):
-                        if fid not in valid_fids and fid in self.state.id_to_path:
-                            valid_fids.append(fid)
-                    args["file_ids"] = valid_fids
-                    args["actual_file_ids"] = valid_fids
-                    args["file_paths"] = [self.state.id_to_path[fid] for fid in valid_fids]
+            analysis["execution_route"] = "direct_keyless_retrieval"
+            analysis["local_model"] = "rwkv7-g1h-1.5b-20260710-ctx10240"
+            append_task_event(
+                self.state.task_id,
+                "analysis",
+                step=step_count,
+                phase="DISCOVERY",
+                context_snapshot=context_text,
+                data=analysis,
+            )
+            self.state.refined_query = user_query
 
-                result = ToolRegistry.execute(action, args=args, context=env_context)
-                self.state.last_feedback = f"上一步 [{action}] 执行结果:\n{result}"
+            action = direct_plan["action"]
+            args = dict(direct_plan.get("args") or {})
+            append_task_event(
+                self.state.task_id,
+                "planner_start",
+                step=step_count,
+                phase="DISCOVERY",
+                query=user_query,
+                router_hint=direct_plan.get("router", "deterministic_retrieval"),
+            )
+            append_task_event(
+                self.state.task_id,
+                "plan",
+                step=step_count,
+                phase="DISCOVERY",
+                action=action,
+                args=args,
+                router=direct_plan.get("router", "deterministic_retrieval"),
+            )
+            append_task_event(
+                self.state.task_id,
+                "tool_call",
+                step=step_count,
+                phase="DISCOVERY",
+                action=action,
+                args=args,
+            )
+            env_context = {
+                "original_goal": user_query,
+                "path_to_id": self.state.path_to_id,
+                "id_to_path": self.state.id_to_path,
+                "working_memory": self.state.working_memory,
+                "tracker": self.tracker,
+                "agent_state": self.state,
+                "task_id": self.state.task_id,
+                "slm_scheduler": GLOBAL_SLM_INPUT_SCHEDULER,
+            }
+            started_at = time.perf_counter()
+            result = ToolRegistry.execute(action, args=args, context=env_context)
+            try:
+                structured_result = json.loads(result)
+            except (TypeError, json.JSONDecodeError):
+                structured_result = {"raw": result}
+            self.state.last_feedback = f"[{action}] retrieval result:\n{result}"
+            append_task_event(
+                self.state.task_id,
+                "tool_result",
+                step=step_count,
+                phase="DISCOVERY",
+                action=action,
+                result=result,
+                real_network=bool(structured_result.get("real_network", True)),
+            )
 
-                push_progress(f"✅ [执行完成] 工具返回结果，整理进入下一轮...\n")
+            append_task_event(
+                self.state.task_id,
+                "synthesis_start",
+                step=step_count + 1,
+                phase="SYNTHESIS",
+                action=action,
+                evidence_count=len(structured_result.get("results") or []),
+            )
+            synthesis = synthesize_retrieval_answer(
+                user_query,
+                structured_result,
+                llm=self.analyzer.llm,
+            )
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 1)
+            append_task_event(
+                self.state.task_id,
+                "synthesis",
+                step=step_count + 1,
+                phase="SYNTHESIS",
+                content=synthesis.get("content", ""),
+                mode=synthesis.get("mode"),
+                evidence_count=synthesis.get("evidence_count", 0),
+                duration_ms=duration_ms,
+                citation_refs=synthesis.get("citation_refs") or [],
+            )
+            self.state.is_finished = True
+            self.state.final_result = synthesis.get("content") or result
+            append_task_event(
+                self.state.task_id,
+                "final",
+                status="completed",
+                content=self.state.final_result,
+                action=action,
+                duration_ms=duration_ms,
+            )
+            report_path = os.path.join(self.state.task_output_dir, "retrieval_report.jsonl")
+            with open(report_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "record_type": "retrieval_result",
+                            "task_id": self.state.task_id,
+                            "query": user_query,
+                            "action": action,
+                            "router": direct_plan.get("router", "deterministic_retrieval"),
+                            "real_network": bool(structured_result.get("real_network", True)),
+                            "answer": self.state.final_result,
+                            "answer_mode": synthesis.get("mode"),
+                            "duration_ms": duration_ms,
+                            "data": structured_result,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            return self.state.final_result
 
-                with open(trace_file, "a", encoding="utf-8") as f:
-                    f.write(f"### 3. 工具执行结果\n\n```text\n{result}\n```\n\n---\n\n")
+        # Closed-world prompts should not enter the legacy analyzer/planner
+        # loop. That loop can spend minutes retrying a local-model request and
+        # may hallucinate a different tool (for example weather for a
+        # translation request). Keep the step visible in the trace while
+        # executing exactly one deterministic/local action.
+        if direct_plan.get("action") in {"answer_user", "get_current_weather"}:
+            step_count = 1
+            action = direct_plan["action"]
+            args = dict(direct_plan.get("args") or {})
+            context_text = self.state.to_markdown_context()
+            append_task_event(
+                self.state.task_id,
+                "analysis",
+                step=step_count,
+                phase="DIRECT",
+                context_snapshot=context_text,
+                data={
+                    "execution_route": "direct_closed_world_action",
+                    "intent_mode": "NO_SEARCH",
+                    "refined_query": user_query,
+                    "next_phase": "DIRECT",
+                },
+            )
+            append_task_event(
+                self.state.task_id,
+                "planner_start",
+                step=step_count,
+                phase="DIRECT",
+                query=user_query,
+                router_hint=direct_plan.get("router", "deterministic_no_search"),
+            )
+            append_task_event(
+                self.state.task_id,
+                "plan",
+                step=step_count,
+                phase="DIRECT",
+                action=action,
+                args=args,
+                router=direct_plan.get("router", "deterministic_no_search"),
+            )
+            append_task_event(
+                self.state.task_id,
+                "tool_call",
+                step=step_count,
+                phase="DIRECT",
+                action=action,
+                args=args,
+            )
+            env_context = {
+                "original_goal": user_query,
+                "path_to_id": self.state.path_to_id,
+                "id_to_path": self.state.id_to_path,
+                "working_memory": self.state.working_memory,
+                "tracker": self.tracker,
+                "agent_state": self.state,
+                "task_id": self.state.task_id,
+                "slm_scheduler": GLOBAL_SLM_INPUT_SCHEDULER,
+            }
+            started_at = time.perf_counter()
+            result = ToolRegistry.execute(action, args=args, context=env_context)
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 1)
+            append_task_event(
+                self.state.task_id,
+                "tool_result",
+                step=step_count,
+                phase="DIRECT",
+                action=action,
+                result=result,
+                real_network=action == "get_current_weather",
+            )
+            self.state.is_finished = True
+            self.state.final_result = self.state.final_result or result
+            append_task_event(
+                self.state.task_id,
+                "final",
+                status="completed",
+                content=self.state.final_result,
+                action=action,
+                duration_ms=duration_ms,
+            )
+            return self.state.final_result
 
-                if self.state.is_finished:
-                    if "排版研报" not in str(self.state.final_result) and not is_task_stopped(self.state.task_id):
-                        print("\n[系统兜底] 检测到任务结束，强制调起聚合引擎...")
-                        push_progress("🔧 检测到任务闭环，正在生成最终聚合研报...")
-                        generate_final_aggregate_reports(working_memory=self.state.working_memory, tracker=self.tracker, agent_state=self.state)
-                    break
-
-            except Exception as e:
-                error_msg = f"❌ 执行步骤 {step_count} 时发生异常: {str(e)}"
-                print(f"\n{error_msg}")
-                traceback.print_exc()
-                push_progress(error_msg)
-                
-                self.state.last_feedback = f"上一步执行出现异常: {str(e)}。请检查你的工具调用参数。"
-
-        if not self.state.is_finished and not is_task_stopped(self.state.task_id):
-            print("\n[系统兜底] 达到最大探索步数，强制调起聚合引擎...")
-            push_progress("⚠️ 达到最大思考步数限制，正在强制生成最终聚合研报...")
-            generate_final_aggregate_reports(working_memory=self.state.working_memory, tracker=self.tracker, agent_state=self.state)
-            
+        # The former Analyzer -> Planner -> retry loop is intentionally no
+        # longer part of the runtime. Unknown work is stopped safely instead
+        # of allowing a small model to invent a tool or loop over local files.
+        self.state.is_finished = True
+        self.state.final_result = "当前请求未命中受支持的静态路由，未执行旧式循环，也未编造答案。"
+        append_task_event(
+            self.state.task_id,
+            "analysis",
+            step=1,
+            phase="ROUTING",
+            data={
+                "execution_route": "unsupported_safe_stop",
+                "intent_mode": "UNSUPPORTED",
+                "refined_query": user_query,
+                "next_phase": "STOP",
+            },
+        )
+        append_task_event(
+            self.state.task_id,
+            "final",
+            status="completed",
+            content=self.state.final_result,
+            action="safe_stop",
+        )
         return self.state.final_result
