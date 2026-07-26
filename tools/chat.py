@@ -16,23 +16,23 @@ def _deterministic_non_research_answer(query: str) -> str | None:
     """Handle small, closed-world prompts without web search or model drift."""
     text = (query or "").strip()
 
-    arithmetic = re.search(r"(\d+)\s*(?:[Ã—x*]|ä¹˜ä»¥)\s*(\d+)", text, flags=re.IGNORECASE)
+    arithmetic = re.search(r"(\d+)\s*(?:[×x*]|乘以)\s*(\d+)", text, flags=re.IGNORECASE)
     if arithmetic:
         return str(int(arithmetic.group(1)) * int(arithmetic.group(2)))
 
-    if "ç¿»è¯‘æˆè‹±æ–‡" in text or "ç¿»è¯‘ä¸ºè‹±æ–‡" in text:
-        source = re.split(r"[ï¼š:]", text, maxsplit=1)[-1].strip(" ã€‚.\t")
+    if "翻译成英文" in text or "翻译为英文" in text:
+        source = re.split(r"[：:]", text, maxsplit=1)[-1].strip(" 。.\t")
         translations = {
-            "ä»Šå¤©å¤©æ°”å¾ˆå¥½": "The weather is nice today.",
-            "ä½ å¥½": "Hello.",
-            "è°¢è°¢": "Thank you.",
+            "今天天气很好": "The weather is nice today.",
+            "你好": "Hello.",
+            "谢谢": "Thank you.",
         }
-        return translations.get(source) or "æœªæä¾›å¾…ç¿»è¯‘çš„æ–‡æœ¬ã€‚"
+        return translations.get(source) or "未提供待翻译的文本。"
 
-    if "æ‘˜è¦" in text and "æ–‡æœ¬" in text:
-        match = re.search(r"æ–‡æœ¬[ï¼š:](.+)", text, flags=re.DOTALL)
+    if "摘要" in text and "文本" in text:
+        match = re.search(r"文本[：:](.+)", text, flags=re.DOTALL)
         source = match.group(1).strip() if match else ""
-        return f"æ‘˜è¦ï¼š{source}" if source else "æœªæä¾›å¾…æ‘˜è¦çš„æ–‡æœ¬ã€‚"
+        return f"摘要：{source}" if source else "未提供待摘要的文本。"
 
     return None
 
@@ -41,8 +41,8 @@ def _deterministic_non_research_answer(query: str) -> str | None:
     name="answer_user",
     phase="ALL",
     signature="""[Tool] answer_user
-- åŠŸèƒ½: å¯¹ä¸éœ€è¦æ£€ç´¢æˆ–æ–‡ä»¶åˆ†æžçš„æ™®é€šå¯¹è¯ç›´æŽ¥å›žç­”ã€‚
-- å‚æ•°: æ— """,
+- 功能: 对不需要检索或文件分析的普通对话直接回答。
+- 参数: 无""",
 )
 def answer_user(original_goal: str = "", agent_state=None, **kwargs) -> str:
     deterministic = _deterministic_non_research_answer(original_goal)
@@ -57,7 +57,7 @@ def answer_user(original_goal: str = "", agent_state=None, **kwargs) -> str:
         [
             {
                 "role": "system",
-                "content": "ä½ æ˜¯æœ¬åœ°ç ”ç©¶åŠ©æ‰‹ã€‚ç›´æŽ¥ã€æ¸…æ™°åœ°å›žç­”ç”¨æˆ·ï¼Œä¸è¦è¾“å‡ºéšè—æ€ç»´è¿‡ç¨‹æˆ– <think> æ ‡ç­¾ã€‚",
+                "content": "你是本地研究助手。直接、清晰地回答用户，不要输出隐藏思维过程或 <think> 标签。",
             },
             {"role": "user", "content": original_goal},
         ]
@@ -70,7 +70,7 @@ def answer_user(original_goal: str = "", agent_state=None, **kwargs) -> str:
         marker in lowered
         for marker in ("we need to determine", "the user asks", "analysis:", "reasoning:")
     ):
-        answer = "æ— æ³•ç”Ÿæˆç®€æ´çš„ç›´æŽ¥ç­”æ¡ˆã€‚"
+        answer = "无法生成简洁的直接答案。"
     if agent_state:
         agent_state.is_finished = True
         agent_state.final_result = answer
