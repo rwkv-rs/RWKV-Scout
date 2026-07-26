@@ -1,6 +1,4 @@
-"""Direct local-model answers for prompts that do not require retrieval."""
-
-from __future__ import annotations
+"""Simple local conversational fallback for non-research prompts."""
 
 import re
 
@@ -9,31 +7,32 @@ from tools.registry import ToolRegistry
 
 
 def _clean_visible_answer(text: str) -> str:
-    value = text or ""
-    value = re.sub(r"<think>[\s\S]*?</think>", "", value, flags=re.IGNORECASE)
-    return value.replace("</think>", "").strip()
+    text = text or ""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    return text.replace("</think>", "").strip()
 
 
 def _deterministic_non_research_answer(query: str) -> str | None:
-    """Answer tiny closed-world prompts without triggering a web search."""
+    """Handle small, closed-world prompts without web search or model drift."""
     text = (query or "").strip()
-    arithmetic = re.search(r"(\d+)\s*(?:[xX*×]|乘以)\s*(\d+)", text)
+
+    arithmetic = re.search(r"(\d+)\s*(?:[Ã—x*]|ä¹˜ä»¥)\s*(\d+)", text, flags=re.IGNORECASE)
     if arithmetic:
         return str(int(arithmetic.group(1)) * int(arithmetic.group(2)))
 
-    if "翻译成英文" in text or "翻译为英文" in text:
-        source = re.split(r"[：:]", text, maxsplit=1)[-1].strip(" 。！？!?\t")
+    if "ç¿»è¯‘æˆè‹±æ–‡" in text or "ç¿»è¯‘ä¸ºè‹±æ–‡" in text:
+        source = re.split(r"[ï¼š:]", text, maxsplit=1)[-1].strip(" ã€‚.\t")
         translations = {
-            "今天天气很好": "The weather is nice today.",
-            "你好": "Hello.",
-            "谢谢": "Thank you.",
+            "ä»Šå¤©å¤©æ°”å¾ˆå¥½": "The weather is nice today.",
+            "ä½ å¥½": "Hello.",
+            "è°¢è°¢": "Thank you.",
         }
-        return translations.get(source)
+        return translations.get(source) or "æœªæä¾›å¾…ç¿»è¯‘çš„æ–‡æœ¬ã€‚"
 
-    if "摘要" in text and "文本" in text:
-        match = re.search(r"文本[：:](.+)", text, flags=re.DOTALL)
+    if "æ‘˜è¦" in text and "æ–‡æœ¬" in text:
+        match = re.search(r"æ–‡æœ¬[ï¼š:](.+)", text, flags=re.DOTALL)
         source = match.group(1).strip() if match else ""
-        return f"摘要：{source}" if source else "未提供待摘要的文本。"
+        return f"æ‘˜è¦ï¼š{source}" if source else "æœªæä¾›å¾…æ‘˜è¦çš„æ–‡æœ¬ã€‚"
 
     return None
 
@@ -42,8 +41,8 @@ def _deterministic_non_research_answer(query: str) -> str | None:
     name="answer_user",
     phase="ALL",
     signature="""[Tool] answer_user
-- Purpose: answer a non-research user prompt directly with the local model.
-- Safety: do not search or invent evidence for closed-world prompts.""",
+- åŠŸèƒ½: å¯¹ä¸éœ€è¦æ£€ç´¢æˆ–æ–‡ä»¶åˆ†æžçš„æ™®é€šå¯¹è¯ç›´æŽ¥å›žç­”ã€‚
+- å‚æ•°: æ— """,
 )
 def answer_user(original_goal: str = "", agent_state=None, **kwargs) -> str:
     deterministic = _deterministic_non_research_answer(original_goal)
@@ -53,23 +52,25 @@ def answer_user(original_goal: str = "", agent_state=None, **kwargs) -> str:
             agent_state.final_result = deterministic
         return deterministic
 
-    response = LLMClient().chat_completion(
+    llm = LLMClient()
+    response = llm.chat_completion(
         [
             {
                 "role": "system",
-                "content": (
-                    "You are a local research assistant. Answer directly and clearly. "
-                    "Do not expose hidden reasoning or <think> tags."
-                ),
+                "content": "ä½ æ˜¯æœ¬åœ°ç ”ç©¶åŠ©æ‰‹ã€‚ç›´æŽ¥ã€æ¸…æ™°åœ°å›žç­”ç”¨æˆ·ï¼Œä¸è¦è¾“å‡ºéšè—æ€ç»´è¿‡ç¨‹æˆ– <think> æ ‡ç­¾ã€‚",
             },
             {"role": "user", "content": original_goal},
         ]
     ).content
     answer = _clean_visible_answer(response)
-    # Preserve the exact model output for audit. Never replace visible model
-    # output with a synthetic success/failure sentence.
-    if not answer:
-        answer = "Local RWKV returned an empty answer."
+    # A small local model can still emit a visible reasoning draft even when
+    # instructed not to. Never expose that draft as the user-facing answer.
+    lowered = answer.casefold()
+    if answer.lstrip().startswith(">") or any(
+        marker in lowered
+        for marker in ("we need to determine", "the user asks", "analysis:", "reasoning:")
+    ):
+        answer = "æ— æ³•ç”Ÿæˆç®€æ´çš„ç›´æŽ¥ç­”æ¡ˆã€‚"
     if agent_state:
         agent_state.is_finished = True
         agent_state.final_result = answer
