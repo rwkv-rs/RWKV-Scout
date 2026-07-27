@@ -21,17 +21,26 @@ export async function getHistory() {
   const payload = await apiFetch("/frontend-api/history");
   const items = payload.data || [];
   
-  return items.map(item => ({
-    id: item.task_id || item.id,
-    title: item.title || item.task_id || item.id,
-    query: item.query || "",
-    status: item.status || "ready",
-    acceptance_case_id: item.acceptance_case_id || "",
-    progress: item.progress || "",
-    updated_at: item.timestamp || item.updated_at || "-",
-    queued_at: item.queued_at || "",  // ✨ 这里就是映射过来的排队时间
-    path: item.result_dir || item.path || ""
-  }));
+  return items.map((item) => {
+    const steps = Object.entries(item)
+      .filter(([key]) => /^step_\d+$/.test(key))
+      .sort(([left], [right]) => Number(left.slice(5)) - Number(right.slice(5)))
+      .map(([, value]) => value);
+    return {
+      id: item.task_id || item.id,
+      title: item.title || item.task_id || item.id,
+      query: item.query || "",
+      status: item.status || "ready",
+      acceptance_case_id: item.acceptance_case_id || "",
+      progress: item.progress || "",
+      steps: Array.isArray(item.steps) && item.steps.length ? item.steps : steps,
+      updated_at: item.timestamp || item.updated_at || "-",
+      queued_at: item.queued_at || "",
+      start_time: item.start_time || "",
+      end_time: item.end_time || "",
+      path: item.result_dir || item.path || "",
+    };
+  });
 }
 
 export async function getTaskEvents(id, after = 0) {

@@ -60,25 +60,61 @@ def collect_history() -> list[dict[str, Any]]:
     items: dict[str, dict[str, Any]] = {}
 
     task_records = read_jsonl(OUTPUT_DIR / "tasks.jsonl")
+
+    # ✨ 核心修复：先按 task_id 将所有增量日志（Deltas）进行深度合并还原全量状态
+    merged_records = {}
     for record in task_records:
-        task_id = str(record.get("task_id") or "").strip()
+        # 🛡️ 防护 1：过滤掉非字典的脏数据（防止 record.get 报错）
+        if not isinstance(record, dict):
+            continue
+
+        task_id = str(record.get("id") or record.get("task_id") or "").strip()
         if not task_id:
             continue
-        result_dir = Path(record.get("result_dir") or OUTPUT_DIR / task_id)
-        if not result_dir.is_absolute():
-            result_dir = PROJECT_DIR / result_dir
-        jsonl_path, md_path = find_report_files(result_dir) if result_dir.exists() else (None, None)
-        
-        # ✨ 修改点：这里增加了 queued_at 字段
+
+        if task_id not in merged_records:
+            merged_records[task_id] = {}
+        merged_records[task_id].update(record)
+
+    for task_id, record in merged_records.items():
+        try:
+            # 🛡️ 防护 2：安全处理路径组合，捕获非法路径字符导致的 OSError
+            result_dir_val = record.get("result_dir")
+            result_dir = Path(result_dir_val) if result_dir_val else (OUTPUT_DIR / task_id)
+
+            if not result_dir.is_absolute():
+                result_dir = PROJECT_DIR / result_dir
+
+            try:
+                dir_exists = result_dir.exists()
+            except OSError:
+                dir_exists = False
+
+            jsonl_path, md_path = find_report_files(result_dir) if dir_exists else (None, None)
+        except Exception as e:
+            print(f"[警告] 解析任务 {task_id} 的路径时出错: {e}")
+            jsonl_path, md_path = None, None
+
+        # ✨ 提取动态生成的 step_X 字典键为有序数组
+        steps = []
+        for k, v in record.items():
+            if k.startswith("step_") and k[5:].isdigit():
+                steps.append((int(k[5:]), v))
+        steps.sort(key=lambda x: x[0])
+        steps_list = [s[1] for s in steps]
+
         items[task_id] = {
             "id": task_id,
             "title": task_id,
             "query": record.get("query") or "",
             "status": record.get("status") or "ready",
             "progress": record.get("progress") or "",
+            "steps": steps_list,
             "updated_at": record.get("timestamp") or file_time(jsonl_path or md_path or OUTPUT_DIR),
             "queued_at": record.get("queued_at") or "",
-            "path": str(result_dir),
+            "start_time": record.get("start_time") or "",
+            "end_time": record.get("end_time") or "",
+            "path": str(result_dir) if 'result_dir' in locals() else "",
             "has_structured_report": bool(jsonl_path),
         }
 
@@ -96,28 +132,11 @@ def collect_history() -> list[dict[str, Any]]:
                 "query": "",
                 "status": "ready",
                 "progress": "",
+                "steps": [],
                 "updated_at": file_time(jsonl_path or md_path or child),
                 "queued_at": "",
                 "path": str(child),
                 "has_structured_report": bool(jsonl_path),
-            },
-        )
-
-    root_jsonl, root_md = find_report_files(OUTPUT_DIR)
-    if root_jsonl or root_md:
-        sample_id = "output-root"
-        items.setdefault(
-            sample_id,
-            {
-                "id": sample_id,
-                "title": "data/output 根目录报告",
-                "query": "本地样例或未归入任务目录的最终研报",
-                "status": "ready",
-                "progress": "",
-                "updated_at": file_time(root_jsonl or root_md or OUTPUT_DIR),
-                "queued_at": "",
-                "path": str(OUTPUT_DIR),
-                "has_structured_report": bool(root_jsonl),
             },
         )
 
@@ -229,7 +248,7 @@ class Handler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 self.send_json({"code": 404, "message": "report not found"}, status=404)
             return
-            
+
         if path.startswith("/frontend-api/"):
             status, payload, content_type = proxy_api(parsed.path, parsed.query, "GET", None)
             self.send_response(status)
@@ -246,11 +265,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/frontend-api/"):
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b"{}"
-            
+
             content_type = self.headers.get("Content-Type", "application/json")
             full_path = f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
             target = urllib.parse.urljoin(API_BASE_URL, full_path)
-            
+
             request = urllib.request.Request(target, data=body, method="POST", headers={"Content-Type": content_type})
             try:
                 with urllib.request.urlopen(request, timeout=120) as response:

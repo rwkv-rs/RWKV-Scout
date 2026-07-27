@@ -82,28 +82,16 @@ def _hard_split_by_tokens(text: str, max_tokens: int) -> list[str]:
     return parts
 
 def semantic_chunk_text(text: str, max_tokens: int = 800, overlap_ratio: float = 0.1) -> list[str]:
-    """主控流程 (图表动态Mask + 段落优先 + 句子不可破绝对屏障版)"""
+    """主控流程 (图表物理过滤 + 段落优先 + 句子不可破绝对屏障版)"""
     
-    # 1. 语言嗅探与图表遮罩准备
+    # 1. 语言嗅探与图表占位符准备
     is_chinese = len(re.findall(r'[\u4e00-\u9fa5]', text)) > len(text) * 0.1
-    mask_prefix = "[图表_" if is_chinese else "[img_"
-    mask_suffix = "]"
+    mask_str = "[图片/复杂表格已过滤]" if is_chinese else "[Image/Complex Table Filtered]"
     
-    mask_map = {}
-    mask_counter = 0
-    
-    def replacer(match):
-        nonlocal mask_counter
-        m_text = match.group(0)
-        m_key = f"{mask_prefix}{mask_counter}{mask_suffix}"
-        mask_map[m_key] = m_text
-        mask_counter += 1
-        return m_key
-        
-    # 执行遮罩：替换标准 Markdown 图片/HTML 图片
-    text = re.sub(r'!\[.*?\]\(.*?\)|<img\b[^>]*>', replacer, text, flags=re.IGNORECASE)
-    # 执行遮罩：替换 Markdown 复杂表格（连续至少两行包含 | 的区域）
-    text = re.sub(r'(?:^\s*\|.*\|.*$\n?){2,}', replacer, text, flags=re.MULTILINE)
+    # 💥 直接进行破坏性过滤：替换标准 Markdown 图片/HTML 图片
+    text = re.sub(r'!\[[^\]]*\]\([^\)]*\)|<img\b[^>]*>', mask_str, text, flags=re.IGNORECASE)
+    # 💥 直接进行破坏性过滤：替换 Markdown 复杂表格（连续至少两行包含 | 的区域）
+    text = re.sub(r'(?:^\s*\|.*\|.*$\n?){2,}', mask_str, text, flags=re.MULTILINE)
     
     chunks = []
     current_chunk = []
@@ -125,7 +113,7 @@ def semantic_chunk_text(text: str, max_tokens: int = 800, overlap_ratio: float =
             # 放不下时，如果有存量，先封盘写出一个 Chunk，并保留合法句子级的 Overlap
             if current_chunk:
                 chunk_str = "\n".join(current_chunk)
-                for k, v in mask_map.items(): chunk_str = chunk_str.replace(k, v) # Unmask 还原
+                # ❌ 删除了所有 mask_map 的还原操作，直接封装！
                 chunks.append(chunk_str)
                 
                 # 计算安全的句子级 Overlap
@@ -158,7 +146,7 @@ def semantic_chunk_text(text: str, max_tokens: int = 800, overlap_ratio: float =
                     else:
                         if current_chunk:
                             chunk_str = "\n".join(current_chunk)
-                            for k, v in mask_map.items(): chunk_str = chunk_str.replace(k, v)
+                            # ❌ 删除了所有 mask_map 的还原操作，直接封装！
                             chunks.append(chunk_str)
                             
                             overlap_sents = []
@@ -185,7 +173,7 @@ def semantic_chunk_text(text: str, max_tokens: int = 800, overlap_ratio: float =
     # 收尾最后一个块
     if current_chunk:
         chunk_str = "\n".join(current_chunk)
-        for k, v in mask_map.items(): chunk_str = chunk_str.replace(k, v)
+        # ❌ 删除了所有 mask_map 的还原操作，直接封装！
         chunks.append(chunk_str)
         
     return chunks

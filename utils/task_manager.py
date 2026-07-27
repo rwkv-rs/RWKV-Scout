@@ -47,7 +47,7 @@ class TaskStore:
                 self._apply_record(record)
 
     def _apply_record(self, record: dict[str, Any]) -> None:
-        task_id = str(record.get("task_id") or "").strip()
+        task_id = str(record.get("id") or record.get("task_id") or "").strip()
         if not task_id:
             return
         if task_id not in self._task_index:
@@ -92,7 +92,10 @@ class TaskStore:
                 timestamp = datetime.fromtimestamp(target.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
                 self._ordered_keys.append(item.name)
                 self._task_index[item.name] = {
+                    "id": item.name,
                     "task_id": item.name,
+                    "start_time": timestamp,
+                    "end_time": timestamp,
                     "timestamp": timestamp,
                     "query": item.name,
                     "status": "completed",
@@ -128,9 +131,14 @@ class TaskStore:
     ) -> None:
         with self._lock:
             existing = self._task_index.get(task_id, {})
+            now = datetime.now()
+            now_str = now.strftime("%Y-%m-%d %H:%M:%S")
             record: dict[str, Any] = {
+                "id": task_id,
                 "task_id": task_id,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "start_time": existing.get("start_time") or now_str,
+                "end_time": existing.get("end_time") or "",
+                "timestamp": now_str,
                 "query": query,
                 "status": status,
                 "result_dir": result_dir,
@@ -144,6 +152,8 @@ class TaskStore:
                 record["acceptance_case_id"] = acceptance_case_id
             elif existing.get("acceptance_case_id") is not None:
                 record["acceptance_case_id"] = existing["acceptance_case_id"]
+            if status in {"completed", "failed", "stopped"}:
+                record["end_time"] = existing.get("end_time") or now_str
             self._apply_record(record)
             self._append_event(self._task_index[task_id].copy())
 
@@ -151,8 +161,19 @@ class TaskStore:
         with self._lock:
             if task_id not in self._task_index:
                 return
-            self._task_index[task_id]["progress"] = progress
-            self._append_event(self._task_index[task_id].copy())
+            record = self._task_index[task_id]
+            record["progress"] = progress
+            step_key = f"step_{sum(key.startswith('step_') for key in record)}"
+            step_value = f"[{datetime.now().strftime('%H:%M:%S')}] {progress}"
+            record[step_key] = step_value
+            self._append_event(
+                {
+                    "id": task_id,
+                    "task_id": task_id,
+                    "progress": progress,
+                    step_key: step_value,
+                }
+            )
 
     def request_stop(self, task_id: str) -> None:
         with self._lock:
@@ -160,6 +181,7 @@ class TaskStore:
             if not task or task.get("status") != "running":
                 return
             task["status"] = "stopped"
+            task["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self._append_event(task.copy())
 
     def delete_task(self, task_id: str) -> None:
