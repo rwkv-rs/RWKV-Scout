@@ -1,5 +1,4 @@
 # RWKV-ECRA/tools/web_search.py
-import os
 import re
 import uuid
 import json
@@ -95,7 +94,12 @@ def _generate_search_queries(query: str, active_goal: str) -> list:
 
 @ToolRegistry.register(
     name="execute_web_search",
-    phase="ALL",
+    # Keep the pre-agent multi-query route callable for compatibility, while
+    # hiding it from the current RWKV model tool catalog.
+    phase="LEGACY",
+    plugin="web.legacy",
+    capabilities=("url_discovery", "web_search"),
+    retrieval_role="discovery",
     signature="""[Tool] execute_web_search
 - 功能: 联网检索外部事实。底层集成了 AI 自动搜索词扩展与多源抓取，用于调查缺乏本地文件支撑的特定实体或逻辑。
 - 参数: query (精简的实体名称或搜素短语)"""

@@ -113,5 +113,3 @@ export const ACCEPTANCE_GROUPS = [
   ...group,
   cases: group.cases.map(([id, prompt, focus]) => ({ id, prompt, focus, group: group.id, groupLabel: group.label, groupTitle: group.title })),
 }));
-
-export const ACCEPTANCE_CASES = ACCEPTANCE_GROUPS.flatMap((group) => group.cases);

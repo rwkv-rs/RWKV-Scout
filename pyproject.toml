@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rwkv-ecra"
+version = "0.1.0"
+description = "Auditable RWKV retrieval-augmented research system"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.139,<1",
+  "uvicorn>=0.51,<1",
+  "python-multipart>=0.0.32,<1",
+  "requests>=2.34,<3",
+  "pydantic>=2.13,<3",
+  "tavily-python>=0.7,<1",
+]
+
+[project.optional-dependencies]
+cloud = ["openai>=2.48,<3"]
+
+[project.scripts]
+rwkv-ecra-api = "api:main"
+rwkv-ecra-eval-dataset = "scripts.generate_eval_dataset:main"
+rwkv-ecra-eval-run = "scripts.run_dynamic_eval:main"
+rwkv-ecra-promote-reference = "scripts.promote_reference_trace:main"
+rwkv-ecra-human-review = "scripts.record_human_review:main"
+rwkv-ecra-validate-trace = "scripts.validate_run_trace:main"
+rwkv-ecra-validate-references = "scripts.validate_references:main"
+rwkv-ecra-runtime-smoke = "scripts.runtime_smoke:main"
+rwkv-ecra-model-backend-smoke = "scripts.model_backend_smoke:main"
+rwkv-ecra-build-blind-review = "scripts.build_blind_review:main"
+rwkv-ecra-model-judge = "scripts.score_model_judge:main"
+rwkv-ecra-preflight = "scripts.preflight:main"
+rwkv-ecra-paired-eval = "scripts.run_paired_eval:main"
+rwkv-ecra-reference-queue = "scripts.export_reference_queue:main"
+rwkv-ecra-unblind-reviews = "scripts.unblind_human_reviews:main"
+rwkv-ecra-adversarial-eval = "scripts.run_adversarial_eval:main"
+rwkv-ecra-ablation-eval = "scripts.run_paired_eval:main"
+rwkv-ecra-summarize-experiment = "scripts.summarize_experiment:main"
+
+[tool.setuptools]
+py-modules = ["api", "config", "main"]
+
+[tool.setuptools.packages.find]
+include = ["agent*", "app*", "clients*", "runtime*", "tools*", "utils*", "workflows*", "prompts*", "scripts*"]

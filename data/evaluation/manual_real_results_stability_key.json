@@ -1,0 +1,230 @@
+{
+  "suite": "manual-real-web",
+  "input": "data/evaluation/manual_real_queries.json",
+  "started_at": "2026-07-27T20:22:37",
+  "finished_at": "2026-07-27T20:25:58",
+  "cases": [
+    {
+      "case_id": "shenzhen_metro_line_1_stations",
+      "task_id": "JSON_ACCEPTANCE_shenzhen_metro_line_1_stations_20260727202237",
+      "query": "深圳地铁一号线有哪些站点",
+      "status": "completed",
+      "answer": "深圳地铁一号线的站点包括：机场东站、宝安中心站、宝体站、坪洲站、西乡站、固戍站、后瑞站、新安站、前海湾站、鲤鱼门站、大新站、桃园路站、深大站、高新园站、华强路站、科学馆站、大剧院站、老街站、罗湖站、会展中心站、购物公园站、香蜜湖站、车公庙站、竹子林站、侨城东站、华侨城站、世界之窗站、白石洲站、深南大道站、岗厦站、沙河街道站、福田区站、南园街道站、桂园街道站、南山区站、珠江东岸站、机场东站。 [S1](https://m.shenchuang.com/show/1494246.shtml)",
+      "error": "",
+      "trace": {
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "深圳地铁一号线站点",
+              "max_results": 8
+            }
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://m.shenchuang.com/show/1494246.shtml",
+              "max_chars": 8000
+            }
+          },
+          {
+            "step": 3,
+            "phase": "SYNTHESIS",
+            "action": "finish_task",
+            "args": {}
+          }
+        ],
+        "page_evidence": [
+          {
+            "step": 2,
+            "url": "https://m.shenchuang.com/show/1494246.shtml",
+            "data": {
+              "status": "ok",
+              "url": "https://m.shenchuang.com/show/1494246.shtml",
+              "title": "m.shenchuang.com",
+              "page_chars": 3513,
+              "chunk_count": 5,
+              "candidate_count": 3,
+              "errors": []
+            },
+            "compact_facts": "[chunk-1] 深圳地铁1号线北起宝安区机场东站 向东南沿珠江东岸至南山区 向东经沙河街道至福田区 向东经南园街道至罗湖区 经桂园街道后向南至罗湖站 止于罗湖口岸\n[chunk-2] 罗湖站位于罗湖口岸及深圳站广场内 国贸站位于深圳市商业中心人民南路与嘉宾路交叉处 老街站位于解放路与建设路相交汇处的东南角 大剧院站位于解放路与深南东路交叉口处 科学馆站位于福田区上步路与松岭路之间的深南中路 华强路站呈东西向布设 岗厦站位于福华路与彩田路交汇处 会展中心站位于深圳市中心区福华路与中心五路交汇处 购物公园站位于深圳市益田路与民田路间的福华路地下 香蜜湖站位于香蜜湖度假村出口之间的深南大道北侧绿地 车公庙站位于深南大道与香蜜湖立交桥交叉口西侧 竹子林站位于深南大道南侧的绿地外缘，距深南大道道路边约20米 侨城东站位于侨城东路以西小沙河路以东的深南大道下 华侨城站位于深圳湾大酒店以北的深南大道地底 世界之窗站位于景区世界之窗中轴线以西，深南大道下 白石洲站位于深南大道地下 高新园站位于铜鼓路与科技南路与深南大道交口处 深大站位于深南大道与科苑南路交界处 桃园路站位于深南大道与桃园路交叉路口 大新站位于深南大道与桃园路交叉路口 鲤鱼门站位于向西延伸的桃园路中线方向（规划桃园路立交桥）北侧及平南铁路西侧 前海湾站位于南山区前海规划区一带，建于晨文路地下 新安站位于新湖路与新安一路交叉口和新圳河下方 宝安中心站位于新湖路与创业一路交叉路口下方 宝体站位于罗湖路与新湖路的交汇处 坪洲站位于新湖路与海城路交叉路口 西乡站位于新湖路与悦和路交叉路口 固戍站位于宝安大道与固戍二道交叉路口 后瑞站位于宝安大道和机场南路交口以南 机场东站位于航站四路和宝安大道中间的绿化区内\n[chunk-3] 深圳地铁一号线的站点包括罗湖站、会展中心站、车公庙站等 罗湖站位于罗湖区，是深圳地铁1号线的起点站 会展中心站位于福华路与中心五路交汇处，是深圳地铁1号线与4号线的换乘车站 车公庙站位于深南大道与香蜜湖立交桥交叉口西侧，是1号线、7号线、9号线、11号线的换乘站"
+          }
+        ],
+        "final": {
+          "status": "completed",
+          "content": "深圳地铁一号线的站点包括：机场东站、宝安中心站、宝体站、坪洲站、西乡站、固戍站、后瑞站、新安站、前海湾站、鲤鱼门站、大新站、桃园路站、深大站、高新园站、华强路站、科学馆站、大剧院站、老街站、罗湖站、会展中心站、购物公园站、香蜜湖站、车公庙站、竹子林站、侨城东站、华侨城站、世界之窗站、白石洲站、深南大道站、岗厦站、沙河街道站、福田区站、南园街道站、桂园街道站、南山区站、珠江东岸站、机场东站。 [S1](https://m.shenchuang.com/show/1494246.shtml)",
+          "mode": "local_rwkv_final"
+        }
+      }
+    },
+    {
+      "case_id": "shanghai_to_rwkv_company_transit",
+      "task_id": "JSON_ACCEPTANCE_shanghai_to_rwkv_company_transit_20260727202512",
+      "query": "如何从上海到深圳的RWKV公司，路线是什么，乘坐哪些公共交通比较好？",
+      "status": "failed",
+      "answer": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+      "error": "",
+      "trace": {
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "上海到深圳RWKV公司路线公共交通",
+              "max_results": 3
+            }
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://tw.trip.com/transport/city/sha-szx",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 3,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://juejin.cn/post/7487594233015173132",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 4,
+            "phase": "DISCOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 5,
+            "phase": "RECOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "上海到深圳RWKV公司路线公共交通",
+              "max_results": 3
+            }
+          },
+          {
+            "step": 6,
+            "phase": "RECOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "上海到深圳RWKV公司路线公共交通",
+              "max_results": 3
+            }
+          }
+        ],
+        "page_evidence": [
+          {
+            "step": 3,
+            "url": "https://juejin.cn/post/7487594233015173132",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://juejin.cn/post/7487594233015173132",
+              "title": "juejin.cn",
+              "page_chars": 3140,
+              "chunk_count": 5,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          }
+        ],
+        "final": {
+          "status": "failed",
+          "content": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+          "mode": "model_repeated_tool_call"
+        }
+      }
+    },
+    {
+      "case_id": "rwkv_founder_papers_github",
+      "task_id": "JSON_ACCEPTANCE_rwkv_founder_papers_github_20260727202542",
+      "query": "RWKV的创始人是谁？发布哪些论文和GitHub项目，链接是什么？",
+      "status": "failed",
+      "answer": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+      "error": "",
+      "trace": {
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "RWKV 创始人",
+              "max_results": 3
+            }
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://eu.36kr.com/p/3106387659968257",
+              "max_chars": 10000
+            }
+          },
+          {
+            "step": 3,
+            "phase": "SYNTHESIS",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "RWKV 论文 发布 链接",
+              "max_results": 3
+            }
+          },
+          {
+            "step": 4,
+            "phase": "RECOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "RWKV 论文 发布 链接",
+              "max_results": 3
+            }
+          },
+          {
+            "step": 5,
+            "phase": "RECOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "RWKV 论文 发布 链接",
+              "max_results": 3
+            }
+          }
+        ],
+        "page_evidence": [
+          {
+            "step": 2,
+            "url": "https://eu.36kr.com/p/3106387659968257",
+            "data": {
+              "status": "ok",
+              "url": "https://eu.36kr.com/p/3106387659968257",
+              "title": "eu.36kr.com",
+              "page_chars": 9682,
+              "chunk_count": 3,
+              "candidate_count": 3,
+              "errors": []
+            },
+            "compact_facts": "[chunk-1] RWKV的创始人是Peng Bo。 RWKV发布了其第一个模型（于2022年底发布）。 RWKV的GitHub项目链接是https://github.com/BlinkDL/RWKV-LM。\n[chunk-2] RWKV is an RNN-based architecture that combines the efficient parallel training of the Transformer with the efficient reasoning ability of the RNN. RWKV was created by Peng Bo. RWKV has released models from 0.1B to 14B parameters, with a 32B preview model released by the overseas community. RWKV-7 is the latest version, which comprehensively surpasses the Transformer architecture under the same parameter scale. RWKV-7 has a stronger memory than previous versions, e.g., a 0.1B model trained in a 4k context window can solve a 16k needle-in-a-haystack problem. RWKV-7 enables continuous learning during inference, allowing the model to learn patterns in previous text.\n[chunk-3] RWKV的创始人是Luo Xuan RWKV-LM项目在GitHub上获得了超过12,900星 RWKV-7版本支持边缘设备部署 RWKV-7计划在2025年发布参数超过70B的版本"
+          }
+        ],
+        "final": {
+          "status": "failed",
+          "content": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+          "mode": "model_repeated_tool_call"
+        }
+      }
+    }
+  ]
+}

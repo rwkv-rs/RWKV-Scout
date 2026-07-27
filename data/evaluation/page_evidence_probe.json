@@ -1,0 +1,6 @@
+{
+  "query": "深圳地铁一号线有哪些站点",
+  "url": "https://m.shenchuang.com/show/1494246.shtml",
+  "max_chars": 14000,
+  "max_chunk_tokens": 800
+}

@@ -1,0 +1,124 @@
+{
+  "started_at": "2026-07-27T19:23:01",
+  "query": "深圳地铁一号线有哪些站点",
+  "url": "https://m.shenchuang.com/show/1494246.shtml",
+  "fetch": {
+    "schema_version": "retrieval.v1",
+    "status": "ok",
+    "provider": "explicit_url_fetch",
+    "count": 1,
+    "provider_errors": [],
+    "page_chars": 3513
+  },
+  "evidence": {
+    "status": "no_evidence",
+    "url": "https://m.shenchuang.com/show/1494246.shtml",
+    "title": "m.shenchuang.com",
+    "page_chars": 3513,
+    "chunk_count": 5,
+    "chunks": [
+      {
+        "chunk_id": "chunk-1",
+        "index": 0,
+        "chars": 407,
+        "token_count": 395
+      },
+      {
+        "chunk_id": "chunk-2",
+        "index": 1,
+        "chars": 919,
+        "token_count": 918
+      },
+      {
+        "chunk_id": "chunk-3",
+        "index": 2,
+        "chars": 777,
+        "token_count": 754
+      },
+      {
+        "chunk_id": "chunk-4",
+        "index": 3,
+        "chars": 743,
+        "token_count": 727
+      },
+      {
+        "chunk_id": "chunk-5",
+        "index": 4,
+        "chars": 727,
+        "token_count": 686
+      }
+    ],
+    "chunk_candidates": [
+      {
+        "chunk_id": "chunk-1",
+        "chunk_index": 0,
+        "supported": false,
+        "facts": [],
+        "quote": "",
+        "raw_output": "{\"supported\":false,\"facts\":[],\"quote\":\"\"}",
+        "chunk_chars": 407,
+        "chunk_tokens": 395
+      },
+      {
+        "chunk_id": "chunk-2",
+        "chunk_index": 1,
+        "supported": false,
+        "facts": [],
+        "quote": "",
+        "raw_output": "{\"supported\":true,\"facts\":[\"罗湖站位于罗湖口岸及深圳站广场内\",\"国贸站位于深圳市商业中心人民南路与嘉宾路交叉路口处\",\"老街站位于解放路与建设路相交汇处的东南角\",\"大剧院站位于解放路与深南东路交叉口处\",\"科学馆站位于福田区上步路与松岭路之间的深南中路\",\"华强路站呈东西向布设\",\"岗厦站位于福华路与彩田路交汇处\",\"会展中心站位于深圳市中心区福华路与中心五路交汇处\",\"购物公园站位于深圳市益田路与民田路间的福华路地下\",\"香蜜湖站位于香蜜湖度假村出口之间的深南大道北侧绿地下\",\"车公庙站位于深南大道与香蜜湖立交桥交叉口西侧\",\"竹子林站位于深南大道南侧的绿地外缘，距深南大道道路边约20米\",\"侨城东站位于侨城东路以西小沙河路以东的深南大道下\",\"华侨城站位于深圳湾大酒店以北的深南大道地底\",\"世界之窗站位于景区世界之窗中轴线以西，深南大道下\",\"白石洲站位于深南大道地下\",\"高新园站位于铜鼓路与科技南路与深南大道交口处\",\"深大站位",
+        "chunk_chars": 919,
+        "chunk_tokens": 918
+      },
+      {
+        "chunk_id": "chunk-3",
+        "chunk_index": 2,
+        "supported": false,
+        "facts": [],
+        "quote": "",
+        "raw_output": "{\"supported\":false,\"facts\":[],\"quote\":\"\"}",
+        "chunk_chars": 777,
+        "chunk_tokens": 754
+      },
+      {
+        "chunk_id": "chunk-4",
+        "chunk_index": 3,
+        "supported": false,
+        "facts": [],
+        "quote": "",
+        "raw_output": "{\"supported\":false,\"facts\":[],\"quote\":\"\"}",
+        "chunk_chars": 743,
+        "chunk_tokens": 727
+      },
+      {
+        "chunk_id": "chunk-5",
+        "chunk_index": 4,
+        "supported": false,
+        "facts": [],
+        "quote": "",
+        "raw_output": "{\"supported\":true,\"facts\":[\"深圳地铁一号线的站点包括：沙河东公交总站、沙河小学、白石洲、世界之窗地铁公交接驳站、世界之窗停车场、世界之窗（金字塔）、狂欢节广场、益田假日广场、深圳威尼斯睿途酒店、深圳威斯汀酒店、欢乐谷、深圳沙河医院、深圳沙河医院、白石洲长途客运站、深圳沙河医院、益田假日广场、世界之窗广场、世界之窗停车场、世界之窗（金字塔）、狂欢节广场、世界之窗地铁公交接驳站、世界之窗停车场、世界之窗（金字塔）、狂欢节广场、世界之窗地铁公交接驳站、世界之窗停车场、世界之窗（金字塔）、狂欢节广场、世界之窗地铁公交接驳站、世界之窗停车场、世界之窗（金字塔）、狂欢节广场、世界之窗地铁公交接驳站、世界之窗停车场、世界之窗（金字塔）、狂欢节广场、世界之窗地铁公交接驳站、世界之窗停车场、世界之窗（金字塔）、狂欢节广场、世界之窗地铁公交接驳站、世界之窗停车场、世界之窗（金字塔）、狂欢节",
+        "chunk_chars": 727,
+        "chunk_tokens": 686
+      }
+    ],
+    "candidates": [],
+    "compact_facts": "",
+    "errors": [],
+    "parallel_candidate": {
+      "strategy": "one-RWKV-call-per-chunk",
+      "contract": "json_object:{supported,facts,quote}",
+      "chunk_count": 5,
+      "worker_count": 2,
+      "completed_calls": 5,
+      "max_tokens_per_call": 384,
+      "wall_time_ms": 9230.1,
+      "candidate_durations_ms": [
+        615.0,
+        6906.0,
+        1907.1,
+        569.6,
+        6137.0
+      ]
+    }
+  },
+  "finished_at": "2026-07-27T19:23:10"
+}

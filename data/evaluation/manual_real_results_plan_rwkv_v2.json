@@ -1,0 +1,99 @@
+{
+  "suite": "manual-real-web",
+  "input": "data/evaluation/manual_real_rwkv.json",
+  "started_at": "2026-07-27T21:27:18",
+  "finished_at": "2026-07-27T21:27:33",
+  "cases": [
+    {
+      "case_id": "rwkv_founder_papers_github_plan",
+      "task_id": "JSON_ACCEPTANCE_rwkv_founder_papers_github_plan_20260727212718",
+      "query": "RWKV的创始人是谁？发布哪些论文和GitHub项目，链接是什么？",
+      "status": "failed",
+      "answer": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+      "error": "",
+      "trace": {
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_local_file",
+            "args": {
+              "keyword": "RWKV"
+            }
+          },
+          {
+            "step": 2,
+            "phase": "DISCOVERY",
+            "action": "preview_document_content",
+            "args": {
+              "file_paths": [
+                "DOC_1",
+                "DOC_2",
+                "DOC_3",
+                "DOC_4"
+              ],
+              "actual_file_ids": [
+                "DOC_1",
+                "DOC_2",
+                "DOC_3",
+                "DOC_4"
+              ]
+            }
+          },
+          {
+            "step": 3,
+            "phase": "DISCOVERY",
+            "action": "verify_keyword_in_file",
+            "args": {
+              "file_ids": [
+                "DOC_1",
+                "DOC_2",
+                "DOC_3",
+                "DOC_4"
+              ],
+              "keywords": [
+                "RWKV"
+              ]
+            }
+          },
+          {
+            "step": 4,
+            "phase": "DISCOVERY",
+            "action": "answer_user",
+            "args": {}
+          },
+          {
+            "step": 5,
+            "phase": "DISCOVERY",
+            "action": "search_local_file",
+            "args": {
+              "keyword": "RWKV"
+            }
+          },
+          {
+            "step": 6,
+            "phase": "RECOVERY",
+            "action": "search_local_file",
+            "args": {
+              "keyword": "RWKV"
+            }
+          },
+          {
+            "step": 7,
+            "phase": "DISCOVERY",
+            "action": "search_local_file",
+            "args": {
+              "keyword": "RWKV"
+            }
+          }
+        ],
+        "page_evidence": [],
+        "final": {
+          "status": "failed",
+          "content": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+          "mode": "model_repeated_tool_call"
+        }
+      }
+    }
+  ]
+}

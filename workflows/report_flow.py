@@ -2,32 +2,15 @@
 import os
 import json
 import re
-import uuid
 import concurrent.futures
 from typing import List, Dict
 from clients.llm_client import LLMClient
-from clients.slm_client import SLMClient
-from config import DATA_PIPELINE, get_llm_concurrency, get_slm_concurrency
+from config import DATA_PIPELINE, get_llm_concurrency
 from utils.checkpoint import clear_checkpoints_for_files
 from tools.registry import ToolRegistry
 from utils.chunker import get_token_count, semantic_chunk_text
-from prompts.slm_prompts import build_slm_sequential_summary_prompt, build_slm_reduce_prompt
-from workflows.map_reduce_flow import llm_plan_execute_check_compression, clean_slm_output, _sequential_assemble
+from workflows.map_reduce_flow import llm_plan_execute_check_compression
 import contextvars
-
-def parse_md_blocks(md_text: str) -> Dict[str, str]:
-    blocks = {}
-    current_heading = "全局摘要"
-    current_content = []
-    for line in md_text.split('\n'):
-        if re.match(r'^#{1,6}\s+', line.strip()):
-            if current_content: blocks[current_heading] = '\n'.join(current_content).strip()
-            current_heading = line.strip().lstrip('#').strip()
-            current_content = []
-        else:
-            current_content.append(line)
-    if current_content: blocks[current_heading] = '\n'.join(current_content).strip()
-    return blocks
 
 @ToolRegistry.register(
     name="batch_process_individual_reports",

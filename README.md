@@ -1,6 +1,11 @@
 # RWKV-ECRA
 
+模型运行时迁移说明见 [docs/MODEL_RUNTIME.zh-CN.md](docs/MODEL_RUNTIME.zh-CN.md)：项目支持直接加载本地 RWKV checkpoint，OpenAI 兼容服务仅作为过渡适配器。
+
 语言：中文 | [English](README.en.md)
+
+项目结构约定见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+实验执行与评测见 [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)，外部项目评估见 [docs/external_projects/wigolo.md](docs/external_projects/wigolo.md)。
 
 ## 功能介绍和效果展示
 
@@ -20,21 +25,48 @@
 
 建议使用 Python 3.10 或更新版本。
 
-安装当前代码需要的基础依赖（建议用 uv pip，自动处理冲突更快）：
+安装当前代码锁定的依赖（建议使用虚拟环境）：
 
 ```bash
-pip install fastapi uvicorn python-multipart openai requests tavily-python
+pip install -r requirements.txt
 ```
 
-> 项目默认使用 RWKV 最新版本模型，已配置好 7.2B 适用的提示词和适用参数，使用更大模型可以不更改参数，使用更小模型建议缩小输入长度，其他参数仍是较优参数；
+> 当前生产实验仍使用本地 RWKV 13.3B 合约：模型 `rwkv7-g1i_preview4922-13.3b-20260720-ctx12288`，端点 `http://172.21.122.93:29613/v1`，上下文长度 `12288`。项目现在提供项目自有的 `direct_rwkv` 运行时，可直接加载 checkpoint；兼容 `/v1` 服务仅作为迁移适配器。切换前请阅读 [docs/MODEL_RUNTIME.zh-CN.md](docs/MODEL_RUNTIME.zh-CN.md)。旧 RWKV 7.2B 合约保留为独立历史基线，不能与 13.3B 结果混合比较。
 
 > 配置了基于火山引擎和飞桨星河的大模型调用，其中飞桨配置的大模型调用内嵌搜索引擎，已设置强制引用，针对火山引擎配置了`tavily`，后续会增加搜索更全面的其他引擎。
 
-### rwkv_lightning 配置说明
+### 可选：接入本地 wigolo 联网检索
 
-本项目需要调用 [rwkv_lightning](https://github.com/RWKV-Vibe/rwkv_lightning) 启动的模型，后续会增加[Albatross](https://github.com/BlinkDL/Albatross) 推理引擎的调用方法；
+项目现在支持将 [wigolo](https://github.com/KnockOutEZ/wigolo) 作为本地网页检索后端。默认配置为 `auto`：
 
-详细的配置和使用教程参考 [rwkv_lightning 批量推理教程](https://www.rwkv.cn/tutorials/intermediate/rwkv_lightning)
+- 如果本机的 wigolo REST 服务可用，优先使用 wigolo 的搜索和网页抓取；
+- 如果 wigolo 尚未安装、尚未启动或请求失败，自动回退到当前已有的无 API Key 公开搜索；
+- 当前不需要任何 Tavily、OpenAI 或其他云端 API Key。
+
+先按 wigolo 项目说明完成本地初始化，然后启动 REST 服务：
+
+    npx wigolo init
+    npx wigolo serve
+
+默认地址是 `http://127.0.0.1:3333`。如地址或模式不同，可通过环境变量调整：
+
+    # 默认：优先 wigolo，失败时回退
+    RWKV_ECRA_WIGOLO_MODE=auto
+    WIGOLO_BASE_URL=http://127.0.0.1:3333
+
+    # 只使用原有无 Key 搜索
+    RWKV_ECRA_WIGOLO_MODE=off
+
+    # 强制使用 wigolo，服务不可用时直接返回错误
+    RWKV_ECRA_WIGOLO_MODE=only
+
+wigolo 返回的网页内容会继续被标记为不可信证据，不能作为系统指令执行；搜索结果、原文摘录、引用 ID 和评分会写入检索报告，供后续引用展示使用。
+
+### 模型运行时配置说明
+
+工作流现在依赖内部 `ModelBackend`。将 `MODEL_RUNTIME.backend` 设置为 `direct_rwkv` 后，项目会通过 Albatross 直接加载本地 RWKV checkpoint，不需要模型 API 服务；`openai_compat` 只用于迁移或远程兼容服务。
+
+详细配置、环境变量、预检和直连烟囱测试见 [docs/MODEL_RUNTIME.zh-CN.md](docs/MODEL_RUNTIME.zh-CN.md)。
 
 ### 3. 参数配置说明
 
@@ -44,7 +76,7 @@ pip install fastapi uvicorn python-multipart openai requests tavily-python
 
 | 参数名 | 参数功能 | 可选项 |
 | :--- | :--- | :--- |
-| `LLM_PROVIDER` | 模型来源，目前可选火山引擎和飞桨星河 | `baidu` `volcengine` |
+| `LLM_PROVIDER` | 当前运行时模型来源 | `local_7b` `local_13b` `local_direct_1p5b` `baidu` `volcengine` |
 | `API_KEYS.baidu` | 飞桨星河的 API_Key | `任意合法 Key`（不用可以不配置） |
 | `API_KEYS.volcengine` | 火山引擎的 API_Key | `任意合法 Key`（不用可以不配置） |
 | `API_KEYS.tavily` | tavily 搜索引擎的 API_Key | `任意合法 Key` |
@@ -80,9 +112,22 @@ npm run dev
 
 启动后，默认运行在 `http://127.0.0.1:5177`
 
+### 6. 生产预检与运行监控
+
+```bash
+python -m scripts.preflight --dataset data/evaluation/dynamic.jsonl
+```
+
+服务提供 `/healthz`、`/readyz`、`/api/v1/metrics/operational` 和
+Prometheus 兼容的 `/metrics`。`/readyz` 会在本地 RWKV 服务不可用时明确
+返回 `not_ready`，不会把离线检索诊断当成质量通过。
+
+完整的动态评测、参考答案审核、盲测和回滚决策流程见
+[docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)。
+
 ## 后续优化计划
 
-- 内置 [Albatross](https://github.com/BlinkDL/Albatross) 推理引擎，保留目前的在[rwkv_lightning](https://github.com/RWKV-Vibe/rwkv_lightning)起的服务上运行的方法；
+- 扩展直接 RWKV 运行时，增加安全的同长度批处理和独立本地 worker 进程；
 - 优化效果和执行路径
 - 美化前端和细化日志，目前前端不够漂亮，逻辑也不够优美
 - 支持更多来源的大模型和搜索引擎
@@ -129,7 +174,7 @@ npm run dev
 | `AGENT_CONFIG.max_error_retries` | | `3` |
 | `AGENT_CONFIG.memory_truncate_length` | | `60000` |
 | `SLM_CONFIG.endpoint` | RWKV 的调用端点 | `"http://192.168.0.82:8080/v1/chat/completions"` |
-| `SLM_CONFIG.password` | RWKV 的调用密码（无密码可置空） | `"rwkv7_7.2b"` |
+| `SLM_CONFIG.password` | RWKV 的调用密码（无密码可置空） | `"rwkv-skills"` |
 | `SLM_CONFIG.concurrency` | RWKV 的最大并发数 | 整数，7.2B 时，24G 显存设置为 16G 为较优 |
 | `TRACKING.enable` | 是否追踪日志 | `true` |
 | `TRACKING.enable_slm_log` | 是否追踪 RWKV 的处理日志| `false` |

@@ -1,0 +1,829 @@
+{
+  "suite": "manual-real-web",
+  "input": "data/evaluation/manual_real_queries.json",
+  "started_at": "2026-07-27T22:31:30",
+  "finished_at": "2026-07-27T22:39:11",
+  "cases": [
+    {
+      "case_id": "shenzhen_metro_line_1_stations",
+      "task_id": "JSON_ACCEPTANCE_shenzhen_metro_line_1_stations_20260727223130",
+      "query": "深圳地铁一号线有哪些站点",
+      "status": "failed",
+      "answer": "未完成检索，无法生成有来源支持的答案。",
+      "error": "",
+      "trace": {
+        "event_count": 48,
+        "plans": [
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 2,
+            "point_ids": [
+              "P1",
+              "P2"
+            ]
+          },
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 2,
+            "point_ids": [
+              "P1",
+              "P2"
+            ]
+          }
+        ],
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "task_point_id": "",
+            "args": {
+              "query": "深圳地铁一号线 官方站点列表",
+              "max_results": 5,
+              "search_depth": "basic"
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://www.sz.gov.cn/xxgk/sydwxxgk/jt/dt/ywxx/dtxlxx/content/post_11086804.html",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 3,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://zh.wikipedia.org/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 4,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://wuu.wikipedia.org/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 5,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://m.bendibao.com/show879746.html",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 6,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://www.sz.gov.cn/xxgk/sydwxxgk/jt/dt",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 7,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://www.sz.gov.cn/xxgk/sydwxxgk/jt/dt/ywxx/dtxlxx/content/post_11086804.html",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 8,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://zh.wikipedia.org/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 9,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://wuu.wikipedia.org/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 10,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://m.bendibao.com/show879746.html",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 11,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://www.sz.gov.cn/xxgk/sydwxxgk/jt/dt/ywxx/dtxlxx/content/post_11086804.html",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 12,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "task_point_id": "",
+            "args": {
+              "query": "深圳地铁一号线 官方站点列表",
+              "max_results": 5
+            },
+            "planner_error": ""
+          }
+        ],
+        "page_evidence": [],
+        "completion_judgements": [],
+        "contexts": [],
+        "finals": [
+          {
+            "status": "failed",
+            "content": "未完成检索，无法生成有来源支持的答案。",
+            "mode": "model_tool_loop_no_evidence"
+          }
+        ],
+        "final": {
+          "status": "failed",
+          "content": "未完成检索，无法生成有来源支持的答案。",
+          "mode": "model_tool_loop_no_evidence"
+        },
+        "stats": {
+          "action_counts": {
+            "search_web_tavily": 2,
+            "fetch_web_url": 10
+          },
+          "phase_counts": {
+            "DISCOVERY": 2,
+            "EXTRACTION": 6,
+            "RECOVERY": 4
+          },
+          "tool_result_statuses": {
+            "ok": 2,
+            "error": 5
+          },
+          "error_class_counts": {
+            "provider_error": 5,
+            "repeated_tool_call": 5
+          },
+          "task_point_selection": {
+            "decision_count": 12,
+            "with_task_point_id": 0
+          },
+          "page_fetches": 0,
+          "page_evidence_statuses": {},
+          "page_chars": {
+            "count": 0,
+            "min": 0,
+            "max": 0,
+            "avg": 0
+          },
+          "chunk_count": 0,
+          "chunk_input_tokens": {
+            "count": 0,
+            "min": 0,
+            "max": 0,
+            "avg": 0
+          },
+          "chunk_input_chars": {
+            "count": 0,
+            "min": 0,
+            "max": 0,
+            "avg": 0
+          },
+          "candidate_outputs": {
+            "supported": 0,
+            "unsupported": 0,
+            "output_chars": {
+              "count": 0,
+              "min": 0,
+              "max": 0,
+              "avg": 0
+            }
+          },
+          "context_tokens": {
+            "count": 0,
+            "min": 0,
+            "max": 0,
+            "avg": 0
+          },
+          "context_truncated_count": 0,
+          "completion_statuses": {},
+          "final_statuses": {
+            "failed": 1
+          }
+        }
+      }
+    },
+    {
+      "case_id": "shanghai_to_rwkv_company_transit",
+      "task_id": "JSON_ACCEPTANCE_shanghai_to_rwkv_company_transit_20260727223305",
+      "query": "如何从上海到深圳的RWKV公司，路线是什么，乘坐哪些公共交通比较好？",
+      "status": "failed",
+      "answer": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+      "error": "",
+      "trace": {
+        "event_count": 37,
+        "plans": [
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 5,
+            "point_ids": [
+              "P1",
+              "P2",
+              "P3",
+              "P4",
+              "P5"
+            ]
+          },
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 5,
+            "point_ids": [
+              "P1",
+              "P2",
+              "P3",
+              "P4",
+              "P5"
+            ]
+          },
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 5,
+            "point_ids": [
+              "P1",
+              "P2",
+              "P3",
+              "P4",
+              "P5"
+            ]
+          }
+        ],
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "task_point_id": "",
+            "args": {
+              "query": "RWKV公司 深圳 地址",
+              "max_results": 3
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "http://qydb.leshanvc.com/53883.html",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 3,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://juejin.cn/post/7487594233015173132",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 4,
+            "phase": "EXTRACTION",
+            "action": "search_web_tavily",
+            "task_point_id": "",
+            "args": {
+              "query": "RWKV公司 深圳 地址",
+              "max_results": 3
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 5,
+            "phase": "RECOVERY",
+            "action": "search_web_tavily",
+            "task_point_id": "",
+            "args": {
+              "query": "RWKV公司 深圳 地址",
+              "max_results": 3
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 6,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "task_point_id": "",
+            "args": {
+              "query": "RWKV公司 深圳 地址",
+              "max_results": 3
+            },
+            "planner_error": ""
+          }
+        ],
+        "page_evidence": [
+          {
+            "step": 2,
+            "url": "http://qydb.leshanvc.com/53883.html",
+            "data": {
+              "status": "no_evidence",
+              "url": "http://qydb.leshanvc.com/53883.html",
+              "title": "qydb.leshanvc.com",
+              "page_chars": 2307,
+              "chunk_count": 2,
+              "candidate_count": 0,
+              "parallel_candidate": {
+                "strategy": "one-RWKV-call-per-chunk",
+                "contract": "json_object:{supported,facts,quote}",
+                "chunk_count": 2,
+                "worker_count": 2,
+                "completed_calls": 2,
+                "attempted_calls": 2,
+                "retry_calls": 0,
+                "max_tokens_per_call": 8192,
+                "wall_time_ms": 916.3,
+                "candidate_durations_ms": [
+                  897.5,
+                  912.4
+                ],
+                "finish_reasons": [
+                  "stop",
+                  "stop"
+                ]
+              },
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 3,
+            "url": "https://juejin.cn/post/7487594233015173132",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://juejin.cn/post/7487594233015173132",
+              "title": "juejin.cn",
+              "page_chars": 3140,
+              "chunk_count": 2,
+              "candidate_count": 0,
+              "parallel_candidate": {
+                "strategy": "one-RWKV-call-per-chunk",
+                "contract": "json_object:{supported,facts,quote}",
+                "chunk_count": 2,
+                "worker_count": 2,
+                "completed_calls": 2,
+                "attempted_calls": 2,
+                "retry_calls": 0,
+                "max_tokens_per_call": 8192,
+                "wall_time_ms": 1013.9,
+                "candidate_durations_ms": [
+                  1011.3,
+                  994.6
+                ],
+                "finish_reasons": [
+                  "stop",
+                  "stop"
+                ]
+              },
+              "errors": []
+            },
+            "compact_facts": ""
+          }
+        ],
+        "completion_judgements": [],
+        "contexts": [],
+        "finals": [
+          {
+            "status": "failed",
+            "content": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+            "mode": "model_repeated_tool_call"
+          }
+        ],
+        "final": {
+          "status": "failed",
+          "content": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+          "mode": "model_repeated_tool_call"
+        },
+        "stats": {
+          "action_counts": {
+            "search_web_tavily": 4,
+            "fetch_web_url": 2
+          },
+          "phase_counts": {
+            "DISCOVERY": 2,
+            "EXTRACTION": 3,
+            "RECOVERY": 1
+          },
+          "tool_result_statuses": {
+            "ok": 3
+          },
+          "error_class_counts": {
+            "repeated_tool_call": 3
+          },
+          "task_point_selection": {
+            "decision_count": 6,
+            "with_task_point_id": 0
+          },
+          "page_fetches": 2,
+          "page_evidence_statuses": {
+            "no_evidence": 2
+          },
+          "page_chars": {
+            "count": 2,
+            "min": 2307.0,
+            "max": 3140.0,
+            "avg": 2723.5
+          },
+          "chunk_count": 4,
+          "chunk_input_tokens": {
+            "count": 4,
+            "min": 67.0,
+            "max": 2048.0,
+            "avg": 1173.0
+          },
+          "chunk_input_chars": {
+            "count": 4,
+            "min": 99.0,
+            "max": 2236.0,
+            "avg": 1369.5
+          },
+          "candidate_outputs": {
+            "supported": 0,
+            "unsupported": 4,
+            "output_chars": {
+              "count": 4,
+              "min": 41.0,
+              "max": 41.0,
+              "avg": 41.0
+            }
+          },
+          "context_tokens": {
+            "count": 0,
+            "min": 0,
+            "max": 0,
+            "avg": 0
+          },
+          "context_truncated_count": 0,
+          "completion_statuses": {},
+          "final_statuses": {
+            "failed": 1
+          }
+        }
+      }
+    },
+    {
+      "case_id": "rwkv_founder_papers_github",
+      "task_id": "JSON_ACCEPTANCE_rwkv_founder_papers_github_20260727223346",
+      "query": "RWKV的创始人是谁？发布哪些论文和GitHub项目，链接是什么？",
+      "status": "failed",
+      "answer": "模型未返回可执行的 RWKV JSON 工具调用，无法安全继续检索。",
+      "error": "",
+      "trace": {
+        "event_count": 61,
+        "plans": [
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 3,
+            "point_ids": [
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 3,
+            "point_ids": [
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 3,
+            "point_ids": [
+              "P1",
+              "P2",
+              "P3"
+            ]
+          }
+        ],
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "task_point_id": "",
+            "args": {
+              "query": "RWKV 创始人",
+              "max_results": 3
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://m.36kr.com/p/3106387659968257"
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 3,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "task_point_id": "",
+            "args": {
+              "query": "RWKV 论文 发布 列表",
+              "max_results": 3
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 4,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://www.rwkv.cn/docs/RWKV-Wiki/Introduction"
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 5,
+            "phase": "DISCOVERY",
+            "action": "",
+            "task_point_id": "",
+            "args": {},
+            "planner_error": "ValueError: tool call name is empty"
+          }
+        ],
+        "page_evidence": [
+          {
+            "step": 2,
+            "url": "https://m.36kr.com/p/3106387659968257",
+            "data": {
+              "status": "ok",
+              "url": "https://m.36kr.com/p/3106387659968257",
+              "title": "m.36kr.com",
+              "page_chars": 4342,
+              "chunk_count": 2,
+              "candidate_count": 1,
+              "parallel_candidate": {
+                "strategy": "one-RWKV-call-per-chunk",
+                "contract": "json_object:{supported,facts,quote}",
+                "chunk_count": 2,
+                "worker_count": 2,
+                "completed_calls": 1,
+                "attempted_calls": 3,
+                "retry_calls": 1,
+                "max_tokens_per_call": 8192,
+                "wall_time_ms": 126819.7,
+                "candidate_durations_ms": [
+                  4007.8,
+                  513.5
+                ],
+                "finish_reasons": [
+                  "stop",
+                  "stop"
+                ]
+              },
+              "errors": []
+            },
+            "compact_facts": "[chunk-1] RWKV的创始人是彭博，他毕业于香港大学物理系，曾是量化交易专家。 RWKV发布了从0.1B到14B的模型，并在海外社区发布了32B的预览模型。 RWKV-7版本在同等参数规模下全面超越Transformer架构，在4k上下文窗口下训练能自动解决16k的大海捞针问题。"
+          },
+          {
+            "step": 4,
+            "url": "https://www.rwkv.cn/docs/RWKV-Wiki/Introduction",
+            "data": {
+              "status": "ok",
+              "url": "https://www.rwkv.cn/docs/RWKV-Wiki/Introduction",
+              "title": "www.rwkv.cn",
+              "page_chars": 5412,
+              "chunk_count": 3,
+              "candidate_count": 1,
+              "parallel_candidate": {
+                "strategy": "one-RWKV-call-per-chunk",
+                "contract": "json_object:{supported,facts,quote}",
+                "chunk_count": 3,
+                "worker_count": 2,
+                "completed_calls": 2,
+                "attempted_calls": 4,
+                "retry_calls": 1,
+                "max_tokens_per_call": 8192,
+                "wall_time_ms": 144541.0,
+                "candidate_durations_ms": [
+                  10269.6,
+                  582.9,
+                  466.1
+                ],
+                "finish_reasons": [
+                  "stop",
+                  "stop",
+                  "stop"
+                ]
+              },
+              "errors": []
+            },
+            "compact_facts": "[chunk-1] RWKV是一种具有GPT级大型语言模型（LLM）性能的RNN，也可以像GPT Transformer一样直接训练（可并行化） RWKV结合了RNN和Transformer的最佳特性：出色的性能、恒定的显存占用、恒定的推理生成速度、\"无限\" ctxlen 和免费的句嵌入，而且100%不含自注意力机制 RWKV项目最初由彭博（Bo Peng，BlinkDL）提出，随着项目被外界关注，RWKV项目逐渐发展成一个开源社区 2023年9月20日，RWKV开源项目正式加入Linux基金会 RWKV模型的版本状态：RWKV-4（Dove）、RWKV-5（Eagle）、RWKV-6（Finch）、RWKV-7（Goose）架构已发布，RWKV-8仍处于实验阶段 RWKV-4架构论文于2023年5月22日发布，论文标题为《RWKV: Reinventing RNNs for the Transformer Era》 RWKV-5/6论文《Eagle and Finch: RWKV with Matrix-Valued States and Dynamic Recurrence》于2024年4月15日发布 RWKV-7论文《RWKV-7 \"Goose\" with Expressive Dynamic State Evolution》于2025年3月18日发布 RWKV-7通过广义Delta Rule实现N C 1 NC^1复杂度的S 5 S_5状态跟踪问题，使用4层即可识别所有正则语言 RWKV-7在训练数据远低于Qwen2.5、Llama3.2等开源模型的前提下，在所有开源3B规模模型中达到SoTA水平 RWKV模型的命名规则：World模型和RWKV G1系列模型（支持think推理）"
+          }
+        ],
+        "completion_judgements": [
+          {
+            "step": 2,
+            "status": "incomplete",
+            "missing_point_ids": [
+              "P1",
+              "P2",
+              "P3"
+            ],
+            "reason": "The retrieved evidence does not contain the requested artifacts for the atomic points. Specifically, it does not provide the official source confirming the founder's identity, nor does it list any RWKV papers with titles, authors, publication years, and links (e.g., arXiv or official pages). It also does not list any GitHub projects with repository names, links, and brief descriptions. The evidence only contains a general article about RWKV without the required structured information."
+          },
+          {
+            "step": 4,
+            "status": "incomplete",
+            "missing_point_ids": [
+              "P2",
+              "P3"
+            ],
+            "reason": "The retrieved evidence does not contain the requested artifacts for atomic points P2 and P3. Specifically, there is no list of RWKV papers with titles, authors, publication years, and links (e.g., arXiv or official pages) for P2, and no list of GitHub repositories with names, links, and brief descriptions for P3. The evidence only provides a single paper link (RWKV-4) and general project information, which is insufficient to complete the atomic points."
+          }
+        ],
+        "contexts": [
+          {
+            "source_chars": 144,
+            "selected_chars": 144,
+            "chunk_count": 1,
+            "truncated_count": 0,
+            "context_chars": 268,
+            "context_tokens": 168,
+            "context_truncated": false,
+            "strategy": {
+              "ranking_strategy": "candidate_support_then_rank.v1",
+              "context_source_count": null,
+              "prompt_variant": "default.v1"
+            }
+          },
+          {
+            "source_chars": 901,
+            "selected_chars": 901,
+            "chunk_count": 2,
+            "truncated_count": 0,
+            "context_chars": 1162,
+            "context_tokens": 697,
+            "context_truncated": false,
+            "strategy": {
+              "ranking_strategy": "candidate_support_then_rank.v1",
+              "context_source_count": null,
+              "prompt_variant": "default.v1"
+            }
+          }
+        ],
+        "finals": [
+          {
+            "status": "failed",
+            "content": "模型未返回可执行的 RWKV JSON 工具调用，无法安全继续检索。",
+            "mode": "model_rwkv_json_parse_error"
+          }
+        ],
+        "final": {
+          "status": "failed",
+          "content": "模型未返回可执行的 RWKV JSON 工具调用，无法安全继续检索。",
+          "mode": "model_rwkv_json_parse_error"
+        },
+        "stats": {
+          "action_counts": {
+            "search_web_tavily": 2,
+            "fetch_web_url": 2,
+            "": 1
+          },
+          "phase_counts": {
+            "DISCOVERY": 3,
+            "EXTRACTION": 2
+          },
+          "tool_result_statuses": {
+            "ok": 4
+          },
+          "error_class_counts": {},
+          "task_point_selection": {
+            "decision_count": 5,
+            "with_task_point_id": 0
+          },
+          "page_fetches": 2,
+          "page_evidence_statuses": {
+            "ok": 2
+          },
+          "page_chars": {
+            "count": 2,
+            "min": 4342.0,
+            "max": 5412.0,
+            "avg": 4877.0
+          },
+          "chunk_count": 5,
+          "chunk_input_tokens": {
+            "count": 10,
+            "min": 291.0,
+            "max": 2032.0,
+            "avg": 1602.6
+          },
+          "chunk_input_chars": {
+            "count": 10,
+            "min": 426.0,
+            "max": 2792.0,
+            "avg": 2052.4
+          },
+          "candidate_outputs": {
+            "supported": 5,
+            "unsupported": 5,
+            "output_chars": {
+              "count": 10,
+              "min": 0.0,
+              "max": 1600.0,
+              "avg": 551.4
+            }
+          },
+          "context_tokens": {
+            "count": 2,
+            "min": 168.0,
+            "max": 697.0,
+            "avg": 432.5
+          },
+          "context_truncated_count": 0,
+          "completion_statuses": {
+            "incomplete": 2
+          },
+          "final_statuses": {
+            "failed": 1
+          }
+        }
+      }
+    }
+  ],
+  "aggregate_trace_summary": {
+    "case_count": 3,
+    "completed_cases": 0,
+    "failed_cases": 3,
+    "counters": {
+      "page_fetches": 4,
+      "chunk_count": 9,
+      "context_truncated_count": 0,
+      "tool_result_statuses.ok": 9,
+      "tool_result_statuses.error": 5,
+      "error_class_counts.provider_error": 5,
+      "error_class_counts.repeated_tool_call": 8,
+      "final_statuses.failed": 3,
+      "page_evidence_statuses.no_evidence": 2,
+      "page_evidence_statuses.ok": 2,
+      "completion_statuses.incomplete": 2
+    }
+  }
+}

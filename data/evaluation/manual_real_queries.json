@@ -1,0 +1,21 @@
+{
+  "suite": "manual-real-web",
+  "description": "UTF-8 JSON inputs for real model-owned retrieval checks.",
+  "cases": [
+    {
+      "case_id": "shenzhen_metro_line_1_stations",
+      "query": "深圳地铁一号线有哪些站点",
+      "max_tool_steps": 12
+    },
+    {
+      "case_id": "shanghai_to_rwkv_company_transit",
+      "query": "如何从上海到深圳的RWKV公司，路线是什么，乘坐哪些公共交通比较好？",
+      "max_tool_steps": 16
+    },
+    {
+      "case_id": "rwkv_founder_papers_github",
+      "query": "RWKV的创始人是谁？发布哪些论文和GitHub项目，链接是什么？",
+      "max_tool_steps": 16
+    }
+  ]
+}

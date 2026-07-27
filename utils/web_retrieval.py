@@ -11,7 +11,7 @@ import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any, Iterable
-from urllib.parse import parse_qs, unquote, urldefrag, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, urldefrag, urlencode, urljoin, urlparse
 
 from utils.network_fetch import NetworkFetchError, fetch_text
 
@@ -156,47 +156,6 @@ def candidate_score(query: str, item: dict[str, Any]) -> float:
     return round(score, 4)
 
 
-def admit_candidates(
-    query: str,
-    candidates: Iterable[dict[str, Any]],
-    *,
-    limit: int = 8,
-    per_domain: int = 2,
-) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    admitted: list[dict[str, Any]] = []
-    rejected: list[dict[str, str]] = []
-    seen: set[str] = set()
-    domains: dict[str, int] = {}
-    for raw in candidates:
-        item = dict(raw)
-        item["url"] = normalize_url(str(item.get("url") or ""))
-        if not item["url"]:
-            rejected.append({"url": "", "reason": "invalid_url"})
-            continue
-        key = item["url"].casefold()
-        if key in seen:
-            rejected.append({"url": item["url"], "reason": "duplicate"})
-            continue
-        seen.add(key)
-        if _is_search_host(item["url"]):
-            rejected.append({"url": item["url"], "reason": "search_result_page"})
-            continue
-        if _looks_like_noise(item, query):
-            rejected.append({"url": item["url"], "reason": "low_relevance_noise"})
-            continue
-        domain = registrable_hint(item["url"])
-        if domains.get(domain, 0) >= per_domain:
-            rejected.append({"url": item["url"], "reason": "domain_budget"})
-            continue
-        item["domain"] = domain
-        item["score"] = candidate_score(query, item)
-        item["source_kind"] = item.get("source_kind") or infer_source_kind(item["url"], query)
-        domains[domain] = domains.get(domain, 0) + 1
-        admitted.append(item)
-    admitted.sort(key=lambda value: (float(value.get("score") or 0.0), bool(value.get("snippet"))), reverse=True)
-    return admitted[: max(1, limit)], rejected
-
-
 def infer_source_kind(url: str, query: str = "") -> str:
     host = hostname(url)
     if host == "github.com" or host.endswith(".github.com"):
@@ -261,54 +220,4 @@ def attach_page(item: dict[str, Any], *, timeout: int = 15) -> dict[str, Any]:
         value.setdefault("page_excerpt", "")
         value.setdefault("content", "")
     return value
-
-
-def select_pivot_domains(query: str, candidates: Iterable[dict[str, Any]], *, limit: int = 2) -> list[str]:
-    precision_terms = ("official", "官网", "官方", "论文", "paper", "arxiv", "github", "release", "文档", "docs")
-    if not any(term in (query or "").casefold() for term in precision_terms):
-        return []
-    domains: list[str] = []
-    for item in candidates:
-        domain = registrable_hint(str(item.get("url") or ""))
-        if domain and domain not in domains and domain not in _SEARCH_HOSTS:
-            domains.append(domain)
-        if len(domains) >= limit:
-            break
-    return domains
-
-
-def select_one_hop_links(
-    query: str,
-    pages: Iterable[dict[str, Any]],
-    *,
-    limit: int = 8,
-) -> list[dict[str, Any]]:
-    terms = _query_terms(query)
-    candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for page in pages:
-        base = str(page.get("url") or "")
-        base_domain = registrable_hint(base)
-        for link in page.get("links") or []:
-            url = normalize_url(str(link.get("url") or ""))
-            if not url or url in seen or registrable_hint(url) != base_domain:
-                continue
-            text = str(link.get("text") or "")
-            if not text or url.rstrip("/") == base.rstrip("/"):
-                continue
-            item = {
-                "title": text,
-                "url": url,
-                "snippet": text,
-                "source": "same_site_one_hop",
-                "retrieval_stage": "one_hop",
-            }
-            relevance = sum(1 for term in terms if term in f"{text} {url}".casefold())
-            if relevance == 0 and len(candidates) >= limit:
-                continue
-            item["score"] = float(relevance) + 0.25
-            candidates.append(item)
-            seen.add(url)
-    candidates.sort(key=lambda value: float(value.get("score") or 0.0), reverse=True)
-    return candidates[:limit]
 

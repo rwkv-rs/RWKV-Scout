@@ -1,0 +1,99 @@
+{
+  "suite": "manual-real-web",
+  "input": "data/evaluation/manual_real_shenzhen.json",
+  "started_at": "2026-07-27T21:43:10",
+  "finished_at": "2026-07-27T21:44:17",
+  "cases": [
+    {
+      "case_id": "shenzhen_metro_line_1_stations_encoding_fix",
+      "task_id": "JSON_ACCEPTANCE_shenzhen_metro_line_1_stations_encoding_fix_20260727214310",
+      "query": "深圳地铁一号线有哪些站点",
+      "status": "failed",
+      "answer": "未完成检索，无法生成有来源支持的答案。",
+      "error": "",
+      "trace": {
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "深圳地铁一号线 官方站点列表",
+              "max_results": 5,
+              "search_depth": "basic"
+            }
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://zh.wikipedia.org/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+              "max_chars": 5000
+            }
+          },
+          {
+            "step": 3,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "http://sz.bendibao.com/jt/20211231/879746.htm",
+              "max_chars": 5000
+            }
+          },
+          {
+            "step": 4,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://wuu.wikipedia.org/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+              "max_chars": 5000
+            }
+          },
+          {
+            "step": 5,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.sz.gov.cn/xxgk/sydwxxgk/jt/dt/ywxx/dtxlxx/content/post_11086804.html",
+              "max_chars": 5000
+            }
+          },
+          {
+            "step": 6,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://sztrans.fandom.com/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+              "max_chars": 5000
+            }
+          },
+          {
+            "step": 7,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://zh.wikipedia.org/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+              "max_chars": 5000
+            }
+          },
+          {
+            "step": 8,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "http://sz.bendibao.com/jt/20211231/879746.htm",
+              "max_chars": 5000
+            }
+          }
+        ],
+        "page_evidence": [],
+        "final": {
+          "status": "failed",
+          "content": "未完成检索，无法生成有来源支持的答案。",
+          "mode": "model_tool_loop_no_evidence"
+        }
+      }
+    }
+  ]
+}

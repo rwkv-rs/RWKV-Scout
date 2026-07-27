@@ -67,28 +67,19 @@ def _smart_truncate(text: str, max_tokens: int) -> tuple[str, str]:
     cut_idx = len(chunk_text)
     return text[:cut_idx], text[cut_idx:]
 
-def _fast_overlap(text: str, target_tokens: int) -> str:
-    """O(1) 光速重叠提取算法（保留以防其他插件调用）"""
-    if target_tokens <= 0: return ""
-    char_limit = target_tokens * 4
-    tail = text[-char_limit:] if len(text) > char_limit else text
-    
-    tokens = _tokenizer.encode(tail)
-    if len(tokens) <= target_tokens: return tail
-        
-    raw_bytes = _tokenizer.decodeBytes(tokens[-target_tokens:])
-    overlap_str = raw_bytes.decode('utf-8', errors='ignore')
-    
-    match = _SENTENCE_SPLIT_RE.search(overlap_str)
-    if match:
-        return overlap_str[match.end():].strip()
-        
-    first_space = overlap_str.find(' ')
-    if first_space != -1:
-        return overlap_str[first_space:].strip()
-        
-    return overlap_str.strip()
 
+def _hard_split_by_tokens(text: str, max_tokens: int) -> list[str]:
+    """Split an oversized sentence without ever returning a larger chunk."""
+    tokens = _tokenizer.encode(text)
+    if len(tokens) <= max_tokens:
+        return [text]
+    parts: list[str] = []
+    for start in range(0, len(tokens), max_tokens):
+        raw = _tokenizer.decodeBytes(tokens[start : start + max_tokens])
+        part = raw.decode("utf-8", errors="ignore").strip()
+        if part:
+            parts.append(part)
+    return parts
 
 def semantic_chunk_text(text: str, max_tokens: int = 800, overlap_ratio: float = 0.1) -> list[str]:
     """主控流程 (图表动态Mask + 段落优先 + 句子不可破绝对屏障版)"""
@@ -181,9 +172,15 @@ def semantic_chunk_text(text: str, max_tokens: int = 800, overlap_ratio: float =
                             current_chunk = overlap_sents
                             current_toks = ov_toks
                         
-                        # 规则 3：不论句子多长，只要它是单句，绝不截断它，强行塞入！
-                        current_chunk.append(s)
-                        current_toks += s_toks
+                        # A single paragraph/sentence can exceed the target
+                        # window.  Keep the window a hard invariant instead
+                        # of silently returning an oversized chunk.
+                        oversized_parts = _hard_split_by_tokens(s, max_tokens)
+                        if not oversized_parts:
+                            continue
+                        chunks.extend(oversized_parts[:-1])
+                        current_chunk = [oversized_parts[-1]]
+                        current_toks = get_token_count(oversized_parts[-1])
 
     # 收尾最后一个块
     if current_chunk:

@@ -1,179 +1,249 @@
-# RWKV-ECRA/utils/task_manager.py
-import os
+"""Thread-safe task metadata store backed by append-only JSONL events."""
+
+from __future__ import annotations
+
 import json
+import shutil
 import threading
 from datetime import datetime
-from config import DATA_PIPELINE
+from pathlib import Path
+from typing import Any
 
-TASK_LOG_FILE = os.path.join(DATA_PIPELINE.get("output_directory", "./data/output"), "tasks.jsonl")
+from config import DATA_PIPELINE
+from utils.file_lock import atomic_file_lease
+
+
+TASK_LOG_FILE = str(Path(DATA_PIPELINE.get("output_directory", "./data/output")) / "tasks.jsonl")
+_store_lock = threading.Lock()
+
 
 class TaskStore:
-    def __init__(self, filepath: str):
-        self.filepath = filepath
-        self._lock = threading.Lock()
-        self._task_index = {}
-        self._ordered_keys = []
+    def __init__(self, filepath: str, output_directory: str | None = None):
+        self.filepath = Path(filepath)
+        self.output_directory = Path(
+            output_directory or DATA_PIPELINE.get("output_directory", "./data/output")
+        )
+        self._lock = threading.RLock()
+        self._task_index: dict[str, dict[str, Any]] = {}
+        self._ordered_keys: list[str] = []
         self._load()
         self._sync_with_filesystem()
 
-    def _load(self):
-        if not os.path.exists(self.filepath): return
-        with open(self.filepath, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line: continue
-                try:
-                    record = json.loads(line)
-                    tid = record.get("task_id")
-                    if tid:
-                        if tid not in self._task_index:
-                            self._ordered_keys.append(tid)
-                            self._task_index[tid] = record
-                        else:
-                            self._task_index[tid].update(record)
-                        
-                        if self._task_index[tid].get('status') == 'deleted':
-                            if tid in self._ordered_keys: self._ordered_keys.remove(tid)
-                            del self._task_index[tid]
-                except: continue
+    def _load(self) -> None:
+        if not self.filepath.exists():
+            return
+        try:
+            lines = self.filepath.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                self._apply_record(record)
 
-    def _sync_with_filesystem(self):
-        output_dir = DATA_PIPELINE.get("output_directory", "./data/output")
-        if not os.path.exists(output_dir): return
+    def _apply_record(self, record: dict[str, Any]) -> None:
+        task_id = str(record.get("task_id") or "").strip()
+        if not task_id:
+            return
+        if task_id not in self._task_index:
+            self._ordered_keys.append(task_id)
+            self._task_index[task_id] = {}
+        self._task_index[task_id].update(record)
+        if self._task_index[task_id].get("status") == "deleted":
+            self._task_index.pop(task_id, None)
+            if task_id in self._ordered_keys:
+                self._ordered_keys.remove(task_id)
 
-        changed = False
+    def _append_event(self, record: dict[str, Any]) -> None:
+        self.filepath.parent.mkdir(parents=True, exist_ok=True)
+        with atomic_file_lease(self.filepath):
+            with self.filepath.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _sync_with_filesystem(self) -> None:
         with self._lock:
-            # 1. 剔除死链
-            dead_tasks = []
-            for tid in self._ordered_keys:
-                expected_dir = os.path.join(output_dir, tid)
-                record_dir = self._task_index[tid].get("result_dir", "")
-                if not os.path.exists(expected_dir) and not os.path.exists(record_dir):
-                    dead_tasks.append(tid)
-            for tid in dead_tasks:
-                self._ordered_keys.remove(tid)
-                del self._task_index[tid]
+            self.output_directory.mkdir(parents=True, exist_ok=True)
+            changed = False
+
+            for task_id in list(self._ordered_keys):
+                record = self._task_index[task_id]
+                expected = self.output_directory / task_id
+                recorded = Path(str(record.get("result_dir") or "")) if record.get("result_dir") else None
+                if not expected.exists() and not (recorded and recorded.exists()):
+                    self._ordered_keys.remove(task_id)
+                    self._task_index.pop(task_id, None)
+                    changed = True
+
+            for item in self.output_directory.iterdir():
+                if not item.is_dir() or item.name in self._task_index:
+                    continue
+                report_files = [
+                    path for path in item.rglob("*")
+                    if path.is_file() and path.suffix.casefold() in {".jsonl", ".md"}
+                ]
+                if not report_files:
+                    continue
+                target = max(report_files, key=lambda path: path.stat().st_mtime)
+                timestamp = datetime.fromtimestamp(target.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                self._ordered_keys.append(item.name)
+                self._task_index[item.name] = {
+                    "task_id": item.name,
+                    "timestamp": timestamp,
+                    "query": item.name,
+                    "status": "completed",
+                    "result_dir": str(item),
+                    "error": "",
+                    "queued_at": timestamp,
+                }
                 changed = True
 
-            # 2. 补录遗漏
-            for item in os.listdir(output_dir):
-                item_path = os.path.join(output_dir, item)
-                if not os.path.isdir(item_path) or item in self._task_index: continue
-                
-                has_valid_file = False
-                target_file = None
-                
-                # 递归遍历找文件 (免疫特殊字符路径)
-                for root_dir, _, files in os.walk(item_path):
-                    for f in files:
-                        if f.endswith(".jsonl") or f.endswith(".md"):
-                            has_valid_file = True
-                            target_file = os.path.join(root_dir, f)
-                            break
-                    if has_valid_file: break
-                
-                if has_valid_file:
-                    try:
-                        mtime = os.path.getmtime(target_file)
-                        time_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
-                    except:
-                        time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        
-                    self._ordered_keys.append(item)
-                    self._task_index[item] = {
-                        "task_id": item,
-                        "timestamp": time_str,
-                        "query": item, 
-                        "status": "completed",
-                        "result_dir": item_path,
-                        "error": "",
-                        "queued_at": time_str
-                    }
-                    changed = True
-                    
             if changed:
-                self._ordered_keys.sort(key=lambda k: self._task_index[k].get("timestamp", ""))
-                os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
-                with open(self.filepath, "w", encoding="utf-8") as f:
-                    for k in self._ordered_keys:
-                        f.write(json.dumps(self._task_index[k], ensure_ascii=False) + "\n")
+                self._ordered_keys.sort(
+                    key=lambda task_id: self._task_index[task_id].get("timestamp", "")
+                )
+                self.filepath.parent.mkdir(parents=True, exist_ok=True)
+                with atomic_file_lease(self.filepath):
+                    self.filepath.write_text(
+                        "".join(
+                            json.dumps(self._task_index[task_id], ensure_ascii=False) + "\n"
+                            for task_id in self._ordered_keys
+                        ),
+                        encoding="utf-8",
+                    )
 
-    def record_task(self, task_id: str, query: str, status: str, result_dir: str = "", error: str = "", queued_at: str = None, acceptance_case_id: str = None):
+    def record_task(
+        self,
+        task_id: str,
+        query: str,
+        status: str,
+        result_dir: str = "",
+        error: str = "",
+        queued_at: str | None = None,
+        acceptance_case_id: str | None = None,
+    ) -> None:
         with self._lock:
-            os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
-            record = {
+            existing = self._task_index.get(task_id, {})
+            record: dict[str, Any] = {
                 "task_id": task_id,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "query": query,
                 "status": status,
                 "result_dir": result_dir,
-                "error": error
+                "error": error,
             }
-            if queued_at: record["queued_at"] = queued_at
-            if acceptance_case_id: record["acceptance_case_id"] = acceptance_case_id
-                
+            if queued_at is not None:
+                record["queued_at"] = queued_at
+            elif existing.get("queued_at") is not None:
+                record["queued_at"] = existing["queued_at"]
+            if acceptance_case_id is not None:
+                record["acceptance_case_id"] = acceptance_case_id
+            elif existing.get("acceptance_case_id") is not None:
+                record["acceptance_case_id"] = existing["acceptance_case_id"]
+            self._apply_record(record)
+            self._append_event(self._task_index[task_id].copy())
+
+    def update_task_progress(self, task_id: str, progress: str) -> None:
+        with self._lock:
             if task_id not in self._task_index:
-                self._ordered_keys.append(task_id)
-                self._task_index[task_id] = record
-            else:
-                if "queued_at" not in record and "queued_at" in self._task_index[task_id]:
-                    record["queued_at"] = self._task_index[task_id]["queued_at"]
-                if "acceptance_case_id" not in record and "acceptance_case_id" in self._task_index[task_id]:
-                    record["acceptance_case_id"] = self._task_index[task_id]["acceptance_case_id"]
-                self._task_index[task_id].update(record)
-            
-            with open(self.filepath, "a", encoding="utf-8") as f:
-                f.write(json.dumps(self._task_index[task_id], ensure_ascii=False) + "\n")
+                return
+            self._task_index[task_id]["progress"] = progress
+            self._append_event(self._task_index[task_id].copy())
 
-    def update_task_progress(self, task_id: str, progress: str):
+    def request_stop(self, task_id: str) -> None:
         with self._lock:
-            if task_id in self._task_index:
-                self._task_index[task_id]['progress'] = progress
-                with open(self.filepath, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(self._task_index[task_id], ensure_ascii=False) + "\n")
+            task = self._task_index.get(task_id)
+            if not task or task.get("status") != "running":
+                return
+            task["status"] = "stopped"
+            self._append_event(task.copy())
 
-    def request_stop(self, task_id: str):
+    def delete_task(self, task_id: str) -> None:
         with self._lock:
-            if task_id in self._task_index and self._task_index[task_id]['status'] == 'running':
-                self._task_index[task_id]['status'] = 'stopped'
-                with open(self.filepath, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(self._task_index[task_id], ensure_ascii=False) + "\n")
-
-    def delete_task(self, task_id: str):
-        with self._lock:
-            if task_id in self._task_index:
-                self._task_index[task_id]['status'] = 'deleted'
-                with open(self.filepath, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(self._task_index[task_id], ensure_ascii=False) + "\n")
-                
-                task_dir = self._task_index[task_id].get("result_dir")
-                if task_dir and os.path.exists(task_dir):
-                    import shutil
-                    try: shutil.rmtree(task_dir)
-                    except: pass
-                
-                if task_id in self._ordered_keys: self._ordered_keys.remove(task_id)
-                del self._task_index[task_id]
+            task = self._task_index.get(task_id)
+            if not task:
+                return
+            self._append_event({**task, "status": "deleted"})
+            result_dir_value = str(task.get("result_dir") or "").strip()
+            if result_dir_value:
+                result_dir = Path(result_dir_value).expanduser().resolve()
+                try:
+                    result_dir.relative_to(self.output_directory.resolve())
+                except ValueError:
+                    result_dir = None
+                if result_dir is not None and result_dir.exists() and result_dir.is_dir():
+                    try:
+                        shutil.rmtree(result_dir)
+                    except OSError:
+                        pass
+            self._task_index.pop(task_id, None)
+            if task_id in self._ordered_keys:
+                self._ordered_keys.remove(task_id)
 
     def is_task_stopped(self, task_id: str) -> bool:
         with self._lock:
             task = self._task_index.get(task_id)
-            if not task: return True
-            return task.get('status') in ('stopped', 'deleted')
+            # A direct Orchestrator invocation may start before the API/task
+            # queue has persisted a record.  Absence is not a stop request;
+            # only an explicit terminal stop state should interrupt work.
+            return bool(task and task.get("status") in {"stopped", "deleted"})
 
-    def get_all_tasks(self) -> list:
-        with self._lock: return [self._task_index[k] for k in reversed(self._ordered_keys)]
+    def get_all_tasks(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [self._task_index[task_id].copy() for task_id in reversed(self._ordered_keys)]
 
-_store = None
+
+_store: TaskStore | None = None
+
+
 def _get_store() -> TaskStore:
     global _store
-    if _store is None: _store = TaskStore(TASK_LOG_FILE)
+    if _store is None:
+        with _store_lock:
+            if _store is None:
+                _store = TaskStore(TASK_LOG_FILE)
     return _store
 
-def init_task_file(): _get_store()
-def record_task(task_id: str, query: str, status: str, result_dir: str = "", error: str = "", queued_at: str = None, acceptance_case_id: str = None): _get_store().record_task(task_id, query, status, result_dir, error, queued_at, acceptance_case_id)
-def update_task_progress(task_id: str, progress: str): _get_store().update_task_progress(task_id, progress)
-def request_stop(task_id: str): _get_store().request_stop(task_id)
-def delete_task(task_id: str): _get_store().delete_task(task_id)
-def is_task_stopped(task_id: str) -> bool: return _get_store().is_task_stopped(task_id)
-def get_all_tasks() -> list: return _get_store().get_all_tasks()
+
+def record_task(
+    task_id: str,
+    query: str,
+    status: str,
+    result_dir: str = "",
+    error: str = "",
+    queued_at: str | None = None,
+    acceptance_case_id: str | None = None,
+) -> None:
+    _get_store().record_task(
+        task_id,
+        query,
+        status,
+        result_dir,
+        error,
+        queued_at,
+        acceptance_case_id,
+    )
+
+
+def update_task_progress(task_id: str, progress: str) -> None:
+    _get_store().update_task_progress(task_id, progress)
+
+
+def request_stop(task_id: str) -> None:
+    _get_store().request_stop(task_id)
+
+
+def delete_task(task_id: str) -> None:
+    _get_store().delete_task(task_id)
+
+
+def is_task_stopped(task_id: str) -> bool:
+    return _get_store().is_task_stopped(task_id)
+
+
+def get_all_tasks() -> list[dict[str, Any]]:
+    return _get_store().get_all_tasks()

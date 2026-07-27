@@ -1,9 +1,9 @@
 {
-  "LLM_PROVIDER": "local_7b", 
+  "LLM_PROVIDER": "local_13b",
   "API_KEYS": {
     "baidu": "key",
     "volcengine": "key",
-    "tavily": "key",
+    "tavily": "",
     "local": "rwkv-skills",
     "local_7b": "rwkv-skills",
     "local_13b": "rwkv-skills"
@@ -24,18 +24,32 @@
       "label": "RWKV 7.2B",
       "base_url": "http://127.0.0.1:29572/v1",
       "model": "rwkv7-g1h-7.2b-20260710-ctx10240",
-      "max_tokens": 1024,
-      "temperature": 0.2,
+      "max_tokens": 8192,
+      "temperature": 0.0,
       "context_length": 10240,
       "ui_visible": true
     },
     "local_13b": {
       "label": "RWKV 13.3B",
-      "base_url": "http://127.0.0.1:29533/v1",
-      "model": "rwkv7-g1h-13.3b-20260710-ctx10240",
-      "max_tokens": 1024,
-      "temperature": 0.2,
+      "base_url": "http://172.21.122.93:29613/v1",
+      "model": "rwkv7-g1i_preview4922-13.3b-20260720-ctx12288",
+      "max_tokens": 8192,
+      "temperature": 0.0,
+      "context_length": 12288,
+      "ui_visible": true
+    },
+    "local_direct_1p5b": {
+      "label": "RWKV 1.5B (Direct)",
+      "base_url": "",
+      "model": "rwkv7-g1h-1.5b-20260710-ctx10240",
+      "max_tokens": 768,
+      "temperature": 0.0,
       "context_length": 10240,
+      "runtime_backend": "direct_rwkv",
+      "direct_runtime": {
+        "model_name": "rwkv7-g1h-1.5b-20260710-ctx10240",
+        "device": "cuda"
+      },
       "ui_visible": true
     }
   },
@@ -45,6 +59,12 @@
     "time_range": "year",
     "chunks_per_source": 5
   },
+  "WIGOLO": {
+    "mode": "auto",
+    "base_url": "http://127.0.0.1:3333",
+    "api_token": "",
+    "timeout_seconds": 20
+  },
   "DATA_PIPELINE": {
     "input_directory": "./data/input",
     "output_directory": "./data/output",
@@ -53,6 +73,10 @@
     "enable_debug_slm": false, 
     "allowed_extensions": [".txt", ".md"],
     "max_chunk_tokens": 2400,
+    "web_chunk_tokens": 2048,
+    "web_chunk_overlap_ratio": 0.1,
+    "web_candidate_max_tokens": 8192,
+    "web_candidate_max_facts": 64,
     "overlap_ratio": 0.05,
     "reduce_group_size": 4,
     "reduce_target_chunks": 1,
@@ -76,13 +100,48 @@
     "concurrency": 2
   },
   "SLM_CONFIG": {
-    "endpoint": "http://127.0.0.1:29572/v1/chat/completions",
+    "endpoint": "http://172.21.122.93:29613/v1/chat/completions",
     "protocol": "openai",
     "password": "rwkv-skills",
     "concurrency": 2,
     "enable_async_parallel": false,
     "async_parallelism": 2,
     "async_batch_wait_ms": 20
+  },
+  "EXPERIMENT": {
+    "model_profile": "local_13b",
+    "dataset_directory": "./data/evaluation",
+    "prompt_version": "retrieval-synthesis-v1",
+    "default_variant": "candidate",
+    "citation_remote_validation": false,
+    "max_parallel_cases": 2
+  },
+  "MODEL_RUNTIME": {
+    "backend": "openai_compat",
+    "direct_rwkv": {
+      "engine_root": "",
+      "model_path": "",
+      "vocab_path": "",
+      "device": "cuda",
+      "vocab_size": 65536,
+      "head_size": 64,
+      "max_tokens": 768,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "top_k": 0,
+      "stop_tokens": [0]
+    }
+  },
+  "RUNTIME": {
+    "analysis_timeout_seconds": 600,
+    "model_connect_timeout_seconds": 10,
+    "model_read_timeout_seconds": 180,
+    "network_timeout_seconds": 20
+  },
+  "SERVER": {
+    "host": "0.0.0.0",
+    "port": 8787,
+    "workers": 1
   },
   "TRACKING": {
     "enable": true,

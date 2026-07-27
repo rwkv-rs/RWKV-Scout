@@ -1,0 +1,10 @@
+{
+  "suite": "manual-real-web-single",
+  "cases": [
+    {
+      "case_id": "shenzhen_metro_line_1_stations_encoding_fix",
+      "query": "深圳地铁一号线有哪些站点",
+      "max_tool_steps": 8
+    }
+  ]
+}

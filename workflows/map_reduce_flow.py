@@ -6,7 +6,7 @@ from clients.slm_client import SLMClient
 from clients.llm_client import LLMClient
 from utils.file_reader import read_local_file
 from utils.chunker import semantic_chunk_text, get_token_count
-from config import DATA_PIPELINE, SLM_CONFIG, get_llm_concurrency, get_slm_concurrency
+from config import DATA_PIPELINE, get_llm_concurrency, get_slm_concurrency
 from utils.checkpoint import get_checkpoint, save_checkpoint
 from utils.retry import retry_with_fallback
 from prompts.slm_prompts import build_slm_sequential_summary_prompt, build_slm_reduce_prompt

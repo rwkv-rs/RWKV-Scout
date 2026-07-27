@@ -1,0 +1,164 @@
+{
+  "suite": "manual-real-web",
+  "input": "data/evaluation/manual_real_shanghai.json",
+  "started_at": "2026-07-27T21:40:19",
+  "finished_at": "2026-07-27T21:41:32",
+  "cases": [
+    {
+      "case_id": "shanghai_to_rwkv_company_transit_recovery",
+      "task_id": "JSON_ACCEPTANCE_shanghai_to_rwkv_company_transit_recovery_20260727214019",
+      "query": "如何从上海到深圳的RWKV公司，路线是什么，乘坐哪些公共交通比较好？",
+      "status": "failed",
+      "answer": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+      "error": "",
+      "trace": {
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "RWKV公司 深圳 地址",
+              "max_results": 5
+            }
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 3,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://cbgc.scol.com.cn/news/6104792",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 4,
+            "phase": "DISCOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.sz.gov.cn/en_szgov/news/infocus/aisz/depth/content/post_11547269.html",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 5,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://news.zol.com.cn/1021/10217116.html",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 6,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "http://www.szhetai.com/content/13617.html",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 7,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 8,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 9,
+            "phase": "DISCOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 12000
+            }
+          }
+        ],
+        "page_evidence": [
+          {
+            "step": 2,
+            "url": "https://www.rwkvos.com/about",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://www.rwkvos.com/about",
+              "title": "www.rwkvos.com",
+              "page_chars": 1955,
+              "chunk_count": 3,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 3,
+            "url": "https://cbgc.scol.com.cn/news/6104792",
+            "data": {
+              "status": "ok",
+              "url": "https://cbgc.scol.com.cn/news/6104792",
+              "title": "cbgc.scol.com.cn",
+              "page_chars": 3707,
+              "chunk_count": 5,
+              "candidate_count": 1,
+              "errors": []
+            },
+            "compact_facts": "[chunk-2] RWKV公司在深圳的详细地址是南山区云科技大厦 从上海到深圳的主要交通方式包括高铁/动车、飞机和长途大巴 深圳机场到RWKV公司的地铁/公交路线未在片段中提供 深圳火车站到RWKV公司的地铁/公交路线未在片段中提供 上海到深圳各交通方式的时间、费用和便利性未在片段中提供 深圳市内从交通枢纽到RWKV公司的公交/地铁线路未在片段中提供 推荐的上海到深圳交通方式未在片段中提供 推荐的深圳市内公共交通路线未在片段中提供 总行程时间与费用估算未在片段中提供"
+          },
+          {
+            "step": 5,
+            "url": "https://news.zol.com.cn/1021/10217116.html",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://news.zol.com.cn/1021/10217116.html",
+              "title": "news.zol.com.cn",
+              "page_chars": 5743,
+              "chunk_count": 7,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 6,
+            "url": "http://www.szhetai.com/content/13617.html",
+            "data": {
+              "status": "no_evidence",
+              "url": "http://www.szhetai.com/content/13617.html",
+              "title": "www.szhetai.com",
+              "page_chars": 2433,
+              "chunk_count": 3,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          }
+        ],
+        "final": {
+          "status": "failed",
+          "content": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+          "mode": "model_repeated_tool_call"
+        }
+      }
+    }
+  ]
+}

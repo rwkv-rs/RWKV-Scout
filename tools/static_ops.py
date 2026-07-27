@@ -1,7 +1,6 @@
 # RWKV-ECRA/tools/static_ops.py
 import os
 import json
-import random
 from utils.file_reader import read_local_file
 from config import DATA_PIPELINE
 from tools.registry import ToolRegistry

@@ -13,6 +13,8 @@ import re
 from typing import Any, Mapping, Sequence
 
 from tools.registry import ToolRegistry
+from utils.model_events import visible_model_text
+from utils.experiment_strategies import normalize_strategy
 
 
 def _without_think(text: str) -> str:
@@ -181,7 +183,12 @@ def _fallback_query(user_query: str, data: Mapping[str, Any] | None = None) -> s
         return f"{authors[0] if authors else title} affiliation institution".strip()
     if title:
         return f"{title} official source".strip()
-    return " ".join((user_query or "").split()).strip()
+    fallback = re.sub(
+        r"(?:请)?检索并回答|(?:请)?检索|给出关键证据|来源链接|难度下的限制|领域的任务\s*\d+|任务\s*\d+",
+        " ",
+        user_query or "",
+    )
+    return " ".join(fallback.replace("；", " ").replace("。", " ").split()).strip()
 
 
 def generate_query_candidates(
@@ -258,7 +265,7 @@ def generate_query_candidates(
     return {
         "queries": queries[: max(1, int(max_candidates))],
         "source": source,
-        "raw_model_output": "\n--- candidate ---\n".join(raw_outputs),
+        "raw_model_output": "\n--- candidate ---\n".join(visible_model_text(item) for item in raw_outputs),
         "error": error,
         "followup": followup,
     }
@@ -278,7 +285,48 @@ def compact_observation(data: Mapping[str, Any], *, limit: int = 8) -> str:
 
 
 def _record_key(item: Mapping[str, Any]) -> str:
-    return str(item.get("url") or item.get("doi") or item.get("title") or "").strip().casefold()
+    doi = str(item.get("doi") or "").strip().casefold()
+    doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", doi).rstrip("/")
+    if doi.startswith("10."):
+        return f"doi:{doi}"
+    url = str(item.get("url") or "").strip().casefold()
+    url = re.sub(r"^https?://(?:www\.)?", "", url)
+    url = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    if url:
+        doi_match = re.search(r"(?:dx\.)?doi\.org/(10\.\d{4,9}/[^\s]+)", url)
+        if doi_match:
+            return f"doi:{doi_match.group(1).rstrip('/')}"
+        return f"url:{url}"
+    title = " ".join(str(item.get("title") or "").split()).casefold()
+    return f"title:{title}" if title else ""
+
+
+def _quality_terms(query: str, candidate_queries: Sequence[str]) -> set[str]:
+    stopwords = {
+        "the", "and", "for", "find", "then", "from", "with", "official", "source",
+        "search", "query", "information", "answer", "page", "please", "current",
+    }
+    terms: set[str] = set()
+    for value in (query, *candidate_queries):
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", str(value or "")):
+            token = token.casefold()
+            if token not in stopwords:
+                terms.add(token)
+    return terms
+
+
+def _evidence_quality_score(item: Mapping[str, Any], terms: set[str], candidate_count: int) -> float:
+    haystack = " ".join(
+        str(item.get(key) or "")
+        for key in ("title", "url", "snippet", "abstract", "page_excerpt", "content")
+    ).casefold()
+    hits = sum(term in haystack for term in terms)
+    lexical = min(1.0, hits / max(1, min(len(terms), 8)))
+    support = min(1.0, len(set(item.get("candidate_queries") or [])) / max(1, candidate_count))
+    best_rank = min(item.get("candidate_ranks") or [999])
+    rank_score = 1 / max(1, best_rank)
+    body = bool(str(item.get("page_excerpt") or item.get("content") or item.get("abstract") or "").strip())
+    return round(0.45 * lexical + 0.25 * float(body) + 0.20 * support + 0.10 * rank_score, 4)
 
 
 def merge_retrieval_results(
@@ -287,11 +335,14 @@ def merge_retrieval_results(
     rounds: Sequence[tuple[str, Mapping[str, Any]]],
     *,
     scope: str = "",
+    ranking_strategy: str = "candidate_support_then_rank.v1",
 ) -> dict[str, Any]:
     """Merge candidate/round results without inventing fields."""
+    strategy = normalize_strategy({"ranking_strategy": ranking_strategy})["ranking_strategy"]
     merged: dict[str, dict[str, Any]] = {}
     sources: list[str] = []
     citation_refs: list[dict[str, Any]] = []
+    citation_by_key: dict[str, int] = {}
     errors: list[str] = []
     real_network_values: list[bool] = []
     candidate_queries: list[str] = []
@@ -303,8 +354,21 @@ def merge_retrieval_results(
             if source and source not in sources:
                 sources.append(source)
         for ref in data.get("citation_refs") or []:
-            if ref not in citation_refs:
-                citation_refs.append(ref)
+            if not isinstance(ref, dict):
+                continue
+            key = _record_key(ref) or str(ref.get("ref_id") or "").strip().casefold()
+            if not key:
+                continue
+            existing_index = citation_by_key.get(key)
+            if existing_index is None:
+                citation_by_key[key] = len(citation_refs)
+                citation_refs.append(dict(ref))
+            else:
+                current = citation_refs[existing_index]
+                current_evidence = str(current.get("evidence_text") or current.get("content") or "")
+                new_evidence = str(ref.get("evidence_text") or ref.get("content") or "")
+                if len(new_evidence) > len(current_evidence):
+                    citation_refs[existing_index] = {**current, **ref}
         for rank, item in enumerate(data.get("results") or [], start=1):
             key = _record_key(item)
             if not key:
@@ -322,7 +386,42 @@ def merge_retrieval_results(
                     if len(str(item.get(field) or "")) > len(str(current.get(field) or "")):
                         current[field] = item.get(field)
     results = list(merged.values())
-    results.sort(key=lambda item: (len(item.get("candidate_queries") or []), -min(item.get("candidate_ranks") or [999])), reverse=True)
+    quality_terms = _quality_terms(query, candidate_queries)
+    if strategy == "best_rank.v1":
+        results.sort(key=lambda item: (min(item.get("candidate_ranks") or [999]), -len(item.get("candidate_queries") or [])))
+    elif strategy == "dedup_order.v1":
+        # Deliberately weak but reproducible ablation: preserve first-seen order.
+        results.sort(key=lambda item: min(item.get("candidate_ranks") or [999]))
+    elif strategy == "evidence_quality.v1":
+        results.sort(
+            key=lambda item: _evidence_quality_score(item, quality_terms, len(dict.fromkeys(candidate_queries))),
+            reverse=True,
+        )
+    else:
+        results.sort(key=lambda item: (len(item.get("candidate_queries") or []), -min(item.get("candidate_ranks") or [999])), reverse=True)
+    candidate_count = max(1, len(dict.fromkeys(candidate_queries)))
+    for rank, item in enumerate(results, start=1):
+        support_count = len(dict.fromkeys(item.get("candidate_queries") or []))
+        best_candidate_rank = min(item.get("candidate_ranks") or [999])
+        support_score = support_count / candidate_count
+        rank_score = 1 / max(1, best_candidate_rank)
+        item["dedup_key"] = _record_key(item)
+        item["ranking_method"] = strategy
+        item["rerank_score"] = round(
+            rank_score
+            if strategy == "best_rank.v1"
+            else 0.0
+            if strategy == "dedup_order.v1"
+            else _evidence_quality_score(item, quality_terms, candidate_count)
+            if strategy == "evidence_quality.v1"
+            else 0.7 * support_score + 0.3 * rank_score,
+            4,
+        )
+        item["retrieval_rank"] = rank
+    evidence_missing_count = sum(
+        not bool(str(item.get("page_excerpt") or item.get("content") or item.get("abstract") or "").strip())
+        for item in results
+    )
     return {
         "status": "ok" if results else "no_results",
         "real_network": all(real_network_values) if real_network_values else True,
@@ -335,8 +434,10 @@ def merge_retrieval_results(
         "results": results,
         "sources": sources,
         "citation_refs": citation_refs,
+        "evidence_missing_count": evidence_missing_count,
         "provider_errors": errors,
         "evidence_policy": next((data.get("evidence_policy") for _, data in rounds if data.get("evidence_policy")), ""),
+        "ranking_strategy": strategy,
     }
 
 

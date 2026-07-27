@@ -11,6 +11,7 @@
 !*.png
 !*.jpg
 !*.json
+!pyproject.toml
 
 # 4. （可选）如果你希望 .gitignore 文件本身也能被提交并同步到仓库，请保留下面这行：
 !.gitignore
@@ -25,3 +26,20 @@ debug_slm/
 logs/
 package-lock.json
 data/output/
+!data/
+!data/evaluation/
+!data/evaluation/**
+
+# Local Python/runtime artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local frontend/build artefacts
+frontend/node_modules/
+frontend/dist/

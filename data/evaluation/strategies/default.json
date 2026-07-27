@@ -1,0 +1,5 @@
+{
+  "ranking_strategy": "candidate_support_then_rank.v1",
+  "context_source_count": null,
+  "prompt_variant": "default.v1"
+}

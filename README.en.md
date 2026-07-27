@@ -1,5 +1,8 @@
 # RWKV-ECRA
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the module boundaries and dependency rules.
+See [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) for reproducible runs and [docs/external_projects/wigolo.md](docs/external_projects/wigolo.md) for the wigolo evaluation record.
+
 Language: [中文](README.md) | English
 
 ## Features and Demonstrations
@@ -19,22 +22,47 @@ The final report presents an analysis of the provided content with source citati
 
 Python 3.10 or newer is recommended.
 
-Install the basic dependencies required for the current code (using `uv pip` is recommended for faster automatic conflict resolution):
+Install the pinned dependencies required for the current code:
 
 ```bash
-pip install fastapi uvicorn python-multipart openai requests tavily-python
-
+pip install -r requirements.txt
 ```
 
-> The project uses the latest version of the RWKV model by default, and prompts and parameters optimized for the 7.2B model have been configured. You don't need to change the parameters if you use a larger model. If using a smaller model, it is recommended to reduce the input length, while other parameters remain optimal.
+> Current production experiments use the exact local RWKV 13.3B contract: model `rwkv7-g1i_preview4922-13.3b-20260720-ctx12288`, endpoint `http://172.21.122.93:29613/v1`, and context length `12288`. The compatibility endpoint is retained for that historical deployment, but the application now has a project-owned `direct_rwkv` backend that loads a checkpoint in-process. See [docs/MODEL_RUNTIME.md](docs/MODEL_RUNTIME.md) before switching a model profile to direct inference. The former RWKV 7.2B contract remains as a separate historical baseline and must not be mixed with 13.3B results.
 
-> LLM calls based on Volcengine and Baidu AI Studio are configured. The Baidu configuration comes with a built-in search engine and is set up with mandatory citations. `tavily` is configured for Volcengine. More comprehensive search engines will be added in the future.
+> LLM calls based on Volcengine and Baidu AI Studio remain optional adapters. The base installation does not require the OpenAI SDK; install `pip install -e ".[cloud]"` only when a cloud provider is explicitly selected.
 
-### 2. rwkv_lightning Configuration Guide
+### Optional: local wigolo web retrieval
 
-This project requires calling the model started via [rwkv_lightning](https://github.com/RWKV-Vibe/rwkv_lightning). Support for the [Albatross](https://github.com/BlinkDL/Albatross) inference engine will be added later.
+The project can use [wigolo](https://github.com/KnockOutEZ/wigolo) as a local web retrieval backend. The default mode is `auto`:
 
-For detailed configuration and usage tutorials, please refer to the [rwkv_lightning Batch Inference Tutorial](https://www.rwkv.cn/tutorials/intermediate/rwkv_lightning).
+- use the local wigolo REST service when it is available;
+- fall back to the existing keyless public search if wigolo is not installed, not running, or fails;
+- no Tavily, OpenAI, or other cloud API key is required for this path.
+
+After initializing wigolo, start its local REST service:
+
+    npx wigolo init
+    npx wigolo serve
+
+The default endpoint is `http://127.0.0.1:3333`. Configure it with:
+
+    RWKV_ECRA_WIGOLO_MODE=auto
+    WIGOLO_BASE_URL=http://127.0.0.1:3333
+
+    # Always use the existing keyless provider
+    RWKV_ECRA_WIGOLO_MODE=off
+
+    # Fail instead of falling back when wigolo is unavailable
+    RWKV_ECRA_WIGOLO_MODE=only
+
+Web content remains marked as untrusted evidence and cannot act as system instructions. Search results, excerpts, citation IDs, and scores are retained for later report rendering.
+
+### 2. Model runtime configuration
+
+The workflow layer uses an internal `ModelBackend` contract. Set `MODEL_RUNTIME.backend` to `direct_rwkv` to load a local RWKV checkpoint through the Albatross engine without a model API server. Keep `openai_compat` only as a migration or remote-service adapter.
+
+See [docs/MODEL_RUNTIME.md](docs/MODEL_RUNTIME.md) for paths, environment overrides, readiness checks, and a real generation smoke test.
 
 ### 3. Parameter Configuration Guide
 
@@ -44,7 +72,7 @@ Below are the parameter descriptions found in `config.json`.
 
 | Parameter Name | Function | Options |
 | --- | --- | --- |
-| `LLM_PROVIDER` | Model provider, currently Volcengine and Baidu AI Studio are supported | `baidu` `volcengine` |
+| `LLM_PROVIDER` | Runtime model provider | `local_7b` `local_13b` `local_direct_1p5b` `baidu` `volcengine` |
 | `API_KEYS.baidu` | API_Key for Baidu AI Studio | `Any valid Key` (Optional if not used) |
 | `API_KEYS.volcengine` | API_Key for Volcengine | `Any valid Key` (Optional if not used) |
 | `API_KEYS.tavily` | API_Key for tavily search engine | `Any valid Key` |
@@ -84,9 +112,14 @@ npm run dev
 
 Once started, the frontend runs at `http://127.0.0.1:5177` by default.
 
+Before deployment, run `python -m scripts.preflight --dataset data/evaluation/dynamic.jsonl`.
+The backend exposes `/healthz`, `/readyz`, `/api/v1/metrics/operational`, and a
+Prometheus-compatible `/metrics`. See [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)
+for dynamic evaluation, blind review, and rollback gates.
+
 ## Future Optimization Plans
 
-* Build in the [Albatross](https://github.com/BlinkDL/Albatross) inference engine, while retaining the current method of running on the service started by [rwkv_lightning](https://github.com/RWKV-Vibe/rwkv_lightning).
+* Expand the direct RWKV runtime with safe same-length batching and a dedicated local worker process.
 * Optimize performance and execution paths.
 * Beautify the frontend and refine logging. Currently, the frontend lacks visual appeal and the logic could be more elegant.
 * Support LLMs and search engines from more sources.
@@ -135,10 +168,13 @@ Once started, the frontend runs at `http://127.0.0.1:5177` by default.
 | `AGENT_CONFIG.max_error_retries` | Maximum error retries | `3` |
 | `AGENT_CONFIG.memory_truncate_length` | Memory truncation length | `60000` |
 | `SLM_CONFIG.endpoint` | RWKV API endpoint | `"http://192.168.0.82:8080/v1/chat/completions"` |
-| `SLM_CONFIG.password` | RWKV API password (leave empty if none) | `"rwkv7_7.2b"` |
+| `SLM_CONFIG.password` | RWKV API password (leave empty if none) | `"rwkv-skills"` |
 | `SLM_CONFIG.concurrency` | RWKV maximum concurrency | Integer. For the 7.2B model with 24GB VRAM, setting this to 16GB is optimal. |
 | `TRACKING.enable` | Whether to enable log tracking | `true` |
 | `TRACKING.enable_slm_log` | Whether to track RWKV processing logs | `false` |
 | `TRACKING.log_dir` | Directory path to store logs | `"./logs"` |
+| `MODEL_RUNTIME.backend` | Project-owned model execution backend | `direct_rwkv` or `openai_compat` |
+| `MODEL_RUNTIME.direct_rwkv.engine_root` | Albatross checkout containing `reference/rwkv7.py` | Local path |
+| `MODEL_RUNTIME.direct_rwkv.model_path` | RWKV checkpoint path, with or without `.pth` | Local path |
 
 ```

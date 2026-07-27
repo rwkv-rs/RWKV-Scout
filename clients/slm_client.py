@@ -3,7 +3,15 @@ import json
 import requests
 import time
 import concurrent.futures
-from config import get_slm_endpoint, get_slm_password, get_slm_protocol, get_slm_concurrency, get_llm_model
+from config import (
+    get_llm_model,
+    get_model_backend_name,
+    get_slm_concurrency,
+    get_slm_endpoint,
+    get_slm_password,
+    get_slm_protocol,
+)
+from runtime import get_model_backend
 from utils.chunker import get_token_count
 from utils.token_tracker import global_token_tracker
 
@@ -46,6 +54,12 @@ class SLMClient:
         return results
 
     def _batch_generate_direct(self, contents: list[str]) -> list[str]:
+        selected_backend = get_model_backend_name()
+        if selected_backend in {"direct_rwkv", "auto"}:
+            backend = get_model_backend()
+            if selected_backend == "direct_rwkv" or getattr(backend, "backend_name", "") == "direct_rwkv":
+                return backend.batch_text_completion(contents, max_tokens=2400)
+
         if get_slm_protocol() == "openai":
             return self._openai_generate(contents)
 

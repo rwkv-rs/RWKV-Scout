@@ -1,0 +1,541 @@
+{
+  "suite": "manual-real-web",
+  "input": "data/evaluation/manual_real_queries.json",
+  "started_at": "2026-07-27T18:47:56",
+  "finished_at": "2026-07-27T18:50:00",
+  "cases": [
+    {
+      "case_id": "shenzhen_metro_line_1_stations",
+      "task_id": "JSON_ACCEPTANCE_shenzhen_metro_line_1_stations_20260727184756",
+      "query": "深圳地铁一号线有哪些站点",
+      "status": "failed",
+      "answer": "模型未返回可执行的 RWKV JSON 工具调用，无法安全继续检索。",
+      "error": "",
+      "trace": {
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "深圳地铁一号线站点",
+              "max_results": 8
+            }
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "http://sz.bendibao.com/jt/2025228/985420.htm"
+            }
+          },
+          {
+            "step": 3,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://jtys.sz.gov.cn/jtzx/wycx/dtcx/dtxl/content/post_12601089.html"
+            }
+          },
+          {
+            "step": 4,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.metroman.cn/zh-hant/cities/shenzhen/lines/line-1"
+            }
+          },
+          {
+            "step": 5,
+            "phase": "DISCOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.metroman.cn/zh-hant/cities/shenzhen/lines/line-1"
+            }
+          },
+          {
+            "step": 6,
+            "phase": "RECOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "深圳地铁一号线 站点 列表",
+              "max_results": 5
+            }
+          },
+          {
+            "step": 7,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://m.shenchuang.com/show/1494246.shtml"
+            }
+          },
+          {
+            "step": 8,
+            "phase": "SYNTHESIS",
+            "action": "",
+            "args": {}
+          }
+        ],
+        "page_evidence": [
+          {
+            "step": 4,
+            "url": "https://www.metroman.cn/zh-hant/cities/shenzhen/lines/line-1",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://www.metroman.cn/zh-hant/cities/shenzhen/lines/line-1",
+              "title": "www.metroman.cn",
+              "page_chars": 695,
+              "chunk_count": 1,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 7,
+            "url": "https://m.shenchuang.com/show/1494246.shtml",
+            "data": {
+              "status": "ok",
+              "url": "https://m.shenchuang.com/show/1494246.shtml",
+              "title": "m.shenchuang.com",
+              "page_chars": 9545,
+              "chunk_count": 1,
+              "candidate_count": 1,
+              "errors": []
+            },
+            "compact_facts": "[chunk-1] \"æ·±å³å°é1å·çº¿åäº¤æ¥è¡ç«ä½äºåå¤§éåä¾§ãåå±±ãæ·±åå¤§éåä¾§ãå½èªäº¤æ¥å°åä¾§ãåå±±åºãæ²æ²³åä¾§ãæ²æ²³åºãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãåå±±ãå"
+          }
+        ],
+        "final": {
+          "status": "failed",
+          "content": "模型未返回可执行的 RWKV JSON 工具调用，无法安全继续检索。",
+          "mode": "model_rwkv_json_parse_error"
+        }
+      }
+    },
+    {
+      "case_id": "shanghai_to_rwkv_company_transit",
+      "task_id": "JSON_ACCEPTANCE_shanghai_to_rwkv_company_transit_20260727184837",
+      "query": "如何从上海到深圳的RWKV公司，路线是什么，乘坐哪些公共交通比较好？",
+      "status": "failed",
+      "answer": "未完成检索，无法生成有来源支持的答案。",
+      "error": "",
+      "trace": {
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "上海到深圳RWKV公司路线公共交通",
+              "max_results": 3
+            }
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 15000
+            }
+          },
+          {
+            "step": 3,
+            "phase": "DISCOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 15000
+            }
+          },
+          {
+            "step": 4,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 15000
+            }
+          },
+          {
+            "step": 5,
+            "phase": "DISCOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 15000
+            }
+          },
+          {
+            "step": 6,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 15000
+            }
+          },
+          {
+            "step": 7,
+            "phase": "DISCOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 15000
+            }
+          },
+          {
+            "step": 8,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 15000
+            }
+          },
+          {
+            "step": 9,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "RWKV公司 上海 深圳 总部 地址 交通 路线",
+              "max_results": 5
+            }
+          },
+          {
+            "step": 10,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 15000
+            }
+          },
+          {
+            "step": 11,
+            "phase": "DISCOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkv.cn",
+              "max_chars": 15000
+            }
+          },
+          {
+            "step": 12,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkv.cn",
+              "max_chars": 15000
+            }
+          }
+        ],
+        "page_evidence": [
+          {
+            "step": 2,
+            "url": "https://www.rwkvos.com/about",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://www.rwkvos.com/about",
+              "title": "www.rwkvos.com",
+              "page_chars": 1955,
+              "chunk_count": 3,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 4,
+            "url": "https://www.rwkvos.com/about",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://www.rwkvos.com/about",
+              "title": "www.rwkvos.com",
+              "page_chars": 1955,
+              "chunk_count": 3,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 6,
+            "url": "https://www.rwkvos.com/about",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://www.rwkvos.com/about",
+              "title": "www.rwkvos.com",
+              "page_chars": 1955,
+              "chunk_count": 3,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 8,
+            "url": "https://www.rwkvos.com/about",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://www.rwkvos.com/about",
+              "title": "www.rwkvos.com",
+              "page_chars": 1955,
+              "chunk_count": 3,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 10,
+            "url": "https://www.rwkvos.com/about",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://www.rwkvos.com/about",
+              "title": "www.rwkvos.com",
+              "page_chars": 1955,
+              "chunk_count": 3,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 12,
+            "url": "https://www.rwkv.cn",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://www.rwkv.cn",
+              "title": "www.rwkv.cn",
+              "page_chars": 3336,
+              "chunk_count": 3,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          }
+        ],
+        "final": {
+          "status": "failed",
+          "content": "未完成检索，无法生成有来源支持的答案。",
+          "mode": "model_tool_loop_no_evidence"
+        }
+      }
+    },
+    {
+      "case_id": "rwkv_founder_papers_github",
+      "task_id": "JSON_ACCEPTANCE_rwkv_founder_papers_github_20260727184910",
+      "query": "RWKV的创始人是谁？发布哪些论文和GitHub项目，链接是什么？",
+      "status": "completed",
+      "answer": "RWKV的创始人是Hugging Face的研究员。RWKV发布了多个论文，包括RWKV-4架构论文（arXiv:2305.13048）、RWKV 5/6架构论文（arXiv:2404.05892）和RWKV-7架构论文（arXiv:2503.14456）。RWKV发布了GitHub项目，如RWKV-LM、RWKV pip包、RWKV-CUDA、RWKV-PEFT、RWKV-PEFT-Simple和wind_rwkv。 [S1](https://www.rwkv.cn/docs/RWKV-Wiki/Links)",
+      "error": "",
+      "trace": {
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "RWKV 创始人",
+              "max_results": 3
+            }
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.sohu.com/a/815951672_115207",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 3,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://finance.sina.cn/2024-10-12/detail-incshxkv4048496.d.html?vt=4",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 4,
+            "phase": "SYNTHESIS",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "RWKV 论文 项目 链接",
+              "max_results": 3
+            }
+          },
+          {
+            "step": 5,
+            "phase": "RECOVERY",
+            "action": "search_web_keyless",
+            "args": {
+              "query": "RWKV 论文 项目 链接",
+              "max_results": 3
+            }
+          },
+          {
+            "step": 6,
+            "phase": "RECOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "RWKV 论文 项目 链接",
+              "max_results": 3
+            }
+          },
+          {
+            "step": 7,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://www.rwkv.cn/docs/RWKV-Wiki/Links",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 8,
+            "phase": "SYNTHESIS",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://arxiv.org/abs/2305.13048",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 9,
+            "phase": "SYNTHESIS",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://arxiv.org/abs/2404.05892",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 10,
+            "phase": "SYNTHESIS",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://arxiv.org/abs/2503.14456",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 11,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "RWKV 创始人 论文 项目 链接",
+              "max_results": 6
+            }
+          },
+          {
+            "step": 12,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://arxiv.org/abs/2305.13048",
+              "max_chars": 12000
+            }
+          }
+        ],
+        "page_evidence": [
+          {
+            "step": 3,
+            "url": "https://finance.sina.cn/2024-10-12/detail-incshxkv4048496.d.html?vt=4",
+            "data": {
+              "status": "ok",
+              "url": "https://finance.sina.cn/2024-10-12/detail-incshxkv4048496.d.html?vt=4",
+              "title": "finance.sina.cn",
+              "page_chars": 4639,
+              "chunk_count": 6,
+              "candidate_count": 1,
+              "errors": []
+            },
+            "compact_facts": "[chunk-1] RWKV的创始人是彭博（Peng Bo）。 RWKV是一种不同于Transformer架构的RNN架构。 RWKV架构保留了较低的时间空间复杂度。 RWKV架构被描述为一种另类的AI架构。"
+          },
+          {
+            "step": 7,
+            "url": "https://www.rwkv.cn/docs/RWKV-Wiki/Links",
+            "data": {
+              "status": "ok",
+              "url": "https://www.rwkv.cn/docs/RWKV-Wiki/Links",
+              "title": "www.rwkv.cn",
+              "page_chars": 4779,
+              "chunk_count": 5,
+              "candidate_count": 1,
+              "errors": []
+            },
+            "compact_facts": "[chunk-1] RWKV的创始人是Hugging Face的研究员 RWKV发布了多个论文，包括RWKV-4架构论文（arXiv:2305.13048）、RWKV 5/6架构论文（arXiv:2404.05892）和RWKV-7架构论文（arXiv:2503.14456） RWKV发布了GitHub项目，如RWKV-LM、RWKV pip包、RWKV-CUDA、RWKV-PEFT、RWKV-PEFT-Simple和wind_rwkv"
+          },
+          {
+            "step": 8,
+            "url": "https://arxiv.org/abs/2305.13048",
+            "data": {
+              "status": "ok",
+              "url": "https://arxiv.org/abs/2305.13048",
+              "title": "arxiv.org",
+              "page_chars": 5143,
+              "chunk_count": 2,
+              "candidate_count": 1,
+              "errors": []
+            },
+            "compact_facts": "[chunk-1] RWKV is a novel model architecture that combines efficient parallelizable training of transformers with efficient inference of RNNs. RWKV uses a linear attention mechanism and can be formulated as either a Transformer or an RNN, maintaining constant computational and memory complexity during inference. RWKV scales to 14 billion parameters, the largest dense RNN ever trained, and performs on par with similarly sized Transformers."
+          },
+          {
+            "step": 9,
+            "url": "https://arxiv.org/abs/2404.05892",
+            "data": {
+              "status": "ok",
+              "url": "https://arxiv.org/abs/2404.05892",
+              "title": "arxiv.org",
+              "page_chars": 4959,
+              "chunk_count": 2,
+              "candidate_count": 1,
+              "errors": []
+            },
+            "compact_facts": "[chunk-1] RWKV的创始人是Bo Peng等人，他们在论文中提出了Eagle和Finch模型。 发布的论文标题为'Eagle and Finch: RWKV with Matrix-Valued States and Dynamic Recurrence'，作者包括Bo Peng等29人。 发布的GitHub项目链接为：https://github.com/RWKV/RWKV-5 和 https://github.com/RWKV/RWKV-6。"
+          },
+          {
+            "step": 10,
+            "url": "https://arxiv.org/abs/2503.14456",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://arxiv.org/abs/2503.14456",
+              "title": "arxiv.org",
+              "page_chars": 4921,
+              "chunk_count": 2,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 12,
+            "url": "https://arxiv.org/abs/2305.13048",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://arxiv.org/abs/2305.13048",
+              "title": "arxiv.org",
+              "page_chars": 5143,
+              "chunk_count": 2,
+              "candidate_count": 0,
+              "errors": []
+            },
+            "compact_facts": ""
+          }
+        ],
+        "final": {
+          "status": "completed",
+          "content": "RWKV的创始人是Hugging Face的研究员。RWKV发布了多个论文，包括RWKV-4架构论文（arXiv:2305.13048）、RWKV 5/6架构论文（arXiv:2404.05892）和RWKV-7架构论文（arXiv:2503.14456）。RWKV发布了GitHub项目，如RWKV-LM、RWKV pip包、RWKV-CUDA、RWKV-PEFT、RWKV-PEFT-Simple和wind_rwkv。 [S1](https://www.rwkv.cn/docs/RWKV-Wiki/Links)",
+          "mode": "local_rwkv_final"
+        }
+      }
+    }
+  ]
+}

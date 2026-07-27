@@ -9,7 +9,6 @@ import {
   Clock3,
   Copy,
   File,
-  FileText,
   Files,
   Folder,
   FolderOpen,
@@ -17,13 +16,10 @@ import {
   Loader2,
   ListPlus,
   MessageCircle,
-  Play,
   RefreshCw,
-  SearchCheck,
   StopCircle,
   Trash2,
   Upload,
-  Workflow,
   X,
 } from "lucide-react";
 import { Toaster, toast } from "sonner";

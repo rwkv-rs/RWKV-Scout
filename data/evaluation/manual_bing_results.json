@@ -1,0 +1,176 @@
+{
+  "suite": "direct-bing-probe",
+  "input": "data\\evaluation\\manual_real_queries.json",
+  "cases": [
+    {
+      "case_id": "shenzhen_metro_line_1_stations",
+      "query": "深圳地铁一号线有哪些站点",
+      "provider": "Bing regional HTML (keyless)",
+      "status": "ok",
+      "count": 7,
+      "results": [
+        {
+          "rank": 1,
+          "title": "深圳 市_百度百科",
+          "url": "https://baike.baidu.com/item/%E6%B7%B1%E5%9C%B3%E5%B8%82/11044365",
+          "snippet": "深圳市有7000年人类活动史，1700年建城史，是广东省重点侨乡之一，中国革命老根据地之一，抗日战争时期东江纵队的发源地之一 …"
+        },
+        {
+          "rank": 2,
+          "title": "深圳 政府在线_ 深圳 市人民政府门户网站",
+          "url": "https://www.sz.gov.cn/",
+          "snippet": "3 天之前 · 深圳市发展和改革委员会圆满举办“民企走进A... APEC赋能河套“云端揽才”，... 多方赋能强本领 全域练兵优服务 福田区依托 …"
+        },
+        {
+          "rank": 3,
+          "title": "深圳 必去的10个景点： 深圳 不止有高楼大厦，还有这10个必 ...",
+          "url": "https://zhuanlan.zhihu.com/p/1663453087",
+          "snippet": "2025年11月24日 · 深圳，这座年轻而充满活力的都市，不仅是中国的经济特区，更是一个融合了现代与传统、科技与自然的魅力之城 …"
+        },
+        {
+          "rank": 4,
+          "title": "深圳 政府在线_ 深圳 市人民政府门户网站",
+          "url": "https://www.sz.gov.cn/?pc=pc",
+          "snippet": "3 天之前 · 【通知公告】 深圳市民政局 深圳市发展和改革委员会 深圳市统计局关于印发《深圳市银发经济统计分类（试行）》的通知 …"
+        },
+        {
+          "rank": 5,
+          "title": "深圳 旅游必去十大景点排名，2025游玩全攻略玩转鹏城 ...",
+          "url": "https://www.sohu.com/a/887189248_121893286",
+          "snippet": "2025年4月21日 · 深圳，这座充满活力的滨海城市，2025年迎来深圳湾超级总部基地观景台开放、大鹏所城非遗体验升级等新亮点。 …"
+        },
+        {
+          "rank": 6,
+          "title": "深圳 政府在线_ 深圳 市人民政府门户网站",
+          "url": "http://www.shenzhen.com.cn/?dw=zjsz",
+          "snippet": "2024年9月19日 · 【通知公告】 深圳市民政局 深圳市发展和改革委员会 深圳市统计局关于印发《深圳市银发经济统计分类（试行）》 …"
+        },
+        {
+          "rank": 7,
+          "title": "图文解读 深圳 市行政和地理（含9个区2023年高清地图）",
+          "url": "https://zhuanlan.zhihu.com/p/687405958",
+          "snippet": "2024年9月11日 · 南山区滨临南海，地势北高南低，平地、台地、山丘相间，主要山峰有羊台山、 塘朗山 、大南山等。 南山区是深圳 …"
+        }
+      ],
+      "provider_errors": [
+        "page[2]: WSL curl exited with 35: w\u0000s\u0000l\u0000:\u0000 \u0000�hKm0R \u0000l\u0000o\u0000c\u0000a\u0000l\u0000h\u0000o\u0000s\u0000t\u0000 \u0000�N\u0006tM�n\f�FO*g\\��P0R \u0000W\u0000S\u0000L\u0000\u00020N\u0000A\u0000T\u0000 \u0000!j\u000f_\u000bN�v \u0000W\u0000S\u0000L\u0000 \u0000\rN/e\u0001c \u0000l\u0000o\u0000c\u0000a\u0000l\u0000h\u0000o\u0000s\u0000t\u0000 \u0000�N\u0006t\u00020\r\u0000\n\u0000curl: (35) OpenSSL/3.0.13: error:0A000132:SSL routines::bad ecpoint\n"
+      ]
+    },
+    {
+      "case_id": "shanghai_to_rwkv_company_transit",
+      "query": "如何从上海到深圳的RWKV公司，路线是什么，乘坐哪些公共交通比较好？",
+      "provider": "Bing regional HTML (keyless)",
+      "status": "ok",
+      "count": 8,
+      "results": [
+        {
+          "rank": 1,
+          "title": "如何 （汉语词语）_百度百科",
+          "url": "https://baike.baidu.com/item/%E5%A6%82%E4%BD%95/53965",
+          "snippet": "作为疑问代词具有双重含义：一是指“怎么、怎样”，如《诗经·小雅·庭燎》中的“夜如何其？ 夜未央”；二表示“奈何、怎么办”，如现代口语中的“如何是好”。 该词在古文中已有用例，如《诗经》，并在现代汉 …"
+        },
+        {
+          "rank": 2,
+          "title": "发现 - 知乎",
+          "url": "https://www.zhihu.com/explore",
+          "snippet": "2026年7月9日 · 但我们想继续追问的是：如何真正用好 Vibe Coding，让过程更高效、结果更可靠，也让创造保有人类独特的品位？ 欢迎参与本次圆桌讨论，围绕 Vibe Coding 的真实实践，分享那些 AI 难 …"
+        },
+        {
+          "rank": 3,
+          "title": "正确性交全过程 - 有来医生",
+          "url": "https://m.youlai.cn/yyk/article/661631.html",
+          "snippet": "2023年8月14日 · 参考文献： [1]吴美琼,范利军,等.江门市区已婚妇女性爱艺术方式调查报告 [J].中国性科学,2005,14 (2):4-6. [2]沈尔安.如何化解性交摩擦痛 [J].家庭医学：上半月,2005 (4):32-33. [3]翁晖亮. …"
+        },
+        {
+          "rank": 4,
+          "title": "如何 的意思_ 如何 的解释-汉语国学",
+          "url": "https://www.hanyuguoxue.com/cidian/ci-1d567bd1e1",
+          "snippet": "2. 奈何。 怎么办。 例证 《诗 · 秦风 · 晨风》：“如何如何，忘我实多。 ” 《汉书 · 霍光传》：“光 曰：‘ 昌邑王 行 昏乱，恐危 社稷，如何？ ’”唐 · 白居易 《上阳白发人》诗：“上阳 人，苦最多：少亦苦，老 …"
+        },
+        {
+          "rank": 5,
+          "title": "如何 （2012年张悬演唱歌曲）_百度百科",
+          "url": "https://baike.baidu.com/item/%E5%A6%82%E4%BD%95/846281",
+          "snippet": "2012年8月10日 · 要如何才能容忍它发生 要如何才能想而不问 而我在这里等 等湿透的心听雨声 等身体回温 城里 夜如海洋 所有在明灭的窗 虚而不假 你要如何离别仍须游荡的旅人 要如何让缘份就是缘份 如 …"
+        },
+        {
+          "rank": 6,
+          "title": "“ 如何 呢，又能怎”是什么梗？凭啥让全网“发疯”上头？_生活 ...",
+          "url": "https://www.sohu.com/a/902794874_121124565",
+          "snippet": "2025年6月9日 · “如何呢，又能怎”这句话，乍一听好像有点“摆烂”的味道，但其实它更像是一种对生活无奈的幽默调侃，是年轻人在面对各种压力和焦虑时，给自己找到的一个精神解压阀。 “如何呢，又能 …"
+        },
+        {
+          "rank": 7,
+          "title": "如何 的意思, 如何 的拼音、近义词、造句 - 汉语查",
+          "url": "https://www.hgcha.com/cidian/675a13f3.html",
+          "snippet": "2012年8月10日 · 网络解释 1. 如何 （张悬演唱歌曲） 释 《如何》是收录在2012年8月10日发行的专辑《神的游戏》中一首folk单曲，全碟共10首单曲，由台湾歌手张悬作词、作曲、演唱。 2. 如何 （汉语 …"
+        },
+        {
+          "rank": 8,
+          "title": "少走弯路：解锁来自顶级作家的44个写作技巧-36氪",
+          "url": "https://www.36kr.com/p/2444485490432133",
+          "snippet": "2023年10月20日 · 创作来源于灵感，灵感来源于生活中的积累。 神译局是36氪旗下编译团队，关注科技、商业、职场、生活等领域，重点介绍国外的新技术、新观点 ..."
+        }
+      ],
+      "provider_errors": []
+    },
+    {
+      "case_id": "rwkv_founder_papers_github",
+      "query": "RWKV的创始人是谁？发布哪些论文和GitHub项目，链接是什么？",
+      "provider": "Bing regional HTML (keyless)",
+      "status": "ok",
+      "count": 8,
+      "results": [
+        {
+          "rank": 1,
+          "title": "首页 - RWKV",
+          "url": "https://www.rwkv.cn/",
+          "snippet": "新一代大模型架构，超越 Transformer。 RWKV 是一种革新的深度学习架构，结合了 RNN 和 Transformer 的最佳特性：出色的性能 …"
+        },
+        {
+          "rank": 2,
+          "title": "RWKV 解读：在Transformer的时代的新RNN - 知乎",
+          "url": "https://zhuanlan.zhihu.com/p/656323242",
+          "snippet": "2023年9月14日 · 作者：徐传飞 在Transformer时代，介绍一个非Transformer架构的新网络——RWKV，RWKV是一种创新的深度学 …"
+        },
+        {
+          "rank": 3,
+          "title": "RWKV ：Transformer时代的RNN新范式 - 知乎",
+          "url": "https://zhuanlan.zhihu.com/p/21105790379",
+          "snippet": "2025年2月3日 · 理解了上述概念之后，再来理解框架中的WKV：在RWKV模型中，WKV（Weighted Key-Value）算子是核心组件之 …"
+        },
+        {
+          "rank": 4,
+          "title": "RWKV 文档首页 - RWKV",
+          "url": "https://www.rwkv.cn/docs",
+          "snippet": "了解 RWKV RWKV 是一个大语言模型架构，基于这个架构训练出来的 RWKV 模型可以 理解并生成文本。 此外，还有一些 RWKV 多 …"
+        },
+        {
+          "rank": 5,
+          "title": "[2305.13048] RWKV : Reinventing RNNs for the Transformer Era",
+          "url": "https://arxiv.org/abs/2305.13048",
+          "snippet": "2023年5月22日 · We propose a novel model architecture, Receptance Weighted Key Value (RWKV), that combines the efficient …"
+        },
+        {
+          "rank": 6,
+          "title": "RWKV _百度百科",
+          "url": "https://baike.baidu.com/item/RWKV/64770086",
+          "snippet": "RWKV架构经历了多个版本的迭代，RWKV-1/2/3为早期实验版本 [9]。 2022年初，RWKV-2-RNN作为首个实验版本出现，验证了 …"
+        },
+        {
+          "rank": 7,
+          "title": "Transformer 架构平替-- RWKV 架构详解 -CSDN博客",
+          "url": "https://blog.csdn.net/weixin_44729653/article/details/148424496",
+          "snippet": "2025年6月10日 · RWKV-V4 解决了 RWKV-V3 架构的数值稳定性问题，同时也发布了 RWKV 项目的首篇论文 《RWKV: Reinventing …"
+        },
+        {
+          "rank": 8,
+          "title": "GitHub - BlinkDL/ RWKV -LM: RWKV (pronounced RwaKuv) is an …",
+          "url": "https://github.com/BlinkDL/RWKV-LM",
+          "snippet": "RWKV is a Linux Foundation AI project, so totally free. RWKV runtime is already in Windows & Office. You are welcome to ask the …"
+        }
+      ],
+      "provider_errors": []
+    }
+  ]
+}

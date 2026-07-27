@@ -1,7 +1,6 @@
 # RWKV-ECRA/main.py
 import os
 import sys
-from agent.orchestrator import Orchestrator
 from config import DATA_PIPELINE, API_KEYS
 
 def setup_env():
@@ -11,6 +10,7 @@ def setup_env():
     os.makedirs(DATA_PIPELINE.get("asset_directory", "./data/knowledge_assets"), exist_ok=True)
 
 if __name__ == "__main__":
+    from agent.orchestrator import Orchestrator
     setup_env()
     print("[系统] Agent 引擎已启动")
     

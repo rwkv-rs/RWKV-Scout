@@ -1,0 +1,515 @@
+{
+  "suite": "manual-real-web",
+  "input": "data/evaluation/manual_real_shanghai.json",
+  "started_at": "2026-07-27T22:37:13",
+  "finished_at": "2026-07-27T22:41:34",
+  "cases": [
+    {
+      "case_id": "shanghai_to_rwkv_company_transit_recovery",
+      "task_id": "JSON_ACCEPTANCE_shanghai_to_rwkv_company_transit_recovery_20260727223713",
+      "query": "如何从上海到深圳的RWKV公司，路线是什么，乘坐哪些公共交通比较好？",
+      "status": "failed",
+      "answer": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+      "error": "",
+      "trace": {
+        "event_count": 89,
+        "plans": [
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 5,
+            "point_ids": [
+              "P1",
+              "P2",
+              "P3",
+              "P4",
+              "P5"
+            ]
+          },
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 5,
+            "point_ids": [
+              "P1",
+              "P2",
+              "P3",
+              "P4",
+              "P5"
+            ]
+          },
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 5,
+            "point_ids": [
+              "P1",
+              "P2",
+              "P3",
+              "P4",
+              "P5"
+            ]
+          },
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 4,
+            "point_ids": [
+              "P2",
+              "P3",
+              "P4",
+              "P5"
+            ]
+          },
+          {
+            "schema_version": "task_plan.v1",
+            "status": "ok",
+            "point_count": 4,
+            "point_ids": [
+              "P2",
+              "P3",
+              "P4",
+              "P5"
+            ]
+          }
+        ],
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "task_point_id": "",
+            "args": {
+              "query": "RWKV公司 深圳 地址",
+              "max_results": 5
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://www.rwkvos.com/about",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 3,
+            "phase": "DISCOVERY",
+            "action": "search_web_tavily",
+            "task_point_id": "",
+            "args": {
+              "query": "上海到深圳 高铁 动车 大巴 时刻表 票价",
+              "max_results": 5
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 4,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://trains.ctrip.com/trainbooking/shanghai-shenzhen/gaotie",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 5,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://hk.trip.com/trains/china/route/shanghai-to-shenzhen",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 6,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://tw.trip.com/trains/china/route/shanghai-to-shenzhen",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 7,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://kyfw.12306.cn/otn/leftTicketPrice/init",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 8,
+            "phase": "EXTRACTION",
+            "action": "answer_user",
+            "task_point_id": "",
+            "args": {},
+            "planner_error": ""
+          },
+          {
+            "step": 9,
+            "phase": "DISCOVERY",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://kyfw.12306.cn/otn/leftTicketPrice/init",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 10,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://tw.trip.com/trains/china/route/shanghai-to-shenzhen",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 11,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://hk.trip.com/trains/china/route/shanghai-to-shenzhen",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 12,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://www.12306.cn/index/index",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 13,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://hk.trip.com/trains/china/route/shanghai-to-shenzhen",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          },
+          {
+            "step": 14,
+            "phase": "DISCOVERY",
+            "action": "fetch_web_url",
+            "task_point_id": "",
+            "args": {
+              "url": "https://hk.trip.com/trains/china/route/shanghai-to-shenzhen",
+              "max_chars": 12000
+            },
+            "planner_error": ""
+          }
+        ],
+        "page_evidence": [
+          {
+            "step": 2,
+            "url": "https://www.rwkvos.com/about",
+            "data": {
+              "status": "ok",
+              "url": "https://www.rwkvos.com/about",
+              "title": "www.rwkvos.com",
+              "page_chars": 1955,
+              "chunk_count": 1,
+              "candidate_count": 1,
+              "parallel_candidate": {
+                "strategy": "one-RWKV-call-per-chunk",
+                "contract": "json_object:{supported,facts,quote}",
+                "chunk_count": 1,
+                "worker_count": 1,
+                "completed_calls": 1,
+                "attempted_calls": 1,
+                "retry_calls": 0,
+                "max_tokens_per_call": 8192,
+                "wall_time_ms": 2137.9,
+                "candidate_durations_ms": [
+                  2136.0
+                ],
+                "finish_reasons": [
+                  "stop"
+                ]
+              },
+              "errors": []
+            },
+            "compact_facts": "[chunk-1] RWKV公司在深圳的详细地址：深圳市南山区科技园南区科兴科学园A座 RWKV公司在深圳的具体地址：深圳市南山区科技园南区科兴科学园A座"
+          },
+          {
+            "step": 4,
+            "url": "https://trains.ctrip.com/trainbooking/shanghai-shenzhen/gaotie",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://trains.ctrip.com/trainbooking/shanghai-shenzhen/gaotie",
+              "title": "trains.ctrip.com",
+              "page_chars": 4146,
+              "chunk_count": 2,
+              "candidate_count": 0,
+              "parallel_candidate": {
+                "strategy": "one-RWKV-call-per-chunk",
+                "contract": "json_object:{supported,facts,quote}",
+                "chunk_count": 2,
+                "worker_count": 2,
+                "completed_calls": 1,
+                "attempted_calls": 3,
+                "retry_calls": 1,
+                "max_tokens_per_call": 8192,
+                "wall_time_ms": 129222.2,
+                "candidate_durations_ms": [
+                  790.3,
+                  1298.3
+                ],
+                "finish_reasons": [
+                  "stop",
+                  "stop"
+                ]
+              },
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 7,
+            "url": "https://kyfw.12306.cn/otn/leftTicketPrice/init",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://kyfw.12306.cn/otn/leftTicketPrice/init",
+              "title": "kyfw.12306.cn",
+              "page_chars": 2237,
+              "chunk_count": 1,
+              "candidate_count": 0,
+              "parallel_candidate": {
+                "strategy": "one-RWKV-call-per-chunk",
+                "contract": "json_object:{supported,facts,quote}",
+                "chunk_count": 1,
+                "worker_count": 1,
+                "completed_calls": 1,
+                "attempted_calls": 1,
+                "retry_calls": 0,
+                "max_tokens_per_call": 8192,
+                "wall_time_ms": 737.0,
+                "candidate_durations_ms": [
+                  734.7
+                ],
+                "finish_reasons": [
+                  "stop"
+                ]
+              },
+              "errors": []
+            },
+            "compact_facts": ""
+          },
+          {
+            "step": 12,
+            "url": "https://www.12306.cn/index/index",
+            "data": {
+              "status": "no_evidence",
+              "url": "https://www.12306.cn/index/index",
+              "title": "www.12306.cn",
+              "page_chars": 27,
+              "chunk_count": 1,
+              "candidate_count": 0,
+              "parallel_candidate": {
+                "strategy": "one-RWKV-call-per-chunk",
+                "contract": "json_object:{supported,facts,quote}",
+                "chunk_count": 1,
+                "worker_count": 1,
+                "completed_calls": 1,
+                "attempted_calls": 1,
+                "retry_calls": 0,
+                "max_tokens_per_call": 8192,
+                "wall_time_ms": 349.6,
+                "candidate_durations_ms": [
+                  347.8
+                ],
+                "finish_reasons": [
+                  "stop"
+                ]
+              },
+              "errors": []
+            },
+            "compact_facts": ""
+          }
+        ],
+        "completion_judgements": [
+          {
+            "step": 2,
+            "status": "incomplete",
+            "missing_point_ids": [
+              "P2",
+              "P3",
+              "P4",
+              "P5"
+            ],
+            "reason": "原子点P2、P3、P4、P5尚未完成，缺少必要的证据支持。具体来说：\n- P2需要上海到深圳的高铁/动车时刻表及票价、飞机航班时刻表及票价、长途大巴时刻表及票价，但当前证据仅提供了RWKV公司地址，未涉及交通方式信息。\n- P3需要深圳机场到RWKV公司的地铁/公交路线、深圳火车站到RWKV公司的地铁/公交路线、深圳市内主要交通枢纽到RWKV公司的公交/地铁线路，但当前证据未提供任何市内交通信息。\n- P4需要比较不同交通方式的时间、费用和便利性，但当前证据未提供任何比较数据。\n- P5需要确定最佳公共交通组合方案，但当前证据未提供任何组合方案。\n因此，所有原子点均未标记为completed，且每个点的evidence_needed均未验证完成。"
+          },
+          {
+            "step": 8,
+            "status": "incomplete",
+            "missing_point_ids": [
+              "P2",
+              "P3",
+              "P4",
+              "P5"
+            ],
+            "reason": "原子点P2、P3、P4、P5均未完成。P2需要查询上海到深圳的高铁/动车时刻表及票价、飞机航班时刻表及票价、长途大巴时刻表及票价，但未提供任何相关证据；P3需要查询深圳机场到RWKV公司的地铁/公交路线、深圳火车站到RWKV公司的地铁/公交路线、深圳市内主要交通枢纽到RWKV公司的公交/地铁线路，但未提供任何相关证据；P4需要比较不同交通方式的时间、费用和便利性，但未提供任何相关证据；P5需要确定最佳公共交通组合方案，但未提供任何相关证据。因此，所有原子点均未完成。"
+          }
+        ],
+        "contexts": [
+          {
+            "source_chars": 77,
+            "selected_chars": 77,
+            "chunk_count": 1,
+            "truncated_count": 0,
+            "context_chars": 196,
+            "context_tokens": 110,
+            "context_truncated": false,
+            "strategy": {
+              "ranking_strategy": "candidate_support_then_rank.v1",
+              "context_source_count": null,
+              "prompt_variant": "default.v1"
+            }
+          },
+          {
+            "source_chars": 77,
+            "selected_chars": 77,
+            "chunk_count": 1,
+            "truncated_count": 0,
+            "context_chars": 196,
+            "context_tokens": 110,
+            "context_truncated": false,
+            "strategy": {
+              "ranking_strategy": "candidate_support_then_rank.v1",
+              "context_source_count": null,
+              "prompt_variant": "default.v1"
+            }
+          }
+        ],
+        "finals": [
+          {
+            "status": "failed",
+            "content": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+            "mode": "model_repeated_tool_call"
+          }
+        ],
+        "final": {
+          "status": "failed",
+          "content": "模型在检索过程中重复执行相同工具调用，无法安全继续。",
+          "mode": "model_repeated_tool_call"
+        },
+        "stats": {
+          "action_counts": {
+            "search_web_tavily": 2,
+            "fetch_web_url": 11,
+            "answer_user": 1
+          },
+          "phase_counts": {
+            "DISCOVERY": 4,
+            "EXTRACTION": 7,
+            "RECOVERY": 3
+          },
+          "tool_result_statuses": {
+            "ok": 6,
+            "error": 2
+          },
+          "error_class_counts": {
+            "provider_error": 2,
+            "repeated_tool_call": 5
+          },
+          "task_point_selection": {
+            "decision_count": 14,
+            "with_task_point_id": 0
+          },
+          "page_fetches": 4,
+          "page_evidence_statuses": {
+            "ok": 1,
+            "no_evidence": 3
+          },
+          "page_chars": {
+            "count": 4,
+            "min": 27.0,
+            "max": 4146.0,
+            "avg": 2091.25
+          },
+          "chunk_count": 5,
+          "chunk_input_tokens": {
+            "count": 7,
+            "min": 27.0,
+            "max": 2991.0,
+            "avg": 1423.29
+          },
+          "chunk_input_chars": {
+            "count": 7,
+            "min": 27.0,
+            "max": 3839.0,
+            "avg": 1787.0
+          },
+          "candidate_outputs": {
+            "supported": 1,
+            "unsupported": 6,
+            "output_chars": {
+              "count": 7,
+              "min": 0.0,
+              "max": 1600.0,
+              "avg": 270.43
+            }
+          },
+          "context_tokens": {
+            "count": 2,
+            "min": 110.0,
+            "max": 110.0,
+            "avg": 110.0
+          },
+          "context_truncated_count": 0,
+          "completion_statuses": {
+            "incomplete": 2
+          },
+          "final_statuses": {
+            "failed": 1
+          }
+        }
+      }
+    }
+  ],
+  "aggregate_trace_summary": {
+    "case_count": 1,
+    "completed_cases": 0,
+    "failed_cases": 1,
+    "counters": {
+      "page_fetches": 4,
+      "chunk_count": 5,
+      "context_truncated_count": 0,
+      "tool_result_statuses.ok": 6,
+      "tool_result_statuses.error": 2,
+      "error_class_counts.provider_error": 2,
+      "error_class_counts.repeated_tool_call": 5,
+      "page_evidence_statuses.ok": 1,
+      "page_evidence_statuses.no_evidence": 3,
+      "completion_statuses.incomplete": 2,
+      "final_statuses.failed": 1
+    }
+  }
+}

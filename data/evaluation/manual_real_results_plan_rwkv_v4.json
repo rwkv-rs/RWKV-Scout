@@ -1,0 +1,123 @@
+{
+  "suite": "manual-real-web",
+  "input": "data/evaluation/manual_real_rwkv.json",
+  "started_at": "2026-07-27T21:34:57",
+  "finished_at": "2026-07-27T21:39:00",
+  "cases": [
+    {
+      "case_id": "rwkv_founder_papers_github_plan",
+      "task_id": "JSON_ACCEPTANCE_rwkv_founder_papers_github_plan_20260727213457",
+      "query": "RWKV的创始人是谁？发布哪些论文和GitHub项目，链接是什么？",
+      "status": "completed",
+      "answer": "RWKV的创始人是Bo Peng（Blink_DL）。RWKV发布了多篇论文，包括RWKV-7系列的'RWKV-7 Goose with Expressive Dynamic State Evolution'（arXiv:2503.14456）、RWKV-5/6系列的'Eagle and Finch: RWKV with Matrix-Valued States and Dynamic Recurrence'（arXiv:2404.05892）以及RWKV-4系列的'RWKV: Reinventing RNNs for the Transformer Era'（arXiv:2305.13048）。RWKV的GitHub项目链接为 [S1](https://wiki.rwkv.com)",
+      "error": "",
+      "trace": {
+        "decisions": [
+          {
+            "step": 1,
+            "phase": "DISCOVERY",
+            "action": "search_papers",
+            "args": {
+              "query": "RWKV",
+              "scope": "paper",
+              "max_results": 12
+            }
+          },
+          {
+            "step": 2,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "http://arxiv.org/abs/2305.13048",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 3,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://doi.org/10.18653/v1/2023.findings-emnlp.936",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 4,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "http://arxiv.org/abs/2305.13048",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 5,
+            "phase": "RECOVERY",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://doi.org/10.1109/jbhi.2025.3588555",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 6,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://doi.org/10.1109/tmi.2025.3561797",
+              "max_chars": 12000
+            }
+          },
+          {
+            "step": 7,
+            "phase": "EXTRACTION",
+            "action": "search_papers",
+            "args": {
+              "query": "RWKV creator founder",
+              "max_results": 5
+            }
+          },
+          {
+            "step": 8,
+            "phase": "RECOVERY",
+            "action": "search_web_tavily",
+            "args": {
+              "query": "RWKV creator founder",
+              "max_results": 5
+            }
+          },
+          {
+            "step": 9,
+            "phase": "EXTRACTION",
+            "action": "fetch_web_url",
+            "args": {
+              "url": "https://wiki.rwkv.com",
+              "max_chars": 12000
+            }
+          }
+        ],
+        "page_evidence": [
+          {
+            "step": 9,
+            "url": "https://wiki.rwkv.com",
+            "data": {
+              "status": "ok",
+              "url": "https://wiki.rwkv.com",
+              "title": "wiki.rwkv.com",
+              "page_chars": 8617,
+              "chunk_count": 3,
+              "candidate_count": 2,
+              "errors": []
+            },
+            "compact_facts": "[chunk-1] RWKV was proposed by Bo Peng (Blink_DL) RWKV was officially joined the Linux Foundation on September 20, 2023 RWKV-7 paper: 'RWKV-7 Goose with Expressive Dynamic State Evolution', arXiv:2503.14456 RWKV-5/6 paper: 'Eagle and Finch: RWKV with Matrix-Valued States and Dynamic Recurrence', arXiv:2404.05892 RWKV-4 paper: 'RWKV: Reinventing RNNs for the Transformer Era', arXiv:2305.13048\n[chunk-3] RWKV-4 series has been discontinued, continued use is not recommended RWKV models include RWKV-7 series and World models RWKV-7 models support reasoning/thinking (Think) with stronger performance RWKV-7 model naming format: rwkv7a-g1b-0.1b-20250819-ctx4096.pth World model naming format: RWKV-x060-World-3B-v2.1-20240208-ctx4096.pth RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth RWKV is made possible thanks to GPU compute and researchers time contributions from various sponsors Sponsors include: Without their invaluable support, we would not have been able to develop the core RWKV foundation models that you see today. In addition, we would like to thank alpin @ pygmalionAI AutoMeta @ AlignmentLab FeatherlessAI Various other folks who donated slices of GPU time / preferred not to be named For helping with GPU time, on smaller experiments, finetunes, and various models. Especially for those models that never get publically released in failed runs."
+          }
+        ],
+        "final": {
+          "status": "completed",
+          "content": "RWKV的创始人是Bo Peng（Blink_DL）。RWKV发布了多篇论文，包括RWKV-7系列的'RWKV-7 Goose with Expressive Dynamic State Evolution'（arXiv:2503.14456）、RWKV-5/6系列的'Eagle and Finch: RWKV with Matrix-Valued States and Dynamic Recurrence'（arXiv:2404.05892）以及RWKV-4系列的'RWKV: Reinventing RNNs for the Transformer Era'（arXiv:2305.13048）。RWKV的GitHub项目链接为 [S1](https://wiki.rwkv.com)",
+          "mode": "local_rwkv_final"
+        }
+      }
+    }
+  ]
+}

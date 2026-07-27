@@ -1,0 +1,180 @@
+{
+  "suite": "direct-tavily-probe",
+  "input": "data\\evaluation\\manual_real_queries.json",
+  "cases": [
+    {
+      "case_id": "shenzhen_metro_line_1_stations",
+      "query": "深圳地铁一号线有哪些站点",
+      "provider": "Tavily API",
+      "status": "ok",
+      "count": 8,
+      "results": [
+        {
+          "rank": 1,
+          "title": "深圳地铁1号线经过哪些站点",
+          "url": "https://m.bendibao.com/show879746.html",
+          "snippet": "深圳地铁1号线站点：罗湖-国贸-老街-大剧院-科学馆-华强路-岗厦-会展中心-购物公园-香蜜湖-车公庙-竹子林-侨城东-华侨城-世界之窗-白石洲-高新园-深大-"
+        },
+        {
+          "rank": 2,
+          "title": "深圳地铁1号线 - 吴语维基百科",
+          "url": "https://wuu.wikipedia.org/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+          "snippet": "跳转到内容\n\n  维基百科 \n\n搜寻\n\n# 深圳地铁1号线\n\n English \"Line 1 (Shenzhen Metro) – 英语\")\n 客家語 / Hak-k-ngî\n 日本語\n 한국어\n ไทย\n 閩南語 / Bn-lm-gí\n 粵語\n 中文\n\n编辑链接\n\n 文章\n 讨论\n\n 原文\n 简体\n 正體\n\n 阅读\n 编辑\n 望历史\n\n家生\n\n操作\n\n 阅读\n 编辑\n 望历史\n\n常规\n\n 链进来点啥\n 搭界个改动\n 上传文件\n 老世链接\n 页面信息\n 引用箇篇文章\n 获取短链接\n 切换到旧版解析器\n\n打印/导出\n\n 创建书本\n 作为PDF下载\n 打印版\n\n别个项目里向\n\n 维基共享资源\n 维基数据项\n\n外观\n\n出自维基百科，自由个百科全书\n\n深圳地铁1号线（罗宝线）是深圳地铁个一条路线，從罗湖到机场东站，因连接深圳市罗湖区搭宝安区而得名。首段线路（罗湖至世界之窗）拉2004年12月28号开通。世界之窗到深大段拉2009年9月28号开通。深大到机场东段拉2011年6月15号开通。\n\n|  |  |  |  |  |  |\n ---  ---  --- |\n| | 深圳地铁标志 深圳地铁1号线 |    |  | 机场东-后瑞-固戍-西乡-坪洲-宝体-宝安中心-新安-前海湾-鲤鱼门-大新-桃园-深大-高新园-白石洲-世界之窗-华侨城-侨城东-竹子林-车公庙-香蜜湖-购物公园-会展中心-岗厦-华强路-科学馆-大剧院-老街-国贸-罗湖 | | | |  |  | 查 • 論 • 編 | | |\n\n取自“”\n\n分类：​\n\n 深圳地铁1号线车站\n\n深圳地铁1号线\n\n加话题"
+        },
+        {
+          "rank": 3,
+          "title": "深圳地铁1号线",
+          "url": "https://baike.baidu.com/item/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF/6178769",
+          "snippet": "| 编号 | 车站 | 所属行政区 | 换乘线路 | 站台形式 |\n :---:  :---: \n| 1 | 罗湖站 | 罗湖区 | 京九铁路 广深铁路 港铁东铁线（罗湖站） | 地下西班牙式 |\n| 2 | 国贸站  地下叠落侧式 |\n| 3 | 老街站 | 深圳地铁3号线 深圳地铁17号线（在建） | 地下叠落岛式 |\n| 4 | 大剧院站 | 深圳地铁2号线 深圳地铁5号线 | 地下岛式 |\n| 5 | 科学馆站 | 福田区 | 深圳地铁6号线 |\n| 6 | 华强路站 \n| 7 | 岗厦站 | 深圳地铁10号线 |\n| 8 | 会展中心站 | 深圳地铁4号线 广深港高速铁路 |\n| 9 | 购物公园站 | 深圳地铁3号线 广深港高速铁路 |\n| 10 | 香蜜湖站 \n| 11 | 车公庙站 | 深圳地铁7号线 深圳地铁9号线 深圳地铁11号线 |\n| 12 | 竹子林站  地下双岛式 |\n| 13 | 侨城东站  地下岛式 |\n| 14 | 华侨城站 | 南山区 \n| 15 | 世界之窗站 | 深圳地铁2号线 |\n| 16 | 白石洲站 | 深圳地铁20号线二期（在建） 深圳地铁29号线（在建） |\n| 17 | 高新园站 | 深圳地铁20号线二期（在建） |\n| 18 | 深大站 | 深圳地铁13号线 深圳地铁20号线二期（在建） |\n| 19 | 桃园站 | 深圳地铁12号线 |\n| 20 | 大新站 \n| 21 | 鲤鱼门站 | 平南铁路（距离深圳西站1.3千米） 深惠城际铁路（鲤鱼门站）（在建） |\n| 22 | 前海湾站 | 深圳地铁5号线 深圳地铁11号线 |\n| 23 | 新安站 | 宝安区 \n| 24 | 宝安中心站 | 深圳地铁5号线 |\n| 25 | 宝体站 \n| 26 | 坪洲站 | 深圳地铁15号线（在建） | [...] | 车站 | 机场"
+        },
+        {
+          "rank": 4,
+          "title": "深圳地铁线路信息",
+          "url": "https://jtys.sz.gov.cn/jtzx/wycx/dtcx/dtxl/content/post_12601089.html",
+          "snippet": "Image 1\n\n数据开放| 数据发布 | 无障碍阅读| 进入关怀版| 智能机器人Image 2\n\n环保汽车共享出行招标采购交通建设\n\n   政务公开\n   政务服务\n   互动交流\n   交通出行\n   鹏城交通\n\n您现在的位置 :首页>交通出行>出行服务>地铁出行>地铁服务\n\n# 深圳地铁线路信息\n\n###### 来源：深圳市交通运输局 发布时间：2026-01-14 16:57 字号：【 大)中)小)】视力保护色：\n\nImage 3: 线网图-改尺寸.jpg\n\n1号线\n\n沿途站点：罗湖—国贸—老街—大剧院—科学馆—华强路—岗厦—会展中心—购物公园—香蜜湖—车公庙—竹子林—侨城东—华侨城—世界之窗—白石洲—高新园—深大—桃园—大新—鲤鱼门—前海湾—新安—宝安中心—宝体—坪洲—西乡—固戍—后瑞—机场东。\n\n2号线&8号线\n\n沿途站点：赤湾—蛇口港—海上世界—水湾—东角头—湾厦—海月—登良—后海—科苑—红树湾—世界之窗—侨城北—深康—安托山—侨香—香蜜—香梅北—景田—莲花西—福田—市民中心—岗厦北—华强北—燕南—大剧院—湖贝—黄贝岭—新秀—莲塘口岸—仙湖路—莲塘—梧桐山南—沙头角—海山—盐田港西—深外高中—盐田路—鸿安围—盐田墟—大梅沙—小梅沙—溪涌。\n\n3号线\n\n沿途站点：福保—益田—石厦—购物公园—福田—少年宫—莲花村—华新—通新岭—红岭—老街—晒布—翠竹—田贝—水贝—草埔—布吉—木棉湾—大芬—丹竹头—六约—塘坑—横岗—永湖—荷坳—大运—爱联—吉祥—龙城广场—南联—双龙—梨园—新生—坪西—低碳城—白石塘—富坪—坪地六联。\n\n4号线\n\n沿途站点：福田口岸—福民—会展中心—市民中心—少年宫—莲花北—上梅林—民乐—白石龙—深圳北站—红山—上塘—龙胜—龙华—清湖—清湖北—竹村—茜坑—长湖—观澜—松元厦—观澜湖—牛湖。\n\n5号线 [...] 12号线\n\n沿途站点：左炮台东—太子湾"
+        },
+        {
+          "rank": 5,
+          "title": "深圳地鐵1號綫概覽 - 地鐵通 MetroMan",
+          "url": "https://www.metroman.cn/zh-hant/cities/shenzhen/lines/line-1",
+          "snippet": "| 車站 | 轉乘 |\n --- |\n|  | 羅湖   Luohu |  |\n|  | 國貿   Guomao |  |\n|  | 老街   Laojie | 3 |\n|  | 大劇院   Grand Theater | 2   5 |\n|  | 科學館   Science Museum | 6 |\n|  | 華強路   Huaqiang Rd |  |\n|  | 崗廈   Gangxia | 10 |\n|  | 會展中心   Convention & Exhibition Center | 4 |\n|  | 購物公園   Shopping Park | 3 |\n|  | 香蜜湖   Xiangmihu |  |\n|  | 車公廟   Chegongmiao | 7   9   11 |\n|  | 竹子林   Zhuzilin |  |\n|  | 僑城東   Qiaocheng East |  |\n|  | 華僑城   Overseas Chinese Town |  |\n|  | 世界之窗   Window of the World | 2 |\n|  | 白石洲   Baishizhou |  |\n|  | 高新園   Hi-Tech Park |  |\n|  | 深大   Shenzhen University | 13 |\n|  | 桃園   Taoyuan | 12 |\n|  | 大新   Daxin |  |\n|  | 鯉魚門   Liyumen |  |\n|  | 前海灣   Qianhaiwan | 5   11 |\n|  | 新安   Xin'an |  |\n|  | 寶安中心   Bao'an Center | 5 |\n|  | 寶體   Bao'an Stadium |  |\n|  | 坪洲   Pingzhou |  | [...] |  | 寶體 "
+        },
+        {
+          "rank": 6,
+          "title": "深圳地铁1号线",
+          "url": "https://sztrans.fandom.com/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+          "snippet": "1号线起于罗湖口岸北侧、深圳火车站东侧下沉广场，经人民南路地底，至东门商业区转向西行。为避开百货广场及广深铁路下方桩基，线路双向隧道从国贸站南侧开始，从平行分布过渡"
+        },
+        {
+          "rank": 7,
+          "title": "深圳地鐵1號線",
+          "url": "https://zh.wikipedia.org/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+          "snippet": "深圳地鐵1號線，曾稱羅寶線，是中國廣東省深圳市的一條地鐵路線，屬於都市軌道運輸系統。1號線由羅湖站至機場東站，全長41.04公里，設30座車站。"
+        },
+        {
+          "rank": 8,
+          "title": "深圳地铁1号线 - 深圳交通百科- 灰机wiki",
+          "url": "https://sztrans.huijiwiki.com/wiki/%E6%B7%B1%E5%9C%B3%E5%9C%B0%E9%93%811%E5%8F%B7%E7%BA%BF",
+          "snippet": "本线起于罗湖口岸北侧、深圳火车站东侧下沉广场，经人民南路地底，至东门商业区转向西行。为避开百货广场及广深铁路下方桩基础，线路双向隧道从国贸站南侧开始，从平行分布过渡"
+        }
+      ],
+      "provider_errors": []
+    },
+    {
+      "case_id": "shanghai_to_rwkv_company_transit",
+      "query": "如何从上海到深圳的RWKV公司，路线是什么，乘坐哪些公共交通比较好？",
+      "provider": "Tavily API",
+      "status": "ok",
+      "count": 8,
+      "results": [
+        {
+          "rank": 1,
+          "title": "上海去深圳 高鐵訂票、時間表及票價查詢",
+          "url": "https://hk.trip.com/trains/china/route/shanghai-to-shenzhen",
+          "snippet": "前往上海虹橋的火車\n 前往廣州的火車\n 前往上海的火車\n 前往北京的火車\n 前往深圳北的火車\n 前往廣州南的火車\n 前往杭州東的火車\n 前往深圳的火車\n 前往南京的火車\n 前往成都東的火車\n 前往廣州東的火車\n 前往北京南的火車\n 前往蘇州的火車\n 前往福田的火車\n 前往杭州的火車\n 前往北京西的火車\n 前往陽朔的火車\n 前往義烏的火車\n 前往昆明的火車\n 前往西安北的火車\n 前往南京南的火車\n 前往成都的火車\n 前往上海南的火車\n 前往重慶北的火車\n 前往重慶的火車\n 前往張家界西的火車\n 前往西安的火車\n 前往長沙南的火車\n 前往連雲港的火車\n 前往武漢的火車 [...] | 出發 | 抵達 | 火車 | 路線資訊 |  |\n ---  --- \n| 11小时26分钟, 直達  上海南 | 18:18  深圳北 | D2287 | 路線資訊 | 訂購車票 |\n| 06:55  10小时12分钟, 直達  上海 | 17:07  深圳 | G2784 | 路線資訊 | 訂購車票 |\n| 07:25  10小时53分钟, 直達  金山北 | 18:18  深圳北 | D2287 | 路線資訊 | 訂購車票 |\n| 07:30  7小时12分钟, 直達  上海南 | 14:42  深圳北 | G997 | 路線資訊 | 訂購車票 |\n| 08:11  10小时53分钟, 直達  上海南 | 19:04  深圳北 | D377 | 路線資訊 | 訂購車票 |\n| 08:44  11小时30分钟, 直達  上海虹橋 | 20:14  Paris | D2281 | 路線資訊 | 訂購車票 |\n\n查看更多火車\n\n## 深圳酒店推介\n\n 青木·影音｜AESTHETIC·DESIGNER拾光輕奢逸居（深圳萬象城店）\n\n  青木·影音｜AESTHETIC·DESIGNER拾光輕奢逸居（"
+        },
+        {
+          "rank": 2,
+          "title": "【中國】上海交通攻略：機場交通、市區交通、上海公共交通卡、實用地圖，讓你一篇搞懂上海交通！",
+          "url": "https://www.kkday.com/zh-tw/blog/29933/asia-china-shanghai-transportation",
+          "snippet": "跳至主要內容\n\nKKday logoKKday logo\n\nKKday logoKKday logo\n\n搜尋\n\nKKday logoKKday logo\n\n搜尋\n\nKKday logoKKday logo\n\n搜尋\n\n \n\n # 上海攻略\n\n Picture of KKday 編輯群   KKday 編輯群\n\n想安排一趟上海自由行，交通是首要解決的問題之一，想知道台灣到上海航班機票、浦東機場交通、虹橋機場交通、計程車、公車以及地鐵該如何搭乘最方便、最划算嗎？其實上海交通網絡已經發展得非常完整，如果想要去上海自由行，完全不需要擔心交通問題。看完這篇上海交通攻略，就能更徹底了解並找到最適合自己的交通方式囉！(Source: Shutterstock)\n\n## 台灣－上海航班\n\nChina Shanghai Transportation china southern airlines CUnsplash 884390 1920\n\nSource: Unsplash\n\n台北飛一趟上海只需要約1.5~2小時，航班數最多的是中國南方航空，第二多為中國東方航空，長榮和華航每日也都有班機飛往上海，一般台北上海的來回機票最低約台幣6000～10000不等，來回航班平均價格最低的月份落在11月～1月及3月。\n\n## 上海公共交通卡（公交卡）\n\n押金人民幣20元，每次最低儲值金額為人民幣10元  \n 加值方式：臨櫃儲值、自動充值機  \n 適合對象：會搭乘不同交通工具或旅行天數較多的人  \n 購買地點：可於各地鐵站服務台、自動售票機或便利商店買，可上公交卡官網查看所有地點  \n 如果卡內有未使用之餘額，只有普通卡可以退卡，紀念卡不行\n\n## 【上海機場交通】\n\nTransportation Airplane AFotolia 134553345 1\n\nSource: Fotolia [...] Sou"
+        },
+        {
+          "rank": 3,
+          "title": "【香港深圳交通2026】最平$9.9起！高鐵/巴士/MTR等6大方法 ...",
+          "url": "https://shenzhencat.org/blog/%E9%A6%99%E6%B8%AF%E6%B7%B1%E5%9C%B3%E4%BA%A4%E9%80%9A",
+          "snippet": "5.3) 各路線收費及服務時間\n\n6) 【渡輪】避開陸路擠塞 \n\n6.1) 航線及碼頭位置 (上環/中港城 往 蛇口/深圳機場)\n\n6.2) 船票價錢及船期表\n\n6.3) 預訂方式及注意事項\n\n7) 【包車/自駕】家庭或多人出遊最舒適 \n\n7.1) 包車服務優點及收費參考\n\n7.2) 「港車北上」申請資格及流程\n\n7.3) 過關口岸選擇\n\n8) 北上深圳出行前準備 \n\n8.1) 內地電子支付開通教學 (WeChat Pay/Alipay HK)\n\n8.2) 回鄉證辦理/續期懶人包\n\n8.3) 內地上網電話卡/eSIM比較\n\n8.4) 申請內地「E道」自助過關教學\n\n9) 香港去深圳常見問題 (FAQ) \n\n9.1) 凌晨過關應選哪個口岸？\n\n9.2) 前往深圳熱門商場/景點應在哪個口岸過關？\n\n9.3) 各種交通工具的行李限制是？\n\n9.4) 如何選擇最適合自己的交通方式？\n\n10) 最新交通優惠及預訂平台 \n\n10.1) 旅遊平台預訂優惠\n\n10.2) 直通巴士公司最新優惠\n\n10.3) 信用卡購票回贈優惠\n\n## 香港去深圳交通方式總覽\n\n香港去深圳有很多方式，但每種交通方式各有優劣。\n\n以下是各大交通方式時間、價錢、優缺點比較一覽表，供大家參考。\n\n## 【高鐵】香港去深圳最快方法\n\n如果追求速度同舒適度，高鐵絕對係由香港去深圳嘅首選交通。\n\n由西九龍站出發，無需轉車，最快只需14分鐘就可以直達深圳，而且過關採用「一地兩檢」，過程快捷方便，係最可靠準時嘅北上交通工具。\n\nKlook 預訂高鐵車票\n\nTrip.com 預訂高鐵車票\n\nHopeGoo 預訂高鐵車票\n\n永安旅遊預訂高鐵車票\n\n### 高鐵路線及站點 (福田、深圳北、光明城) [...] 跳至主要內容\n\n本文為你整理了超詳細的香港深圳交通懶人包，全面比較高鐵、直通巴士、港鐵、本地巴士、船和包車自駕6大方法的所"
+        },
+        {
+          "rank": 4,
+          "title": "从区域一体化看融合交通——以粤港澳大湾区和港深广高铁线为例",
+          "url": "https://www.progressingeography.com/article/2018/1007-6301/1007-6301-37-12-1623.shtml",
+          "snippet": "| 城市间直达高铁站点对 | 高铁/城际班次 | 最短车程时间/min1 | 城市间直达高铁站点对 | 高铁/城际班次 | 最短车程时间/min |\n ---  ---  --- |\n| 香港西九龙—福田(深圳) | 79 | 14 | 深圳北—佛山西 | 2 | 58 |\n| 香港西九龙—深圳北 | 65 | 18 | 福田—佛山西 | 1 | 72 |\n| 香港西九龙—广州南 | 34 | 47 | 深圳北—珠海 | 1 | 112 |\n| 香港西九龙—虎门(东莞) | 20 | 38 | 深圳北—中山 | 1 | 84 |\n| 香港西九龙—惠州南/惠东 | 6 | 66 | 广州南—虎门(东莞) | 60 | 17 |\n| 深圳北—广州南 | 111 | 29 | 广州南—中山—珠海(城际动车) | 68 | 16/63 |\n| 福田—广州南 | 14 | 38 | 广州南—中山 | 3 | 29 |\n| 深圳—东莞—广州东(城际动车) | 75 | 40/74 | 广州南—珠海 | 3 | 57 |\n| 深圳北—虎门 | 69 | 17 | 广州南—中山—江门东(城际动车) | 11 | 16/35 |\n| 福田—虎门 | 8 | 28 | 广州南—惠州南 | 8 | 59 |\n| 深圳北—惠州南(城际动车) | 5 | 27 | 广州南—佛山西 | 3 | 19 |\n| 深圳北—惠州南/惠东 | 14 | 27 | 广州南—肇庆东 | 3 | 35 |\n| 福田—惠州南 | 1 | 64 | 广州—佛山—肇庆(城际动车) | 7 | 20/60 |\n| 深圳北-肇庆东 | 3 | 67 | [...] 与城市间的其他公共交通服务类似,高铁并不能提供“门到门”(door-to-door)服务。在一个完整的高铁出行链中,主要包括以下4个部分：出发地点到高铁始发站、高铁"
+        },
+        {
+          "rank": 5,
+          "title": "Shanghai",
+          "url": "https://en.wikipedia.org/wiki/Shanghai",
+          "snippet": "# Shanghai [...] of any city. Shanghai is the world's second largest city by scientific outputs and home to several highly ranked universities, including Fudan, Shanghai Jiao Tong and Tongji. The Shanghai Metro, first opened in 1993, is the largest metro network in the world by route length. [...] Shanghai is a provincial-level direct-administered municipality in China. It has a population of 30,050,000 in the urban area as of 2026, thus making it China's most populous city and more broadly the fifth-largest city in the world by population. The city is located on the southern estuary of the Yangtze River, with the Huangpu River bisecting the city.\n\nShanghai is a global center for finance, business and economics, research, science and technology, manufacturing, transportation, tourism, and "
+        },
+        {
+          "rank": 6,
+          "title": "上海市- 维基百科，自由的百科全书",
+          "url": "https://zh.wikipedia.org/zh-hans/%E4%B8%8A%E6%B5%B7%E5%B8%82",
+          "snippet": "上海市，简称沪，别称申，是中华人民共和国直辖市，因吴淞江下游原有支流上海浦得名。“沪”，源于晋朝时期当地捕鱼工具“扈”，江流入海处称“渎”，吴淞江下游一带遂称“扈渎”，后改为“沪”。又因属春秋战国时期楚国春申君黄歇的封邑，别名“申”。中国的经济、金融、贸易、航运、商业、上游制造和对外开放中心，上海也是一座港口城市，是中国人口第二多的城市，是中国最发达的城市之一，也是一座全球城市。上海位于中国东部海岸线的中心，长江三角洲最东部，东临东海，南濒杭州湾，西接江苏、浙江两省，北端的崇明岛处于长江入海口中，与周围的江苏、浙江、安徽三省多个城市共同构成了长江三角洲城市群。\n\n最早在新石器时代，上海地区已经有先民聚居。春秋时代，上海属吴国，战国时代则属楚国。晋代，上海的人口聚集起来，初步发展为区域性渔港、盐产地和商贸集镇。唐代到元代，上海所属地区归华亭县 \"华亭县 (唐朝)\")、松江府管辖。1292年上海县始建县。明清两朝时的上海有棉纺织业。1843年，《南京条约》签订，正式开埠，上海作为指定的五大通商口岸之一，设立租界。此时的上海还是苏松太道的驻地。上海开埠后不少江苏、浙江、广东、安徽、山东等省份及外国移民前往上海，上海开始吸收江南地区附近传统的吴越文化与各地移民带入的多样文化，融合开埠后的西方近现代文化，逐渐形成了上海当地的海派文化 \"海派 (文艺)\")。 [...] 自20世纪以来，上海 \"上海市 (中华民国)\")已成为中国最重要的经济中心及亚洲最大的城市之一，常被称为中国的纽约。中华人民共和国成立后，当中央政府实施计划经济，主要发展内陆时，上海曾大量支援中国大陆其他地区的发展。1990年，浦东开发开放，上海经济迅猛发展；2005年设立国家综合配套改革试验区，2013年批准成立上海自贸区。上海入选GaWC的Alpha+世界级城市，2020年全球排名位列第5名。上海港是世界规模最大的"
+        },
+        {
+          "rank": 7,
+          "title": "RWKV-7 \"Goose\" with Expressive Dynamic State Evolution",
+          "url": "https://openreview.net/pdf/74011cffc1082ac9394afde92802c810c51baabf.pdf",
+          "snippet": "Published as a conference paper at COLM 2025 RWKV-7 \"Goose\" with Expressive Dynamic State Evolution Bo Peng ∗ EleutherAI, RWKV Project (Linux Foundation AI & Data) pengbo863@gmail.com Ruichong Zhang ∗ Tsinghua University zhangrc24@mails .tsinghua.edu.cn Daniel Goldstein ∗ EleutherAI, Recursal AI dan@recursal.ai Eric Alcaide EleutherAI USI, IDSIA Xingjian Du University of Rochester Haowen Hou Guangdong Laboratory of AI and Digital Economy (SZ) Jiaju Lin Pennsylvania State University Jiaxing Liu Zhejiang University Janna Lu Recursal AI, George Mason University William Merrill New York University Guangyu Song EleutherAI Tano Labs Kaifeng Tan Shenzhen University Saiteja Utpala EleutherAI Nathan Wilce EleutherAI, Recursal AI Johan S. Wind University of Oslo Tianyi Wu Beijing Normal University ["
+        },
+        {
+          "rank": 8,
+          "title": "上海市",
+          "url": "https://baike.baidu.com/item/%E4%B8%8A%E6%B5%B7%E5%B8%82/127743",
+          "snippet": "网页新闻贴吧知道网盘图片视频地图文库资讯采购百科\n\n百度首页\n\n登录\n\n注册\n\nImage 1: 百度百科\n\n进入词条 全站搜索国际版帮助\n\nImage 2: 百度百科\n\n进入词条 全站搜索国际版帮助\n\n播报 编辑讨论 99+收藏 赞\n\n登录\n\n首页\n\n历史上的今天\n\n百科冷知识\n\n图解百科\n\n秒懂百科\n\n懂啦\n\n秒懂本尊答\n\n秒懂大师说\n\n秒懂看瓦特\n\n秒懂五千年\n\n秒懂全视界\n\n特色百科\n\n动态百科\n\n数字博物馆\n\n非遗百科\n\n艺术百科\n\n科学百科\n\n知识专题\n\n史记2025·科学100词\n\n观千年·见今朝\n\n中国航天\n\n食品百科\n\n云游博物馆\n\n数字文物守护计划\n\n加入百科\n\n新人成长\n\n进阶成长\n\n任务广场\n\n百科团队\n\n校园团\n\n分类达人团\n\n热词团\n\n繁星团\n\n蝌蚪团\n\n权威合作\n\n合作模式\n\n常见问题\n\n联系方式\n\n个人中心\n\n# 上海市\n\n播报 编辑讨论 99+上传视频\n\n中文\n\n中华人民共和国直辖市\n\n秒懂TA\n\nImage 3\n\nImage 4\n\n7分钟游遍上海：看中国经济第一城的“超级魔力”！\n\n07:53\n\nVideo 1\n\n最新热点\n\nImage 5\n\nImage 6\n\n台风“巴威”逼近，上海已转移撤离3.4万人，相关各省启动应急机制\n\n00:07\n\n城市发展\n\nImage 7\n\nImage 8\n\n财晓得｜上海，凭什么被拍了千万遍？\n\n03:19\n\n最新进展\n\nImage 9\n\n上海成为2028年奥运会资格系列赛举办城市\n\n01:41\n\n最新进展\n\n上海成为2028年奥运会资格系列赛举办城市\n\n01:41\n\n明星安利\n\n跟着唐嫣在上海感受China travel2.0\n\n01:25\n\n专家解读\n\n跟朱炳仁游中国之皇家敕赐寺庙——上海《东林寺》拥有诸多第一\n\n04:03\n\n延伸知识点\n\n上海是南方还是北方？\n\n00:49\n\n延伸知识点 [...] 出"
+        }
+      ],
+      "provider_errors": []
+    },
+    {
+      "case_id": "rwkv_founder_papers_github",
+      "query": "RWKV的创始人是谁？发布哪些论文和GitHub项目，链接是什么？",
+      "provider": "Tavily API",
+      "status": "ok",
+      "count": 8,
+      "results": [
+        {
+          "rank": 1,
+          "title": "RWKV，引领大模型架构变更的新型RNN",
+          "url": "https://pdf.dfcfw.com/pdf/H3_AP202503221645992349_1.pdf?1742827439000.pdf=",
+          "snippet": "RWKV-6-World 70B RWKV-6 Finch 雀 RWKV-5 Eagle 鹰 RWKV-4 Dove 鸽 RWKV-7 Goose 雁 RWKV-8 Heron 鹭 RWKV-9 Ibis 鹮 已完成 开发中 计划中 RWKV- SAM 分割一切模型 RWKV 的落地场景 2023年6月成立 RWKV.com 深圳元始智能有限公司 RWKV-LM 在 Github 的星 海外社群 开发者人数 国内社群 开发者和用户人数 Github 上 RWKV 项目数量 11000+ 370+ 9000+ 10000+   RWKV ASR 语音识别模型 RWKV.com Visual-RWKV 视觉语言模型   RWKV.com Vision-RWKV 视觉感知模型   RWKV.com Diffusion-RWKV 扩散模型   RWKV.com PointRWKV 3D点云学习框架   RWKV.com RWKV-CLIP 视觉语言表示学习   RWKV.com RWKV-SAM 分割一切模型   RWKV.com RWKV-TS 时序预测   RWKVcom SDiT 基于 RWKV 的类脑模型  Fabrice Bellard 法国计算机科学家，传奇程序员 实现了速度与压缩率之间的良好平衡。 压缩软件 ts_zip 使用 RWKV-4  FFmpeg RWKV 生态 / 知名使用者 RWKV 生态 / 海外创业者 MIT 的创业团队 Recursal 端侧模型的 Agent 离线版 AI 小镇，120 个 Agent MidReal pygmalion RWKV性能评测结果 英文效果仅次于最好的LLaMA-8B和Mistral-7B，多语言能力最佳 RWKV性能评测结果 语言建模能力就是压缩能力，用新数据衡量模型的泛化能力  能耗只有 LLaMa 的一半 [.."
+        },
+        {
+          "rank": 2,
+          "title": "RWKV: Reinventing RNNs for the Transformer Era (Paper Explained)",
+          "url": "https://www.youtube.com/watch?v=x8pW19wKfXQ",
+          "snippet": "Our experiments reveal that RWKV performs on par with similarly sized Transformers, suggesting that future work can leverage this architecture to create more efficient models. This work presents a significant step towards reconciling the trade-offs between computational efficiency and model performance in sequence processing tasks. Authors: Bo Peng, Eric Alcaide, Quentin Anthony, Alon Albalak, Samuel Arcadinho, Huanqi Cao, Xin Cheng, Michael Chung, Matteo Grella, Kranthi Kiran GV, Xuzheng He, Haowen Hou, Przemyslaw Kazienko, Jan Kocon, Jiaming Kong, Bartlomiej Koptyra, Hayden Lau, Krishna Sri Ipsit Mantri, Ferdinand Mom, Atsushi Saito, Xiangru Tang, Bolun Wang, Johan S. Wind, Stansilaw Wozniak, Ruichong Zhang, Zhenyuan Zhang, Qihang Zhao, Peng Zhou, Jian Zhu, Rui-Jie Zhu Links: Homepage: ["
+        },
+        {
+          "rank": 3,
+          "title": "RWKV Language Model",
+          "url": "https://wiki.rwkv.com",
+          "snippet": "RWKV combines the best features of RNN and Transformer: excellent performance, constant memory usage, constant inference generation speed, \"infinite\" context length, and free sentence embeddings. It is also 100% free of self-attention mechanisms.\n\nThe RWKV project was initially proposed by Bo Peng (Blink_DL), and as the project gained attention, it gradually developed into an open-source community.\n\nOn September 20, 2023, the RWKV open-source project officially joined the Linux Foundation. Today, the RWKV project is an open-source non-profit organization under the Linux Foundation, with some computing power previously supported by sponsors.\n\n   Discord Forum\n   HF Gradio-1 | completion)\n   HF-Gradio-2 | completion)\n   HF-Gradio-2 | Chat\n\n# RWKV Architecture and Papers [...] RWKV 5/6 Paper:"
+        },
+        {
+          "rank": 4,
+          "title": "GitHub - MLGroupJLU/RWKV-Survey: The official GitHub page for the survey paper \"A Survey of RWKV\". · GitHub",
+          "url": "https://github.com/MLGroupJLU/RWKV-Survey",
+          "snippet": "## RWKV\n\n### RWKV papers and official repository\n\n1. RWKV: Reinventing RNNs for the Transformer Era 2023.[paper]\n2. Eagle and Finch: RWKV with Matrix-Valued States and Dynamic Recurrence 2024. [paper]\n3. RWKV official repository [project]\n\n### Various Implementations [...] BranchesTags\n\nOpen more actions menu\n\n## Folders and files\n\n| Name | Name | Last commit message | Last commit date |\n ---  --- |\n| Latest commit   History32 Commits 32 Commits |\n| imgs | imgs |  |  |\n| README.md | README.md |  |  |\n|  |\n\n## Repository files navigation\n\nRWKV Survey  \n A collection of papers and resources related to a survey of RWKV.\n\n  \n\nZhiyuan Li\\1   Tingyu Xia\\1   Yi Chang1   Yuan Wu#1\n\n1 Jilin University  \n (\\: Co-first authors, #: Corresponding author)\n\n# Papers and resources for RWKV\n\nThe papers are"
+        },
+        {
+          "rank": 5,
+          "title": "Introducing RWKV - An RNN with the advantages of a transformer",
+          "url": "https://huggingface.co/blog/rwkv",
+          "snippet": "### Overview of the RWKV project\n\nThe RWKV project was kicked off and is being led by Bo Peng, who is actively contributing and maintaining the project. The community, organized in the official discord channel, is constantly enhancing the project’s artifacts on various topics such as performance (RWKV.cpp, quantization, etc.), scalability (dataset processing & scrapping) and research (chat-fine tuning, multi-modal finetuning, etc.). The GPUs for training RWKV models are donated by Stability AI.\n\nYou can get involved by joining the official discord channel and learn more about the general ideas behind RWKV in these two blogposts:  / \n\n### Transformer Architecture vs RNNs [...] ChatGPT and chatbot-powered applications have captured significant attention in the Natural Language Processing (NL"
+        },
+        {
+          "rank": 6,
+          "title": "[D] Why isn't everyone using RWKV if it's so much better than transformers?",
+          "url": "https://www.reddit.com/r/MachineLearning/comments/11lq5j4/d_why_isnt_everyone_using_rwkv_if_its_so_much",
+          "snippet": "- RWKV was mainly a personal project. The structure and training were all conducted by Peng BO （彭博）himself. There were no paper. The paper was only published 10 hours ago, and is only a draft on arXiv, and is not typo-free. Transformers were so successful, people wouldn't spend too much time keeping an eye on other models - it's so time-costing to understand the theory behind it. Drawbacks exist, like being sensitive to prompts (prompt sensitivity makes it less robust to user input, and sometimes results in poor comprehension to user instruction)\n- No Paper is the blocker"
+        },
+        {
+          "rank": 7,
+          "title": "GitHub - shoumenchougou/RWKV-Wiki-CN: RWKV wiki in Chinese. · GitHub",
+          "url": "https://github.com/shoumenchougou/RWKV-Wiki-CN",
+          "snippet": "BranchesTags\n\nOpen more actions menu\n\n## Folders and files\n\n| Name | Name | Last commit message | Last commit date |\n ---  --- |\n| Latest commit   History11 Commits 11 Commits |\n| docs | docs |  |  |\n| LICENSE | LICENSE |  |  |\n| README.md | README.md |  |  |\n|  |\n\n## Repository files navigation\n\nImportant\n\n由于 rwkv.cn 已存在最新的 RWKV 中文文档 ，此仓库已不再更新。\n\nrwkv.cn 的中文文档也已开源，请访问 \n\n# RWKV 中文 Wiki\n\nRWKV（读作 RWaKuV）是一种具有 GPT 级大型语言模型（LLM）性能的 RNN，也可以像 GPT Transformer 一样直接训练（可并行化）。\n\nRWKV 是一个开源的非盈利组织，隶属于 Linux 基金会，算力则由我们的赞助商支持。\n\nRWKV 结合了 RNN 和 Transformer 的最佳特性 - 出色的性能、快速的推理、快速的训练、节省 VRAM、\"无限\" 的 ctxlen 和自由的句嵌入，而且是 100% 不含注意力机制的。\n\n Discord 论坛\n HF Gradio\n\n## RWKV 架构论文\n\n arXiv (2305.13048) 论文\n\nRWKV 模型的最新版本是 RWKV-6，架构图如下：\n\n## 当前版本状态 [...] RWKV 模型的最新版本是 RWKV-6，架构图如下：\n\n## 当前版本状态\n\n| 版本 | v4 - Raven | v4 - Dove | v5"
+        },
+        {
+          "rank": 8,
+          "title": "RWKV",
+          "url": "https://lfaidata.foundation/projects/rwkv",
+          "snippet": "THE LINUX FOUNDATION PROJECTS\nLFAI & Data\n\n# RWKV\n\nRWKV is an RNN with Transformer-level LLM performance, which can also be directly trained like a GPT transformer (parallelizable). And it’s 100% attention-free. You only need the hidden state at position t to compute the state at position t+1. You can use the “GPT” mode to quickly compute the hidden state for the “RNN” mode.\n\nSo it’s combining the best of RNN and transformer – great performance, fast inference, saves VRAM, fast training, “infinite” ctx\\_len, and free sentence embedding (using the final hidden state).\n\nRWKV is a incubation-stage project of the LF AI & Data Foundation.\n\nContributed by: Blink DL in September 2023\n\nGithub\n\nAnnouncement Mailing List\n\nTechnical Discuss Mailing List\n\nTSC Mailing List\n\nFOLLOW US"
+        }
+      ],
+      "provider_errors": []
+    }
+  ]
+}

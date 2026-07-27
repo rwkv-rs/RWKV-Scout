@@ -1,0 +1,10 @@
+{
+  "suite": "manual-real-web-followup",
+  "cases": [
+    {
+      "case_id": "rwkv7_authors_papers_projects_followup",
+      "query": "RWKV-7 的主要论文、作者和官方项目链接是什么？",
+      "max_tool_steps": 16
+    }
+  ]
+}
