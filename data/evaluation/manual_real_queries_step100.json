@@ -1,0 +1,35 @@
+{
+  "suite": "manual-real-web-step100",
+  "cases": [
+    {
+      "case_id": "shenzhen_metro_line_1_stations_step100",
+      "query": "深圳地铁一号线有哪些站点",
+      "max_tool_steps": 100
+    },
+    {
+      "case_id": "shanghai_to_rwkv_company_transit_step100",
+      "query": "如何从上海到深圳的RWKV公司，路线是什么，乘坐哪些公共交通比较好？",
+      "max_tool_steps": 100
+    },
+    {
+      "case_id": "rwkv_founder_papers_github_step100",
+      "query": "RWKV的创始人是谁？发布哪些论文和GitHub项目，链接是什么？",
+      "max_tool_steps": 100
+    },
+    {
+      "case_id": "crossref_rwkv_bibliographic_record_step100",
+      "query": "通过 Crossref 查询 RWKV: Reinventing RNNs for the Transformer Era 这篇论文的 DOI、作者和发表信息",
+      "max_tool_steps": 100
+    },
+    {
+      "case_id": "github_rest_rwkv_lm_repository_step100",
+      "query": "使用 GitHub REST 查询 BlinkDL/RWKV-LM 仓库的项目链接、默认分支、主要语言和项目简介",
+      "max_tool_steps": 100
+    },
+    {
+      "case_id": "mediawiki_shenzhen_metro_line_1_step100",
+      "query": "使用 MediaWiki/Wikimedia API 查询深圳地铁一号线的站点列表",
+      "max_tool_steps": 100
+    }
+  ]
+}

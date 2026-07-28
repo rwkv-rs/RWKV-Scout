@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import unittest
 from unittest.mock import Mock, patch
 
@@ -43,6 +44,21 @@ class ModelRuntimeTests(unittest.TestCase):
         self.assertIsInstance(response, BackendResponse)
         self.assertEqual(response.content, "answer")
         self.assertEqual(response.usage["prompt_tokens"], 4)
+
+    def test_compat_backend_decodes_utf8_json_when_server_omits_charset(self):
+        payload = json.dumps(
+            {"choices": [{"text": "深圳地铁"}]},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        http_response = Mock(status_code=200, content=payload)
+        backend = OpenAICompatBackend()
+        backend._session.post = Mock(return_value=http_response)
+        with (
+            patch("runtime.compat.get_llm_base_url", return_value="http://model/v1"),
+            patch("runtime.compat.get_llm_api_key", return_value="rwkv-skills"),
+        ):
+            result = backend._post("/completions", {})
+        self.assertEqual(result["choices"][0]["text"], "深圳地铁")
 
     def test_direct_backend_is_lazy_and_reports_missing_local_contract(self):
         backend = DirectRWKVBackend({"engine_root": "", "model_path": ""})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 from typing import Any, Sequence
 
 import requests
@@ -49,7 +50,14 @@ class OpenAICompatBackend:
         if response.status_code >= 400:
             detail = response.text[:1000].replace("\n", " ")
             raise RuntimeError(f"HTTP {response.status_code}: {detail}")
-        data = response.json()
+        # Some compatible servers omit ``charset`` on application/json.  In
+        # that case Requests may decode non-ASCII response text as Latin-1,
+        # turning Chinese UTF-8 into mojibake before the JSON layer sees it.
+        # Decode the wire bytes explicitly because the API contract is UTF-8.
+        try:
+            data = json.loads(response.content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("model backend returned invalid UTF-8 JSON") from exc
         if not isinstance(data, dict):
             raise RuntimeError("model backend returned a non-object JSON response")
         return data
