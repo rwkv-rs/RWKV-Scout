@@ -17,6 +17,7 @@ from config import (
     get_slm_concurrency,
 )
 from runtime.backend import BackendResponse
+from utils.text_encoding import repair_mojibake
 from utils.time_budget import bounded_timeout
 
 
@@ -71,6 +72,7 @@ class OpenAICompatBackend:
             content = choice.get("text", "") or ""
         else:
             content = message.get("content", "") or choice.get("text", "") or ""
+        content = repair_mojibake(content)
         usage = data.get("usage") or {}
         return BackendResponse(
             role=message.get("role", "assistant"),

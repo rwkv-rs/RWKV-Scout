@@ -219,6 +219,7 @@ def extract_single_page_evidence(
     task_id: str = "",
     max_chunk_tokens: int | None = None,
     max_candidates: int = 64,
+    candidate_max_tokens: int | None = None,
     on_chunk: Any = None,
 ) -> dict[str, Any]:
     """Map one fetched page into independent model candidates, then merge."""
@@ -242,9 +243,14 @@ def extract_single_page_evidence(
 
     prompts = [build_chunk_candidate_prompt(query, url, title, chunk, len(chunks)) for chunk in chunks]
 
+    configured_candidate_tokens = (
+        candidate_max_tokens
+        if candidate_max_tokens is not None
+        else DATA_PIPELINE.get("web_candidate_max_tokens", 8192)
+    )
     candidate_max_tokens = max(
         384,
-        min(int(DATA_PIPELINE.get("web_candidate_max_tokens", 8192) or 8192), 8192),
+        min(int(configured_candidate_tokens or 8192), 8192),
     )
 
     def ask(prompt: str) -> tuple[str, float, str]:

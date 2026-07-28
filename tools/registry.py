@@ -72,6 +72,14 @@ class ToolRegistry:
         """
         if phase is None:
             return True
+        if str(phase).upper() == "GENERIC_WEB":
+            # The first-stage open-web experiment intentionally exposes one
+            # provider-agnostic retrieval capability plus the two terminal
+            # actions.  Provider plugins remain registered and available to
+            # the normal model-owned episode; this boundary keeps the generic
+            # benchmark from silently turning into a provider-selection test.
+            name = str(meta.get("name") or "")
+            return name in {"web_search", "answer_user", "finish_task"} and meta.get("phase") != "LEGACY"
         if str(phase).upper() == "ALL":
             # The model-owned retrieval episode intentionally exposes the
             # complete retrieval catalog.  Discovery/evidence sequencing is
@@ -164,6 +172,7 @@ class ToolRegistry:
                     tools=(name,),
                 )
             cls._tools[name] = {
+                "name": name,
                 "func": func,
                 "signature": signature,
                 "phase": phase,

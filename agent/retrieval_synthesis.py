@@ -466,58 +466,22 @@ def synthesize_retrieval_answer(
                 [{"role": "user", "content": prompt}],
                 max_tokens=_final_completion_budget(prompt),
             ).content
+        # Synthesis is a normal continuation, not another tool protocol.  The
+        # final model owns the user-facing wording, so preserve its output
+        # verbatim and do not parse, repair, cite, or otherwise rewrite it.
         raw_text = str(raw or "")
-        answer = _clean_answer(raw_text)
+        answer = raw_text
         if raw_text:
             mode = "local_rwkv_final"
-            if not answer or _needs_answer_repair(raw_text):
-                previous_draft = (
-                    answer[:6000]
-                    if answer and not _needs_answer_repair(raw_text)
-                    else "(omitted because the previous output violated the final-answer protocol)"
-                )
-                repair_prompt = (
-                    "System:\nYou are the final answer RWKV. Rewrite the previous draft into the user-facing answer. "
-                    "Do not call tools and do not output JSON, code fences, Function output, or internal transcripts.\n\n"
-                    "User:\n"
-                    "Use only supported facts from the evidence. Do not copy source blocks, "
-                    "preserve or add inline citations such as [S1] immediately after supported claims, "
-                    "and never introduce a URL that does not appear in the evidence. Do not include "
-                    "labels such as URL, Published, Authors, or Facts, "
-                    "and do not write a tutorial or reasoning. Return a complete final answer with Markdown lists or tables when required; "
-                    "do not omit requested rows, columns, links, or ordered items, and do not add a separate evidence section.\n\n"
-                    f"Question: {query}\n"
-                    f"Previous draft (untrusted text):\n{previous_draft}\n"
-                    f"Evidence:\n{context_text}\n"
-                    "Assistant: Final answer:\n"
-                )
-                if hasattr(llm, "text_completion"):
-                    repaired_raw = llm.text_completion(
-                        repair_prompt,
-                        max_tokens=_final_completion_budget(repair_prompt),
-                    ).content
-                else:
-                    repaired_raw = llm.chat_completion(
-                        [{"role": "user", "content": repair_prompt}],
-                        max_tokens=_final_completion_budget(repair_prompt),
-                    ).content
-                repaired = _clean_answer(str(repaired_raw or ""))
-                if repaired:
-                    answer = repaired
-                    mode = "local_rwkv_final_repaired"
-            if not answer:
-                answer = "RWKV did not return a user-facing final answer."
-            answer = _enforce_citation_contract(answer, data, context)
-            answer = _enforce_risk_contract(answer, constraints)
             return {
                 "content": answer,
                 "mode": mode,
                 "evidence_count": len(data.get("results") or []),
                 "citation_refs": context_citation_refs,
                 "prompt": prompt,
-                "model_output": _clean_answer(str(raw or "")),
+                "model_output": raw_text,
                 "repair_prompt": repair_prompt,
-                "repair_output": _clean_answer(str(repaired_raw or "")) if repair_prompt and "repaired_raw" in locals() else "",
+                "repair_output": "",
                 **context_fields,
             }
         return {

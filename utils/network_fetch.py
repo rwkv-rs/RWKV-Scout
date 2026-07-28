@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from utils.text_encoding import repair_mojibake
 from config import get_network_timeout_seconds
 from utils.time_budget import bounded_timeout
 
@@ -25,6 +26,15 @@ class NetworkFetchError(RuntimeError):
 _CHARSET_RE = re.compile(r"charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", re.IGNORECASE)
 _META_CHARSET_RE = re.compile(rb"<meta[^>]+charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", re.IGNORECASE)
 _MOJIBAKE_MARKERS = ("Ã", "Â", "â", "æ", "å", "ç", "è", "é", "ï¿½", "�")
+_DEFAULT_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+}
 
 
 def _encoding_candidates(
@@ -93,7 +103,8 @@ def decode_http_body(
         decoded.append((order, value))
     if not decoded:
         return payload.decode("utf-8", errors="replace")
-    return min(decoded, key=lambda item: _text_quality(item[1], item[0]))[1]
+    value = min(decoded, key=lambda item: _text_quality(item[1], item[0]))[1]
+    return repair_mojibake(value)
 
 
 def _decode_process_output(value: bytes) -> str:
@@ -241,6 +252,7 @@ def create_network_session(headers: dict[str, str] | None = None) -> requests.Se
     proxies = get_network_proxies()
     if proxies:
         session.proxies.update(proxies)
+    session.headers.update(_DEFAULT_HTTP_HEADERS)
     if headers:
         session.headers.update({str(key): str(value) for key, value in headers.items()})
     return session
@@ -288,15 +300,18 @@ def fetch_text(
 ) -> str:
     """Fetch a public URL without requiring a paid API key."""
     effective_timeout = bounded_timeout(min(float(timeout), get_network_timeout_seconds()))
+    effective_headers = dict(_DEFAULT_HTTP_HEADERS)
+    if headers:
+        effective_headers.update({str(key): str(value) for key, value in headers.items()})
     if os.name == "nt" and shutil.which("wsl.exe"):
         try:
-            return decode_http_body(_fetch_via_wsl_curl(url, params, effective_timeout, headers))
+            return decode_http_body(_fetch_via_wsl_curl(url, params, effective_timeout, effective_headers))
         except NetworkFetchError as wsl_error:
             # WSL networking can be unavailable even while the Windows
             # process has a working direct route. Keep fetching provider
             # agnostic and try the native transport before giving up.
             try:
-                session = create_network_session(headers)
+                session = create_network_session(effective_headers)
                 response = session.get(url, params=params, timeout=effective_timeout)
                 response.raise_for_status()
                 return decode_http_body(
@@ -310,7 +325,7 @@ def fetch_text(
                 ) from native_error
 
     try:
-        session = create_network_session(headers)
+        session = create_network_session(effective_headers)
         response = session.get(url, params=params, timeout=effective_timeout)
         response.raise_for_status()
         return decode_http_body(

@@ -27,6 +27,7 @@ def load_builtin_tools() -> None:
         import tools.web_search  # noqa: F401
         import tools.web_search_tavily  # noqa: F401
         import tools.web_search_keyless  # noqa: F401
+        import tools.web_search_generic  # noqa: F401
         import tools.web_search_wigolo  # noqa: F401
         import workflows.map_reduce_flow  # noqa: F401
         import workflows.memory_query_flow  # noqa: F401

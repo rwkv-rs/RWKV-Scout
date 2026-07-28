@@ -371,6 +371,9 @@ def run(input_path: Path, output_path: Path) -> dict[str, Any]:
         metadata = {}
         if case.get("max_tool_steps") is not None:
             metadata["max_tool_steps"] = int(case["max_tool_steps"])
+        for key in ("generic_web_search_only", "retrieval_fork"):
+            if key in case:
+                metadata[key] = bool(case[key])
         query = str(case["query"])
         task_token = current_task_id.set(task_id)
         try:

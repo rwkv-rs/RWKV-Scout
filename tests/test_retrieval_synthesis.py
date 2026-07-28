@@ -52,7 +52,8 @@ class RetrievalSynthesisTests(unittest.TestCase):
         self.assertLessEqual(llm.calls[0][1], 8192)
         self.assertIn("Acceptance checklist", llm.calls[0][0])
         self.assertIn("row/column relationship", llm.calls[0][0])
-        self.assertIn("https://example.com/stations", result["content"])
+        self.assertEqual(result["content"], "完整答案 [S1]")
+        self.assertEqual(result["model_output"], "完整答案 [S1]")
 
     def test_final_summary_receives_visible_execution_context_at_step_limit(self):
         llm = _FakeLLM()

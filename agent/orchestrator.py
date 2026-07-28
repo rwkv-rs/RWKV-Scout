@@ -833,6 +833,7 @@ class Orchestrator:
 
     def _run_model_tool_loop(self, user_query: str, model_profile: dict) -> str:
         """Let RWKV choose tools, URLs and arguments until it chooses to answer."""
+        generic_web_mode = bool(self.state.run_metadata.get("generic_web_search_only"))
         max_steps = max(
             1,
             int(
@@ -844,7 +845,7 @@ class Orchestrator:
             ),
         )
         rounds: list[tuple[str, dict]] = []
-        phase = "DISCOVERY"
+        phase = "GENERIC_WEB" if generic_web_mode else "DISCOVERY"
         last_action = "model_tool_loop"
         retrieval_attempted = False
         last_discovery_results: list[dict] = []
@@ -879,7 +880,12 @@ class Orchestrator:
             return answer
         self._task_plan = task_plan
         self.state.run_metadata["task_plan"] = task_plan
-        self.planner.begin_task(user_query, plan_context, task_plan)
+        # Keep the legacy call shape for existing planner test doubles. The
+        # generic web mode is the only path that needs to override the phase.
+        if generic_web_mode:
+            self.planner.begin_task(user_query, plan_context, task_plan, phase)
+        else:
+            self.planner.begin_task(user_query, plan_context, task_plan)
         self._fork_transcripts = []
         if self.state.run_metadata.get("retrieval_fork", True):
             return self._run_forked_retrieval(
@@ -918,27 +924,33 @@ class Orchestrator:
             )
 
             if plan.get("planner_error"):
-                # A malformed model call is an episode failure.  Never invent
-                # a provider or query here: the model owns the next action.
-                answer = "模型未返回可执行的 RWKV JSON 工具调用，无法安全继续检索。"
-                self.state.final_result = answer
-                self.state.is_finished = True
+                # Tool turns require JSON, but the final turn is ordinary
+                # RWKV continuation.  A malformed tool turn must therefore
+                # transition to synthesis instead of replacing the model's
+                # answer with a controller-authored error string.  Existing
+                # evidence is still passed through unchanged; with no
+                # evidence the final model is explicitly told that retrieval
+                # returned nothing.
                 append_task_event(
                     self.state.task_id,
-                    "final",
-                    status="failed",
-                    content=answer,
+                    "model_tool_decision_error",
+                    step=step,
+                    phase=phase,
                     action="model_tool_decision",
-                    mode="model_rwkv_json_parse_error",
                     planner_error=plan.get("planner_error", ""),
+                    raw_model_output=plan.get("raw_model_output", ""),
+                    transition="final_synthesis",
                 )
-                self._write_agentic_report(
+                termination_reason = (
+                    "max_steps_reached" if step >= max_steps else "model_tool_decision_parse_error"
+                )
+                return self._complete_model_tool_loop(
                     user_query,
-                    "model_tool_decision",
-                    answer,
-                    mode="model_rwkv_json_parse_error",
+                    last_action,
+                    rounds,
+                    step,
+                    termination_reason=termination_reason,
                 )
-                return answer
 
             # Keep compatibility with the existing controlled test harness;
             # real planner responses use router=model_tool_decision.
@@ -975,7 +987,7 @@ class Orchestrator:
                         error=answer_rejection["message"],
                         error_class=answer_rejection["error_class"],
                     )
-                    phase = "DISCOVERY"
+                    phase = "GENERIC_WEB" if generic_web_mode else "DISCOVERY"
                     continue
                 if rounds:
                     answer = self._complete_model_tool_loop(
@@ -1045,7 +1057,7 @@ class Orchestrator:
                     }
                 )
                 append_task_event(self.state.task_id, "error", step=step, phase="ROUTING", error=error, error_class="model_tool_decision")
-                phase = "RECOVERY"
+                phase = "GENERIC_WEB" if generic_web_mode else "RECOVERY"
                 continue
 
             append_task_event(
@@ -1094,6 +1106,16 @@ class Orchestrator:
             retrieval_role = str(tool_meta.get("retrieval_role") or "")
             if retrieval_role in {"discovery", "evidence"}:
                 retrieval_attempted = True
+            if generic_web_mode and action == "web_search":
+                # ``web_search`` is a complete bounded retrieval transaction:
+                # its result already contains admitted URLs, fetched pages,
+                # Markdown chunks and merged evidence.  Do not send it back
+                # through the old discovery->explicit-fetch state machine.
+                last_discovery_results = [
+                    item for item in (structured_result.get("results") or []) if isinstance(item, dict)
+                ]
+                if structured_result.get("evidence_ready") and last_discovery_results:
+                    rounds.append((str(args.get("query") or user_query), structured_result))
             if is_error(structured_result):
                 if retrieval_role == "evidence" and last_discovery_results:
                     selected_url = str(args.get("url") or "").strip()
@@ -1138,7 +1160,7 @@ class Orchestrator:
                     error_class=str(structured_result.get("error_class") or "provider_error"),
                     provider=structured_result.get("provider", ""),
                 )
-                phase = "RECOVERY"
+                phase = "GENERIC_WEB" if generic_web_mode else "RECOVERY"
                 if retrieval_role == "evidence" and structured_result.get("alternative_urls"):
                     phase = "EXTRACTION"
                 continue
@@ -1214,9 +1236,9 @@ class Orchestrator:
                 last_discovery_results = [
                     item for item in (structured_result.get("results") or []) if isinstance(item, dict)
                 ]
-                phase = "EXTRACTION"
+                phase = "GENERIC_WEB" if generic_web_mode else "EXTRACTION"
             else:
-                phase = "DISCOVERY"
+                phase = "GENERIC_WEB" if generic_web_mode else "DISCOVERY"
 
         return self._complete_model_tool_loop(
             user_query,

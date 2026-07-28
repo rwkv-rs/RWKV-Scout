@@ -1,0 +1,23 @@
+[
+  {
+    "case_id": "generic_web_q1_shenzhen_metro_line_1",
+    "query": "深圳地铁一号线有哪些站点？请给出完整站点列表，并注明信息来源。",
+    "generic_web_search_only": true,
+    "retrieval_fork": false,
+    "max_tool_steps": 8
+  },
+  {
+    "case_id": "generic_web_q2_shanghai_to_rwkv_company",
+    "query": "如何从上海到 RWKV 公司？请查找公司目的地，并说明乘坐哪些公共交通比较合适、路线如何安排。请给出信息来源。",
+    "generic_web_search_only": true,
+    "retrieval_fork": false,
+    "max_tool_steps": 8
+  },
+  {
+    "case_id": "generic_web_q3_rwkv_founder_papers_github",
+    "query": "RWKV 的创始人是谁？他发布过哪些论文和 GitHub 项目？请给出对应链接和信息来源。",
+    "generic_web_search_only": true,
+    "retrieval_fork": false,
+    "max_tool_steps": 8
+  }
+]
