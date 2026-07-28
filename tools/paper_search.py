@@ -10,6 +10,7 @@ from datetime import datetime
 from html import unescape
 
 from tools.registry import ToolRegistry
+from tools.crossref import query_crossref
 from utils.network_fetch import NetworkFetchError, fetch_json, fetch_text
 from utils.retrieval_events import record_retrieval_event
 from utils.web_retrieval import attach_page
@@ -107,33 +108,20 @@ def _arxiv(query: str, limit: int) -> list[dict]:
 
 
 def _crossref(query: str, limit: int) -> list[dict]:
-    payload = fetch_json(
-        "https://api.crossref.org/works",
+    rows = query_crossref(query, limit)
+    return [
         {
-            "query.title": query,
-            "rows": min(limit, 25),
-            "select": "DOI,title,author,published,URL,abstract",
-        },
-    )
-    records = []
-    for work in ((payload.get("message") or {}).get("items") or []):
-        date_parts = ((work.get("published") or {}).get("date-parts") or [[]])[0]
-        records.append(
-            {
-                "title": ((work.get("title") or [""])[0]).strip(),
-                "authors": [
-                    " ".join(part for part in [a.get("given", ""), a.get("family", "")] if part).strip()
-                    for a in work.get("author") or []
-                ],
-                "published": "-".join(str(part) for part in date_parts),
-                "abstract": _clean_abstract(work.get("abstract", "")),
-                "doi": work.get("DOI", ""),
-                "url": work.get("URL", ""),
-                "citations": None,
-                "source": "Crossref",
-            }
-        )
-    return records
+            "title": row.get("title", ""),
+            "authors": row.get("authors") or [],
+            "published": row.get("published", ""),
+            "abstract": row.get("abstract", ""),
+            "doi": row.get("doi", ""),
+            "url": row.get("url", ""),
+            "citations": None,
+            "source": "Crossref",
+        }
+        for row in rows
+    ]
 
 
 def _provider_query(query: str) -> str:

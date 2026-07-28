@@ -18,6 +18,9 @@ def load_builtin_tools() -> None:
         if _loaded:
             return
         import tools.chat  # noqa: F401
+        import tools.crossref  # noqa: F401
+        import tools.github_rest  # noqa: F401
+        import tools.mediawiki  # noqa: F401
         import tools.paper_search  # noqa: F401
         import tools.static_ops  # noqa: F401
         import tools.weather  # noqa: F401

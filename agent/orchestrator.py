@@ -66,7 +66,13 @@ class Orchestrator:
         context["agentic_tool_loop"] = True
         return context
 
-    def _process_single_page_result(self, evidence_query: str, data: dict, step: int) -> dict:
+    def _process_single_page_result(
+        self,
+        evidence_query: str,
+        data: dict,
+        step: int,
+        evidence_action: str = "fetch_web_url",
+    ) -> dict:
         """Map one model-selected page into compact chunk candidates.
 
         ``data`` may contain the full fetched page because the fetch tool must
@@ -82,7 +88,7 @@ class Orchestrator:
             compact["citation_refs"] = []
             compact["page_evidence"] = {
                 "status": "error",
-                "message": "fetch_web_url must return exactly one page",
+                "message": "the evidence tool must return exactly one page",
             }
             return compact
 
@@ -95,7 +101,7 @@ class Orchestrator:
                 "page_chunk",
                 step=step,
                 phase="EXTRACTION",
-                action="fetch_web_url",
+                action=evidence_action,
                 url=url,
                 chunk_id=chunk.get("chunk_id", ""),
                 chunk_index=chunk.get("index", 0),
@@ -109,7 +115,7 @@ class Orchestrator:
                 "page_chunk_candidate",
                 step=step,
                 phase="EXTRACTION",
-                action="fetch_web_url",
+                action=evidence_action,
                 url=url,
                 chunk_id=chunk.get("chunk_id", ""),
                 prompt=prompt,
@@ -142,17 +148,47 @@ class Orchestrator:
                 "errors": [f"{type(exc).__name__}: {exc}"],
             }
 
-        compact_facts = str(evidence.get("compact_facts") or "")[:6000]
+        structured_facts: list[str] = []
+        if page.get("api_url"):
+            structured_facts.append(f"API endpoint: {page.get('api_url')}")
+        if page.get("request_params"):
+            structured_facts.append(
+                "API request parameters: "
+                + json.dumps(page.get("request_params"), ensure_ascii=False, separators=(",", ":"))
+            )
+        if page.get("source"):
+            structured_facts.append(f"Evidence source: {page.get('source')}")
+        first_chunk_text = str(evidence.get("first_chunk_text") or "").strip()
+        if first_chunk_text:
+            structured_facts.append(f"Selected source chunk (chunk-1): {first_chunk_text[:3200]}")
+        compact_facts = "\n".join([*structured_facts, str(evidence.get("compact_facts") or "")]).strip()[:6000]
+        chunk_candidates = evidence.get("candidates") or []
+        if structured_facts:
+            chunk_candidates = [
+                {
+                    "chunk_id": "source-metadata",
+                    "chunk_index": -1,
+                    "facts": structured_facts,
+                    "quote": "",
+                    "supported": True,
+                },
+                *chunk_candidates,
+            ]
         merged_page = {
             "title": page.get("title") or url,
             "url": url,
+            "api_url": page.get("api_url", ""),
+            "request_params": page.get("request_params", {}),
             "snippet": compact_facts[:1000],
             "page_excerpt": compact_facts,
             "content": compact_facts,
             "source": page.get("source") or "explicit model-selected URL",
+            "content_type": page.get("content_type", ""),
+            "project": page.get("project", ""),
+            "language": page.get("language", ""),
             "untrusted_content": True,
             "chunk_count": evidence.get("chunk_count", 0),
-            "chunk_candidates": evidence.get("candidates") or [],
+            "chunk_candidates": chunk_candidates,
             "evidence_status": evidence.get("status", "no_evidence"),
         }
         compact = dict(data)
@@ -184,7 +220,7 @@ class Orchestrator:
             "page_candidate_merge",
             step=step,
             phase="EXTRACTION",
-            action="fetch_web_url",
+            action=evidence_action,
             url=url,
             data=compact["page_evidence"],
             candidates=evidence.get("candidates") or [],
@@ -277,16 +313,10 @@ class Orchestrator:
                 if objective:
                     needed_text = "; ".join(str(item).strip() for item in needed if str(item).strip())
                     return f"Atomic objective: {objective}\nEvidence needed: {needed_text}"
-        points = [point for point in self._task_plan.get("atomic_points") or [] if isinstance(point, dict)]
-        if points:
-            objectives = []
-            for point in points:
-                objective = str(point.get("objective") or "").strip()
-                needed = "; ".join(str(item).strip() for item in (point.get("evidence_needed") or []) if str(item).strip())
-                if objective:
-                    objectives.append(f"- {point.get('id', '')}: {objective}; evidence: {needed}")
-            if objectives:
-                return "Task plan atomic objectives:\n" + "\n".join(objectives)
+        # A missing point id is a model protocol omission, not permission to
+        # inject the entire checklist into every page chunk.  The checklist
+        # remains available to planning and judging; page extraction should
+        # receive only the original question so it reads the selected page.
         return fallback
 
     def _replan_after_incomplete_judgement(self, user_query: str, step: int) -> bool:
@@ -801,7 +831,7 @@ class Orchestrator:
                         structured_result["alternative_urls"] = alternative_urls
                         structured_result["recovery_instruction"] = (
                             "The selected page failed. Choose one different URL from alternative_urls "
-                            "with fetch_web_url before starting another search."
+                            "with the matching evidence tool before starting another search."
                         )
                 self.state.last_feedback = (
                     f"[{action}] execution failed; plugin is unavailable for this turn:\n"
@@ -836,7 +866,12 @@ class Orchestrator:
                 continue
             if retrieval_role == "evidence":
                 evidence_query = self._evidence_query_for_point(task_point_id, user_query)
-                observed_result = self._process_single_page_result(evidence_query, structured_result, step)
+                observed_result = self._process_single_page_result(
+                    evidence_query,
+                    structured_result,
+                    step,
+                    evidence_action=action,
+                )
                 if not observed_result.get("results") and last_discovery_results:
                     selected_url = str(args.get("url") or "").strip()
                     alternative_urls = [
@@ -851,7 +886,7 @@ class Orchestrator:
                         observed_result["alternative_urls"] = alternative_urls
                         observed_result["recovery_instruction"] = (
                             "The selected page produced no evidence. Choose one different URL from alternative_urls "
-                            "with fetch_web_url before refining the search."
+                            "with the matching evidence tool before refining the search."
                         )
             self.state.last_feedback = (
                 f"[{action}] model-selected tool result:\n"

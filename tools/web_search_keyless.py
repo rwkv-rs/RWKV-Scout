@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import time
@@ -121,6 +122,16 @@ def _unwrap_ddg_url(value: str) -> str:
         target = parse_qs(parsed.query).get("uddg", [""])[0]
         if target:
             return unquote(target)
+    if (parsed.hostname or "").casefold().removeprefix("www.") == "bing.com" and parsed.path.startswith("/ck/a"):
+        encoded = parse_qs(parsed.query).get("u", [""])[0]
+        if encoded.startswith("a1"):
+            try:
+                padded = encoded[2:] + "=" * (-len(encoded[2:]) % 4)
+                target = base64.urlsafe_b64decode(padded).decode("utf-8", errors="ignore")
+                if target:
+                    return unquote(target)
+            except (ValueError, UnicodeError):
+                pass
     return value
 
 
@@ -204,11 +215,39 @@ def _rwkv_provider_query(query: str) -> str:
 _provider_query = _rwkv_provider_query
 
 
+def _search_terms(query: str) -> list[str]:
+    """Extract conservative terms for rejecting obviously unrelated SERPs."""
+
+    terms = re.findall(
+        r"[A-Za-z0-9][A-Za-z0-9_-]{2,}|[\u3400-\u9fff]{2,}",
+        str(query or ""),
+    )
+    unique: list[str] = []
+    for term in terms:
+        normalized = term.casefold()
+        if normalized not in unique:
+            unique.append(normalized)
+    return unique
+
+
+def _looks_related(row: dict[str, str], query: str) -> bool:
+    """Fail closed when Bing/proxies return a valid page for another query."""
+
+    terms = _search_terms(query)
+    if not terms:
+        return True
+    haystack = " ".join(
+        str(row.get(field) or "") for field in ("title", "snippet", "url")
+    ).casefold()
+    return any(term in haystack for term in terms)
+
+
 @ToolRegistry.register(
     name="search_web_keyless",
-    # Keep the implementation available to legacy direct probes, but do not
-    # expose Bing as a choice in the current model-owned tool catalog.
-    phase="LEGACY",
+    # Bing/DDG are model-selectable discovery providers.  They return only
+    # candidate URLs in the agent loop; page bodies still require
+    # fetch_web_url and the shared chunk/evidence path.
+    phase="ALL",
     plugin="web.keyless",
     capabilities=("url_discovery", "web_search"),
     retrieval_role="discovery",
@@ -253,6 +292,7 @@ def search_web_keyless(
     errors: list[str] = []
     results: list[dict] = []
     providers = (
+        ("Bing HTML (keyless)", "https://www.bing.com/search", _BingResultParser, 10),
         ("Bing regional HTML (keyless)", "https://cn.bing.com/search", _BingResultParser, 10),
         ("DuckDuckGo HTML (keyless)", "https://html.duckduckgo.com/html/", _SearchResultParser, 8),
     )
@@ -264,6 +304,8 @@ def search_web_keyless(
             parser = parser_type()
             parser.feed(html)
             for row in parser.rows:
+                if not _looks_related(row, provider_query):
+                    continue
                 if not any(item.get("url") == row["url"] for item in results):
                     results.append(
                         {

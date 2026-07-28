@@ -11,10 +11,9 @@ import json
 from datetime import datetime
 from typing import Any
 
-import requests
-
 from config import get_search_api_key
 from tools.registry import ToolRegistry
+from utils.network_fetch import create_network_session
 
 
 @ToolRegistry.register(
@@ -80,14 +79,14 @@ def search_web_tavily(
         # The desktop Windows process may inherit a proxy that aborts HTTPS
         # connections to api.tavily.com. Use a direct session, like the local
         # RWKV bridge client does, and keep the key in the Authorization header.
-        session = requests.Session()
-        session.trust_env = False
-        response = session.post(
-            "https://api.tavily.com/search",
-            headers={
+        session = create_network_session(
+            {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
-            },
+            }
+        )
+        response = session.post(
+            "https://api.tavily.com/search",
             json=params,
             timeout=(15, 45),
         )

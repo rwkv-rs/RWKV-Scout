@@ -76,7 +76,7 @@ class PageEvidenceTests(unittest.TestCase):
     def test_agentic_search_never_fetches_multiple_pages(self):
         html = """
         <html><body>
-          <h2><a href="https://example.com/a">线路官方页面</a></h2>
+          <h2><a href="https://example.com/a">深圳地铁一号线官方页面</a></h2>
           <p>站点摘要</p>
         </body></html>
         """
@@ -86,7 +86,7 @@ class PageEvidenceTests(unittest.TestCase):
         ):
             result = json.loads(
                 search_web_keyless(
-                    "深圳地铁一号线站点",
+                    "深圳地铁一号线官方页面",
                     max_results=1,
                     fetch_pages=3,
                     agentic_tool_loop=True,

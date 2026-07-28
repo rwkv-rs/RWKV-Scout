@@ -90,17 +90,31 @@ class RetrievalRuntimeTests(unittest.TestCase):
         rows = {row["name"]: row for row in catalog}
         self.assertEqual(rows["search_web_tavily"]["retrieval_role"], "discovery")
         self.assertNotIn("fetch_web_url", rows)
-        self.assertNotIn("search_web_keyless", rows)
+        self.assertEqual(rows["search_web_keyless"]["retrieval_role"], "discovery")
+        self.assertEqual(rows["search_crossref"]["plugin"], "crossref.rest")
+        self.assertEqual(rows["search_github_rest"]["plugin"], "github.rest")
+        self.assertEqual(rows["search_mediawiki"]["plugin"], "mediawiki.api")
 
         extraction = json.loads(ToolRegistry.get_json_catalog("EXTRACTION"))
         extraction_rows = {row["name"]: row for row in extraction}
         self.assertEqual(extraction_rows["fetch_web_url"]["retrieval_role"], "evidence")
         self.assertNotIn("search_web_tavily", extraction_rows)
+        self.assertEqual(extraction_rows["fetch_crossref_record"]["retrieval_role"], "evidence")
+        self.assertEqual(extraction_rows["fetch_github_rest"]["retrieval_role"], "evidence")
+        self.assertEqual(extraction_rows["fetch_mediawiki_page"]["retrieval_role"], "evidence")
 
     def test_discovery_and_evidence_roles_are_phase_gated(self):
         self.assertTrue(ToolRegistry.can_execute("search_web_tavily", "DISCOVERY"))
+        self.assertTrue(ToolRegistry.can_execute("search_web_keyless", "DISCOVERY"))
+        self.assertTrue(ToolRegistry.can_execute("search_crossref", "DISCOVERY"))
+        self.assertTrue(ToolRegistry.can_execute("search_github_rest", "DISCOVERY"))
+        self.assertTrue(ToolRegistry.can_execute("search_mediawiki", "DISCOVERY"))
         self.assertFalse(ToolRegistry.can_execute("search_web_tavily", "EXTRACTION"))
+        self.assertFalse(ToolRegistry.can_execute("search_github_rest", "EXTRACTION"))
         self.assertTrue(ToolRegistry.can_execute("fetch_web_url", "EXTRACTION"))
+        self.assertTrue(ToolRegistry.can_execute("fetch_crossref_record", "EXTRACTION"))
+        self.assertTrue(ToolRegistry.can_execute("fetch_github_rest", "EXTRACTION"))
+        self.assertTrue(ToolRegistry.can_execute("fetch_mediawiki_page", "EXTRACTION"))
         self.assertTrue(ToolRegistry.can_execute("fetch_web_url", "SYNTHESIS"))
         self.assertNotIn("fetch_web_url", ToolRegistry.names("DISCOVERY"))
         self.assertIn("fetch_web_url", ToolRegistry.names("EXTRACTION"))
