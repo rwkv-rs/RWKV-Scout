@@ -142,6 +142,19 @@ class ExperimentStrategyTests(unittest.TestCase):
         self.assertIn("For every factual claim", result["prompt"])
         self.assertEqual(result["context_stats"]["strategy"]["prompt_variant"], "citation_first.v1")
 
+    def test_chinese_multi_part_query_keeps_multiple_sources_in_context(self):
+        data = {
+            "query": "RWKV创始人、论文和GitHub项目链接是什么？",
+            "results": [
+                {"title": "Founder", "url": "https://example.com/founder", "page_excerpt": "founder"},
+                {"title": "Papers", "url": "https://example.com/papers", "page_excerpt": "papers"},
+                {"title": "Projects", "url": "https://example.com/projects", "page_excerpt": "projects"},
+            ],
+            "citation_refs": [],
+        }
+        context = build_evidence_context(data)
+        self.assertEqual(len(context["selected_evidence"]), 3)
+
     def test_answer_citations_are_limited_to_selected_context_sources(self):
         data = {
             "query": "evidence",

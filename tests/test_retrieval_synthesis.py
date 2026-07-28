@@ -16,7 +16,7 @@ class _FakeLLM:
 
 
 class RetrievalSynthesisTests(unittest.TestCase):
-    def test_final_summary_uses_three_thousand_token_budget_and_acceptance_plan(self):
+    def test_final_summary_uses_remaining_context_budget_and_acceptance_plan(self):
         llm = _FakeLLM()
         result = synthesize_retrieval_answer(
             "列出全部站点",
@@ -48,7 +48,8 @@ class RetrievalSynthesisTests(unittest.TestCase):
                 }
             },
         )
-        self.assertEqual(llm.calls[0][1], 3000)
+        self.assertGreater(llm.calls[0][1], 3000)
+        self.assertLessEqual(llm.calls[0][1], 8192)
         self.assertIn("Acceptance checklist", llm.calls[0][0])
         self.assertIn("row/column relationship", llm.calls[0][0])
         self.assertIn("https://example.com/stations", result["content"])

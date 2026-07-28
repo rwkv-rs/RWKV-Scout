@@ -66,15 +66,18 @@ class ToolRegistry:
     def _phase_allows(meta: dict[str, Any], phase: str | None) -> bool:
         """Apply the declared tool phase and retrieval role contract.
 
-        ``phase=ALL`` is intentionally not a bypass for retrieval semantics:
-        discovery tools must not be used after the controller has requested
-        page extraction, while evidence tools remain available for extraction,
-        synthesis and recovery. The model still chooses the concrete tool and
-        URL; this is only a protocol boundary that prevents a search loop from
-        masquerading as evidence collection.
+        ``phase=ALL`` exposes the complete non-legacy catalog so the model can
+        choose discovery, evidence, or synthesis tools itself. Other phases
+        remain explicit compatibility filters for callers that need them.
         """
         if phase is None:
             return True
+        if str(phase).upper() == "ALL":
+            # The model-owned retrieval episode intentionally exposes the
+            # complete retrieval catalog.  Discovery/evidence sequencing is
+            # a model decision in this mode; the step budget remains the
+            # execution boundary.
+            return str(meta.get("phase") or "").upper() != "LEGACY"
         if meta.get("phase") not in {phase, "ALL"}:
             return False
         role = str(meta.get("retrieval_role") or "").strip().casefold()
@@ -115,6 +118,7 @@ class ToolRegistry:
                     "plugin": meta.get("plugin", ""),
                     "capabilities": list(meta.get("capabilities") or ()),
                     "retrieval_role": meta.get("retrieval_role", ""),
+                    "phase": meta.get("phase", ""),
                 }
             )
         return json.dumps(rows, ensure_ascii=False, indent=2)

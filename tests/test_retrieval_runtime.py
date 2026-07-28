@@ -99,6 +99,8 @@ class RetrievalRuntimeTests(unittest.TestCase):
         self.assertEqual(rows["search_crossref"]["plugin"], "crossref.rest")
         self.assertEqual(rows["search_github_rest"]["plugin"], "github.rest")
         self.assertEqual(rows["search_mediawiki"]["plugin"], "mediawiki.api")
+        self.assertTrue(rows["search_mediawiki"]["description"])
+        self.assertIn("properties", rows["search_mediawiki"]["arguments"])
 
         extraction = json.loads(ToolRegistry.get_json_catalog("EXTRACTION"))
         extraction_rows = {row["name"]: row for row in extraction}
@@ -107,6 +109,13 @@ class RetrievalRuntimeTests(unittest.TestCase):
         self.assertEqual(extraction_rows["fetch_crossref_record"]["retrieval_role"], "evidence")
         self.assertEqual(extraction_rows["fetch_github_rest"]["retrieval_role"], "evidence")
         self.assertEqual(extraction_rows["fetch_mediawiki_page"]["retrieval_role"], "evidence")
+
+        all_tools = json.loads(ToolRegistry.get_json_catalog("ALL"))
+        all_rows = {row["name"]: row for row in all_tools}
+        self.assertIn("search_web_keyless", all_rows)
+        self.assertIn("fetch_web_url", all_rows)
+        self.assertTrue(ToolRegistry.can_execute("search_web_keyless", "ALL"))
+        self.assertTrue(ToolRegistry.can_execute("fetch_web_url", "ALL"))
 
     def test_discovery_and_evidence_roles_are_phase_gated(self):
         self.assertTrue(ToolRegistry.can_execute("search_web_tavily", "DISCOVERY"))

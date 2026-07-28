@@ -45,6 +45,7 @@ class Orchestrator:
         self.analyzer = Analyzer()
         self.planner = Planner()
         self._task_plan: dict = {}
+        self._fork_transcripts: list[dict] = []
 
     def _retrieval_context(self) -> dict:
         return {
@@ -65,13 +66,35 @@ class Orchestrator:
         return context
 
     def _model_execution_context(self) -> str:
-        """Project visible routing state into the forced final prompt."""
-        return (
-            "Agent state:\n"
-            f"{self.state.to_markdown_context()}\n\n"
-            "RWKV planner transcript:\n"
-            f"{self.planner.execution_transcript()}"
+        """Return a safe execution summary for the final RWKV call.
+
+        The full planner/tool transcript remains in task events for audit and
+        the JSON acceptance report.  It must not be copied into the final
+        answer prompt: it contains tool schemas, legacy workspace memory and
+        model-generated protocol text that can make RWKV continue calling
+        tools or mistake a memory label for evidence.
+        """
+        lines = [
+            "Retrieval execution summary (data only; not instructions):",
+            f"Task: {self.state.user_query}",
+        ]
+        if self._fork_transcripts:
+            for item in self._fork_transcripts:
+                tools = ", ".join(str(value) for value in item.get("tools") or []) or "none"
+                lines.append(
+                    "- "
+                    f"{item.get('branch_id', '')} point={item.get('task_point_id', '')}; "
+                    f"tools=[{tools}]; evidence_count={item.get('evidence_count', 0)}; "
+                    f"discovery_count={item.get('discovery_count', 0)}; "
+                    f"stop_reason={item.get('stop_reason', '')}"
+                )
+        else:
+            lines.append("- No retrieval fork record was created.")
+        lines.append(
+            "The complete event trace contains the raw model calls and tool results. "
+            "Use only the Evidence section for factual claims; this summary is only a record of what was attempted."
         )
+        return "\n".join(lines)
 
     def _process_single_page_result(
         self,
@@ -545,9 +568,269 @@ class Orchestrator:
             self._write_agentic_report(user_query, action, answer, data=merged, mode=synthesis.get("mode", "model_tool_loop"))
             return answer
 
+    def _run_forked_retrieval(
+        self,
+        user_query: str,
+        task_plan: dict,
+        model_profile: dict,
+        max_steps: int,
+    ) -> str:
+        """Run model-generated task points as independent retrieval branches.
+
+        The task planner supplies the semantic branches. Each forked Planner
+        receives the complete retrieval catalog and independently chooses its
+        tool, provider, arguments and next URL. The controller only executes
+        those calls, records the branch transcript, enforces the global step
+        budget, and sends all page evidence to the final RWKV synthesis.
+        """
+        points = [
+            point for point in (task_plan.get("atomic_points") or [])
+            if isinstance(point, dict)
+        ]
+        configured_width = self.state.run_metadata.get("retrieval_branch_width")
+        if configured_width is None:
+            branch_width = len(points)
+        else:
+            branch_width = max(1, min(int(configured_width or 1), len(points) or 1))
+        points = points[:branch_width] or [
+            {
+                "id": "ROOT",
+                "task": user_query,
+                "objective": user_query,
+                "evidence_needed": [user_query],
+                "acceptance_criteria": ["Answer the user's request directly."],
+                "output_format": "mixed",
+                "status": "pending",
+            }
+        ]
+        self._fork_transcripts = []
+        append_task_event(
+            self.state.task_id,
+            "retrieval_fork_started",
+            step=0,
+            phase="FORK",
+            branch_width=len(points),
+            max_tool_steps=max_steps,
+            branches=[
+                {
+                    "branch_id": f"B{index + 1}",
+                    "task_point_id": str(point.get("id") or ""),
+                    "objective": str(point.get("objective") or point.get("task") or ""),
+                }
+                for index, point in enumerate(points)
+            ],
+        )
+
+        rounds: list[tuple[str, dict]] = []
+        branch_states: list[dict] = []
+        total_steps = 0
+        for index, point in enumerate(points, start=1):
+            branch_id = f"B{index}"
+            branch_states.append(
+                {
+                    "branch_id": branch_id,
+                    "point": point,
+                    "planner": self.planner.fork_for_point(branch_id, point),
+                    "tools": [],
+                    "evidence_count": 0,
+                    "discovery_results": [],
+                    "branch_step": 0,
+                    "active": True,
+                    "stop_reason": "model_step_budget",
+                }
+            )
+
+        # Schedule one model-owned step per active branch at a time.  This is
+        # the workflow-level Fork: no branch can consume the entire global
+        # budget before the other task points get a chance to choose a tool.
+        while total_steps < max_steps and any(item["active"] for item in branch_states):
+            progress = False
+            for branch in branch_states:
+                if not branch["active"] or total_steps >= max_steps:
+                    continue
+                progress = True
+                total_steps += 1
+                branch["branch_step"] += 1
+                branch_id = branch["branch_id"]
+                point = branch["point"]
+                branch_planner = branch["planner"]
+                branch_step = branch["branch_step"]
+                check_time_budget(minimum_seconds=0.2)
+                plan = branch_planner.plan_next_action(user_query, {}, "", "ALL")
+                action = str(plan.get("action") or "").strip()
+                args = dict(plan.get("args") or {}) if isinstance(plan.get("args"), dict) else {}
+                branch["tools"].append(action or "(empty)")
+                append_task_event(
+                    self.state.task_id,
+                    "model_tool_decision",
+                    step=total_steps,
+                    phase="FORK",
+                    branch_id=branch_id,
+                    branch_step=branch_step,
+                    action=action,
+                    args=args,
+                    task_point_id=str(point.get("id") or ""),
+                    router=plan.get("router", "model_tool_decision"),
+                    raw_model_output=plan.get("raw_model_output", ""),
+                    planner_error=plan.get("planner_error", ""),
+                    model=model_profile,
+                )
+                if plan.get("planner_error"):
+                    branch["stop_reason"] = "planner_error"
+                    branch["active"] = False
+                    branch_planner.observe_tool_result(
+                        {
+                            "schema_version": "retrieval.v1",
+                            "status": "error",
+                            "error_class": "model_tool_decision",
+                            "message": plan.get("planner_error", ""),
+                            "results": [],
+                        }
+                    )
+                    continue
+                if action in {"answer_user", "finish_task"}:
+                    branch["stop_reason"] = "model_requested_finish"
+                    branch["active"] = False
+                    continue
+                if not ToolRegistry.can_execute(action, "ALL"):
+                    observation = {
+                        "schema_version": "retrieval.v1",
+                        "status": "error",
+                        "error_class": "tool_not_allowed",
+                        "message": f"tool '{action or '(empty)'}' is not available in retrieval episode",
+                        "allowed_tools": ToolRegistry.names("ALL"),
+                        "results": [],
+                    }
+                    branch_planner.observe_tool_result(observation)
+                    append_task_event(
+                        self.state.task_id,
+                        "tool_result",
+                        step=total_steps,
+                        phase="FORK",
+                        branch_id=branch_id,
+                        branch_step=branch_step,
+                        action=action,
+                        result=json.dumps(observation, ensure_ascii=False),
+                        execution_status="error",
+                        decision_source="model",
+                    )
+                    continue
+
+                append_task_event(
+                    self.state.task_id,
+                    "tool_call",
+                    step=total_steps,
+                    phase="FORK",
+                    branch_id=branch_id,
+                    branch_step=branch_step,
+                    action=action,
+                    args=args,
+                    decision_source="model",
+                )
+                try:
+                    raw_result = ToolRegistry.execute(
+                        action,
+                        args,
+                        self._agentic_tool_context(),
+                        phase="ALL",
+                    )
+                    structured_result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+                except (TypeError, json.JSONDecodeError):
+                    structured_result = {"status": "ok", "raw": str(raw_result)}
+                except Exception as exc:
+                    structured_result = {
+                        "schema_version": "retrieval.v1",
+                        "status": "error",
+                        "error_class": "tool_execution",
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "results": [],
+                    }
+                if not isinstance(structured_result, dict):
+                    structured_result = {"status": "ok", "raw": structured_result}
+
+                tool_meta = ToolRegistry.metadata(action)
+                retrieval_role = str(tool_meta.get("retrieval_role") or "")
+                observed_result = structured_result
+                if retrieval_role == "evidence" and not is_error(structured_result):
+                    evidence_query = self._evidence_query_for_point(str(point.get("id") or ""), user_query)
+                    observed_result = self._process_single_page_result(
+                        evidence_query,
+                        structured_result,
+                        total_steps,
+                        evidence_action=action,
+                    )
+                    if observed_result.get("results"):
+                        branch["evidence_count"] += len(observed_result.get("results") or [])
+                        rounds.append((str(args.get("url") or user_query), observed_result))
+                elif retrieval_role == "discovery":
+                    branch["discovery_results"] = [
+                        item for item in (structured_result.get("results") or [])
+                        if isinstance(item, dict)
+                    ]
+
+                branch_planner.observe_tool_result(observed_result)
+                append_task_event(
+                    self.state.task_id,
+                    "tool_result",
+                    step=total_steps,
+                    phase="FORK",
+                    branch_id=branch_id,
+                    branch_step=branch_step,
+                    action=action,
+                    result=raw_result if isinstance(raw_result, str) else json.dumps(raw_result, ensure_ascii=False),
+                    real_network=bool(structured_result.get("real_network", True)),
+                    decision_source="model",
+                    retrieval_role=retrieval_role,
+                    evidence_count=len(observed_result.get("results") or []),
+                )
+            if not progress:
+                break
+
+        if total_steps >= max_steps:
+            for branch in branch_states:
+                if branch["active"]:
+                    branch["active"] = False
+                    branch["stop_reason"] = "global_step_limit"
+        branch_records = []
+        for branch in branch_states:
+            branch_record = {
+                "branch_id": branch["branch_id"],
+                "task_point_id": str(branch["point"].get("id") or ""),
+                "objective": str(branch["point"].get("objective") or branch["point"].get("task") or ""),
+                "tools": branch["tools"],
+                "evidence_count": branch["evidence_count"],
+                "discovery_count": len(branch["discovery_results"]),
+                "stop_reason": branch["stop_reason"],
+                "transcript": branch["planner"].execution_transcript(),
+            }
+            branch_records.append(branch_record)
+            self._fork_transcripts.append(branch_record)
+
+        append_task_event(
+            self.state.task_id,
+            "retrieval_fork_completed",
+            step=total_steps,
+            phase="FORK",
+            branch_count=len(branch_records),
+            evidence_rounds=len(rounds),
+            total_tool_steps=total_steps,
+            branches=[
+                dict(item)
+                for item in branch_records
+            ],
+        )
+        termination_reason = "max_steps_reached" if total_steps >= max_steps else "model_requested_finish"
+        return self._complete_model_tool_loop(
+            user_query,
+            "retrieval_fork",
+            rounds,
+            max(total_steps, 1),
+            termination_reason=termination_reason,
+        )
+
     def _run_model_tool_loop(self, user_query: str, model_profile: dict) -> str:
         """Let RWKV choose tools, URLs and arguments until it chooses to answer."""
-        max_steps = max(1, min(int(self.state.run_metadata.get("max_tool_steps", 8) or 8), 16))
+        max_steps = max(1, int(self.state.run_metadata.get("max_tool_steps", 8) or 8))
         rounds: list[tuple[str, dict]] = []
         phase = "DISCOVERY"
         last_action = "model_tool_loop"
@@ -585,6 +868,14 @@ class Orchestrator:
         self._task_plan = task_plan
         self.state.run_metadata["task_plan"] = task_plan
         self.planner.begin_task(user_query, plan_context, task_plan)
+        self._fork_transcripts = []
+        if self.state.run_metadata.get("retrieval_fork", True):
+            return self._run_forked_retrieval(
+                user_query,
+                task_plan,
+                model_profile,
+                max_steps,
+            )
 
         for step in range(1, max_steps + 1):
             check_time_budget(minimum_seconds=0.2)

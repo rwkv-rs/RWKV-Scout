@@ -75,6 +75,9 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
     """Summarize execution boundaries without judging task-specific content."""
     events = get_task_events(task_id)
     decisions = []
+    tool_calls = []
+    tool_results = []
+    forks = []
     evidence = []
     plans = []
     judgements = []
@@ -166,16 +169,62 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                 {
                     "step": event.get("step"),
                     "phase": phase,
+                    "branch_id": event.get("branch_id") or "",
+                    "branch_step": event.get("branch_step"),
                     "action": action,
                     "task_point_id": event.get("task_point_id") or "",
                     "args": event.get("args") or {},
                     "planner_error": event.get("planner_error") or "",
                 }
             )
+        elif event_type == "tool_call":
+            tool_calls.append(
+                {
+                    key: event.get(key)
+                    for key in (
+                        "step",
+                        "phase",
+                        "branch_id",
+                        "branch_step",
+                        "action",
+                        "args",
+                        "decision_source",
+                    )
+                    if key in event
+                }
+            )
         elif event_type == "tool_result":
             result = _json_result(event)
             status = str(result.get("status") or "ok")
             tool_result_statuses[status] += 1
+            if status in {"error", "failed", "unavailable", "unauthorized"}:
+                error_classes[str(result.get("error_class") or "tool_result_error")] += 1
+            tool_results.append(
+                {
+                    "step": event.get("step"),
+                    "phase": event.get("phase"),
+                    "branch_id": event.get("branch_id") or "",
+                    "branch_step": event.get("branch_step"),
+                    "action": event.get("action") or "",
+                    "execution_status": event.get("execution_status") or "",
+                    "retrieval_role": event.get("retrieval_role") or "",
+                    "result": result,
+                }
+            )
+        elif event_type in {"retrieval_fork_started", "retrieval_fork_completed"}:
+            forks.append(
+                {
+                    "type": event_type,
+                    "step": event.get("step"),
+                    "phase": event.get("phase"),
+                    "branch_width": event.get("branch_width"),
+                    "max_tool_steps": event.get("max_tool_steps"),
+                    "branch_count": event.get("branch_count"),
+                    "evidence_rounds": event.get("evidence_rounds"),
+                    "total_tool_steps": event.get("total_tool_steps"),
+                    "branches": event.get("branches") or [],
+                }
+            )
         elif event_type in {"error", "provider_error"}:
             error_class = str(event.get("error_class") or event_type)
             error_classes[error_class] += 1
@@ -222,6 +271,11 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "status": event.get("status"),
                     "content": event.get("content", ""),
                     "mode": event.get("mode", ""),
+                    "action": event.get("action", ""),
+                    "termination_reason": event.get("termination_reason", ""),
+                    "model_output_available": event.get("model_output_available"),
+                    "round_count": event.get("round_count"),
+                    "citation_refs": event.get("citation_refs") or [],
                 }
             )
 
@@ -237,6 +291,9 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
         "event_count": len(events),
         "plans": plans,
         "decisions": decisions,
+        "tool_calls": tool_calls,
+        "tool_results": tool_results,
+        "retrieval_forks": forks,
         "page_evidence": evidence,
         "completion_judgements": judgements,
         "contexts": contexts,
