@@ -586,13 +586,6 @@ class ExperimentPipelineTests(unittest.TestCase):
                 orchestrator.planner.begin_task = lambda *_args: None
                 orchestrator.planner.plan_next_action = lambda *_args: next(decisions)
                 orchestrator.planner.observe_tool_result = lambda *_args: None
-                orchestrator.planner.judge_completion = lambda *_args: {
-                    "schema_version": "completion_judgement.v1",
-                    "status": "incomplete",
-                    "missing_point_ids": ["P1"],
-                    "missing_criteria": ["list is directly supported"],
-                    "next_focus": [],
-                }
                 result = orchestrator._run_model_tool_loop("find stations", {})
 
             self.assertIn("bounded summary", result)

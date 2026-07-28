@@ -45,8 +45,6 @@ class Orchestrator:
         self.analyzer = Analyzer()
         self.planner = Planner()
         self._task_plan: dict = {}
-        self._last_completion_judgement: dict = {}
-        self._last_completion_context = ""
 
     def _retrieval_context(self) -> dict:
         return {
@@ -283,17 +281,16 @@ class Orchestrator:
         """
         if not self._task_plan:
             return False
-        judgement = {
-            "schema_version": "completion_judgement.v1",
-            "status": "incomplete",
-            "reason": "The selected retrieval observation did not yield usable evidence.",
-            "missing_point_ids": [],
-            "next_focus": [],
+        retrieval_observation = {
+            "schema_version": "retrieval.v1",
+            "status": "error",
+            "error_class": str(observation.get("error_class") or "no_usable_evidence"),
+            "message": "The selected retrieval observation did not yield usable evidence.",
         }
         followup_plan = self.planner.replan_task(
             user_query,
             self._task_plan,
-            judgement,
+            retrieval_observation,
             json.dumps(observation, ensure_ascii=False)[:6000],
         )
         append_task_event(
@@ -342,33 +339,6 @@ class Orchestrator:
         # receive only the original question so it reads the selected page.
         return fallback
 
-    def _replan_after_incomplete_judgement(self, user_query: str, step: int) -> bool:
-        """Turn an incomplete model judgment into the next model plan."""
-        judgement = self._last_completion_judgement
-        if judgement.get("status") != "incomplete" or self.state.is_finished:
-            return False
-        followup_plan = self.planner.replan_task(
-            user_query,
-            self._task_plan,
-            judgement,
-            self._last_completion_context,
-        )
-        append_task_event(
-            self.state.task_id,
-            "task_replan",
-            step=step,
-            phase="RECOVERY",
-            data=followup_plan,
-            previous_judgement=judgement,
-        )
-        if followup_plan.get("status") == "error":
-            self.planner.observe_tool_result(followup_plan)
-            return False
-        self._task_plan = followup_plan
-        self.state.run_metadata["task_plan"] = followup_plan
-        self.planner.update_task_plan(followup_plan)
-        return True
-
     def _complete_without_evidence(
         self,
         user_query: str,
@@ -395,15 +365,6 @@ class Orchestrator:
             termination_reason=termination_reason,
         )
         answer = str(synthesis.get("content") or "RWKV did not return a final summary.")
-        task_plan = self._task_plan or self.state.run_metadata.get("task_plan") or {}
-        judgement = self.planner.judge_completion(
-            user_query,
-            task_plan,
-            answer,
-            synthesis.get("context_text", ""),
-        )
-        self._last_completion_judgement = judgement
-        self._last_completion_context = synthesis.get("context_text", "")
         append_task_event(
             self.state.task_id,
             "context_build",
@@ -433,30 +394,29 @@ class Orchestrator:
             context_stats=synthesis.get("context_stats") or {},
             termination_reason=termination_reason,
         )
-        append_task_event(
-            self.state.task_id,
-            "completion_judgement",
-            step=step,
-            phase="VALIDATION",
-            data=judgement,
-        )
         self.state.final_result = answer
         self.state.is_finished = True
+        model_output_available = bool(str(synthesis.get("model_output") or "").strip())
+        final_status = (
+            "failed"
+            if termination_reason == "max_steps_reached" or not model_output_available
+            else "completed"
+        )
         append_task_event(
             self.state.task_id,
             "final",
-            status=("completed" if judgement.get("status") == "complete" else "failed"),
+            status=final_status,
             content=answer,
             action=action,
             mode=synthesis.get("mode") or "local_rwkv_final",
             termination_reason=termination_reason,
-            completion_judgement=judgement,
+            model_output_available=model_output_available,
         )
         self._write_agentic_report(
             user_query,
             action,
             answer,
-            data={**data, "task_plan": task_plan, "completion_judgement": judgement},
+            data=data,
             mode=synthesis.get("mode") or "local_rwkv_final",
         )
         return answer
@@ -559,85 +519,19 @@ class Orchestrator:
                 selected_evidence=synthesis.get("selected_evidence") or [],
                 context_stats=synthesis.get("context_stats") or {},
             )
-            task_plan = self._task_plan or self.state.run_metadata.get("task_plan") or {}
-            judgement = self.planner.judge_completion(
-                user_query,
-                task_plan,
-                answer,
-                synthesis.get("context_text", ""),
-            )
-            self._last_completion_judgement = judgement
-            self._last_completion_context = synthesis.get("context_text", "")
-            append_task_event(
-                self.state.task_id,
-                "completion_judgement",
-                step=step,
-                phase="VALIDATION",
-                data=judgement,
-            )
-            max_steps = max(1, min(int(self.state.run_metadata.get("max_tool_steps", 8) or 8), 16))
-            if judgement.get("status") == "incomplete" and step < max_steps:
-                # Put the independent judge's result back into the planner
-                # transcript before asking it to split the remaining work.
-                # Without this observation the next model turn only sees the
-                # draft answer and can repeatedly choose answer_user.
-                self.planner.observe_tool_result(
-                    {
-                        "schema_version": "retrieval.v1",
-                        "status": "incomplete",
-                        "error_class": "completion_incomplete",
-                        "message": "completion judge found unsupported or missing atomic points; continue retrieval",
-                        "completion_judgement": judgement,
-                        "missing_point_ids": judgement.get("missing_point_ids") or [],
-                        "next_focus": judgement.get("next_focus") or [],
-                        "results": [],
-                    }
-                )
-                self.state.final_result = answer
-                self.state.is_finished = False
-                append_task_event(
-                    self.state.task_id,
-                    "completion_pending",
-                    step=step,
-                    phase="RECOVERY",
-                    data=judgement,
-                )
-                return answer
-            force_output = termination_reason == "max_steps_reached"
-            if judgement.get("status") == "error" and not force_output:
-                # The synthesis model has already produced a user-facing
-                # answer. A judge failure must not erase it; the final status
-                # remains failed because completion was not verified.
-                answer = answer or "当前无法完成可靠的完成性判断，因此不能确认检索结果已经完成。"
-                synthesis["mode"] = "model_completion_judgement_failed"
-                risk_validation = validate_risk_answer(answer, self.state.run_metadata)
-            elif judgement.get("status") == "incomplete" and not force_output:
-                missing = "、".join(judgement.get("missing_point_ids") or []) or "未说明的任务点"
-                answer = f"检索未完成，完成性判断仍缺少任务点：{missing}。"
-                synthesis["mode"] = "model_completion_incomplete"
-            elif force_output:
-                # The step budget controls termination, not answer visibility.
-                # Keep the final RWKV summary even when the judge says the
-                # retrieval is incomplete; the final event remains failed.
-                answer = answer or "RWKV did not return a final summary."
-                synthesis["mode"] = f"{synthesis.get('mode') or 'local_rwkv_final'}_step_limit"
             self.state.final_result = answer
             self.state.is_finished = True
-            merged["task_plan"] = task_plan
-            merged["completion_judgement"] = judgement
-            final_is_complete = judgement.get("status") == "complete"
+            model_output_available = bool(str(synthesis.get("model_output") or "").strip())
+            force_output = termination_reason == "max_steps_reached"
+            final_status = (
+                "failed"
+                if force_output or not model_output_available
+                else "completed"
+            )
             append_task_event(
                 self.state.task_id,
                 "final",
-                status=(
-                    "failed"
-                    if not final_is_complete
-                    else (
-                        "completed"
-                        if risk_validation.get("valid", True)
-                        else "completed_with_warnings"
-                    )
-                ),
+                status=final_status,
                 content=answer,
                 action=action,
                 mode=synthesis.get("mode"),
@@ -645,24 +539,11 @@ class Orchestrator:
                 citation_refs=synthesis.get("citation_refs") or [],
                 citation_validation=citation_validation,
                 risk_validation=risk_validation,
-                completion_judgement=judgement,
+                termination_reason=termination_reason,
+                model_output_available=model_output_available,
             )
             self._write_agentic_report(user_query, action, answer, data=merged, mode=synthesis.get("mode", "model_tool_loop"))
             return answer
-
-        answer = "未完成检索，无法生成有来源支持的答案。"
-        self.state.final_result = answer
-        self.state.is_finished = True
-        append_task_event(
-            self.state.task_id,
-            "final",
-            status="failed",
-            content=answer,
-            action=action,
-            mode="model_tool_loop_no_evidence",
-        )
-        self._write_agentic_report(user_query, action, answer, mode="model_tool_loop_no_evidence")
-        return answer
 
     def _run_model_tool_loop(self, user_query: str, model_profile: dict) -> str:
         """Let RWKV choose tools, URLs and arguments until it chooses to answer."""
@@ -674,8 +555,6 @@ class Orchestrator:
         last_discovery_results: list[dict] = []
         empty_evidence_attempts = 0
         self.planner.reset()
-        self._last_completion_judgement = {}
-        self._last_completion_context = ""
         # Planning starts from the user goal only.  Workspace contents remain
         # available to the later tool-decision turn, but cannot bias the
         # semantic decomposition into a local-file plan.
@@ -803,9 +682,6 @@ class Orchestrator:
                         step,
                         termination_reason=("max_steps_reached" if step >= max_steps else "model_requested_finish"),
                     )
-                    if self._replan_after_incomplete_judgement(user_query, step):
-                        phase = "DISCOVERY"
-                        continue
                     return answer
                 if retrieval_attempted:
                     # Once the model has entered a web-retrieval episode, do
@@ -1011,9 +887,8 @@ class Orchestrator:
                     empty_evidence_attempts = 0
                     rounds.append((str(args.get("url") or user_query), observed_result))
                     # One usable page is enough to trigger the model-owned
-                    # synthesis and independent completion judgment.  If the
-                    # judgment is incomplete, the model receives a follow-up
-                    # atomic plan before another discovery turn.
+                    # final synthesis. The controller does not judge or
+                    # rewrite the model's answer afterward.
                     answer = self._complete_model_tool_loop(
                         user_query,
                         action,
@@ -1021,9 +896,6 @@ class Orchestrator:
                         step,
                         termination_reason=("max_steps_reached" if step >= max_steps else "model_requested_finish"),
                     )
-                    if self._replan_after_incomplete_judgement(user_query, step):
-                        phase = "DISCOVERY"
-                        continue
                     return answer
                 else:
                     empty_evidence_attempts += 1

@@ -31,11 +31,10 @@ class RetrievalRuntimeTests(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["sources"], ["https://example.com"])
 
-    def test_model_plan_judge_and_replan_keep_fixed_generic_schemas(self):
+    def test_model_plan_and_replan_keep_fixed_generic_schemas(self):
         responses = iter(
             [
                 '{"schema_version":"task_plan.v1","goal":"goal","atomic_points":[{"id":"P1","task":"check the fact","objective":"check fact","evidence_needed":["source"],"acceptance_criteria":["the fact is directly supported"],"output_format":"prose","status":"pending"}],"completion_rule":"supported"}',
-                '{"schema_version":"completion_judgement.v1","status":"incomplete","reason":"missing evidence","missing_point_ids":["P1"],"missing_criteria":["the fact is directly supported"],"next_focus":["check fact"]}',
                 '{"schema_version":"task_plan.v1","goal":"goal","atomic_points":[{"id":"P1a","task":"check the fact from a new source","objective":"check fact from a new source","evidence_needed":["source"],"acceptance_criteria":["the new source directly supports the fact"],"output_format":"prose","status":"pending"}],"completion_rule":"supported"}',
             ]
         )
@@ -47,12 +46,16 @@ class RetrievalRuntimeTests(unittest.TestCase):
         planner = Planner()
         planner.llm = FakeLLM()
         plan = planner.create_task_plan("goal")
-        judgement = planner.judge_completion("goal", plan, "draft", "evidence")
-        followup = planner.replan_task("goal", plan, judgement, "evidence")
+        retrieval_observation = {
+            "schema_version": "retrieval.v1",
+            "status": "error",
+            "error_class": "page_fetch_failed",
+            "message": "the selected page could not be fetched",
+        }
+        followup = planner.replan_task("goal", plan, retrieval_observation, "evidence")
         self.assertEqual(plan["schema_version"], "task_plan.v1")
         self.assertEqual(plan["atomic_points"][0]["task"], "check the fact")
         self.assertEqual(plan["atomic_points"][0]["acceptance_criteria"], ["the fact is directly supported"])
-        self.assertEqual(judgement["status"], "incomplete")
         self.assertEqual(followup["atomic_points"][0]["id"], "P1a")
 
     def test_legacy_provider_is_not_executable_in_agent_phase(self):

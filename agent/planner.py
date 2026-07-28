@@ -199,12 +199,12 @@ class Planner:
         self,
         user_query: str,
         task_plan: dict[str, Any],
-        judgement: dict[str, Any],
+        retrieval_observation: dict[str, Any],
         evidence_context: str,
     ) -> dict[str, Any]:
-        """Let RWKV split only the unfinished part into a new atomic plan."""
+        """Let RWKV split the remaining work after a retrieval failure."""
         prompt = (
-            "System:\nYou are the follow-up task-planning RWKV. The previous plan was judged incomplete. "
+            "System:\nYou are the follow-up task-planning RWKV. The previous retrieval attempt did not yield usable evidence. "
             "Create a new fixed-schema plan containing only the remaining independently verifiable "
             "points. Do not choose a provider, tool, query, or URL and do not invent facts. Re-state the "
             "remaining task and concrete acceptance_criteria for each P point. Preserve list/table row and "
@@ -217,7 +217,7 @@ class Planner:
             '"completion_rule":"..."}.\n\n'
             f"\n\nUser:\nUser goal: {user_query}\n"
             f"Previous plan: {json.dumps(task_plan, ensure_ascii=False, separators=(',', ':'))[:5000]}\n"
-            f"Completion judgement: {json.dumps(judgement, ensure_ascii=False, separators=(',', ':'))[:3000]}\n"
+            f"Retrieval observation: {json.dumps(retrieval_observation, ensure_ascii=False, separators=(',', ':'))[:3000]}\n"
             f"Evidence already retrieved: {evidence_context[:5000]}\n"
             "\nAssistant: ```json\n"
         )
@@ -242,73 +242,6 @@ class Planner:
             "status": "error",
             "error_class": "task_replan_invalid",
             "message": last_error or "follow-up task plan generation failed",
-            "raw_model_output": visible_model_text(raw),
-        }
-
-    def judge_completion(
-        self,
-        user_query: str,
-        task_plan: dict[str, Any],
-        answer: str,
-        evidence_context: str,
-    ) -> dict[str, Any]:
-        """Use a separate model turn to decide whether the plan is complete."""
-        prompt = (
-            "System:\nYou are the completion-judge RWKV. Compare the user's goal, the fixed task plan, "
-            "the retrieved evidence, and the draft answer. Do not retrieve, repair, or invent facts. "
-            "Return exactly one JSON object and no explanation. Use this format: "
-            '{"schema_version":"completion_judgement.v1","status":"complete|incomplete",'
-            '"reason":"...","missing_point_ids":[],"missing_criteria":[],"next_focus":[]}. '
-            "Use incomplete when any atomic point is not answered by supported evidence. "
-            "Use complete only when the draft is adequately supported for the stated plan. "
-            "The status field inside atomic_points is only a planning annotation and may remain pending because the controller does not mutate model plans; ignore those status values. Judge each point from the draft answer and the retrieved evidence text itself. If the draft directly answers a point and the evidence contains the requested artifact or fact, mark the judgement complete even when that point's status is pending. "
-            "Check each point against its evidence_needed and acceptance_criteria literally. A page's citation URL is not automatically the requested resource URL; when a point asks for a link, repository, identifier, or other exact artifact, the evidence must contain that artifact or the point remains incomplete. For list/table output, verify every required row and column relationship and reject ellipses or partial lists. Do not infer completion from a general article mention.\n\n"
-            f"\n\nUser:\nUser goal: {user_query}\n"
-            f"Task plan: {json.dumps(task_plan, ensure_ascii=False, separators=(',', ':'))[:5000]}\n"
-            f"Draft answer: {str(answer or '')[:4000]}\n"
-            f"Retrieved evidence: {evidence_context[:7000]}\n"
-            "\nAssistant: ```json\n"
-        )
-        raw = ""
-        last_error = ""
-        for attempt in range(2):
-            request_prompt = prompt
-            if attempt:
-                request_prompt += (
-                    "\nCorrection: return only a complete JSON object with status exactly complete or incomplete."
-                )
-            try:
-                response = self.llm.text_completion(
-                    request_prompt,
-                    max_tokens=min(1024, self._completion_budget(request_prompt)),
-                    stop=("\n```", "```", "\nUser:", "\nSystem:", "\nAssistant:"),
-                )
-                raw = str(response.content or "")
-                payload = _extract_json_object(raw)
-                status = str(payload.get("status") or "").strip().casefold()
-                if status not in {"complete", "incomplete"}:
-                    raise ValueError("completion status must be complete or incomplete")
-                missing = payload.get("missing_point_ids") or []
-                next_focus = payload.get("next_focus") or []
-                if not isinstance(missing, list) or not isinstance(next_focus, list):
-                    raise ValueError("completion judgement lists are invalid")
-                return {
-                    "schema_version": "completion_judgement.v1",
-                    "status": status,
-                    "reason": str(payload.get("reason") or ""),
-                    "missing_point_ids": [str(item) for item in missing],
-                    "missing_criteria": [
-                        str(item) for item in (payload.get("missing_criteria") or []) if str(item).strip()
-                    ],
-                    "next_focus": [str(item) for item in next_focus],
-                }
-            except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-        return {
-            "schema_version": "completion_judgement.v1",
-            "status": "error",
-            "error_class": "completion_judgement_invalid",
-            "message": last_error or "completion judgement failed",
             "raw_model_output": visible_model_text(raw),
         }
 
@@ -410,7 +343,6 @@ class Planner:
                 "repeat_count",
                 "alternative_urls",
                 "recovery_instruction",
-                "completion_judgement",
                 "missing_point_ids",
                 "next_focus",
                 "page_evidence",
