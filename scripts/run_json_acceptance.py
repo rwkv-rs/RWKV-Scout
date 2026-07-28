@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent.orchestrator import Orchestrator
+from utils.token_tracker import current_task_id
 from utils.task_events import get_task_events
 
 
@@ -79,6 +80,8 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
     judgements = []
     contexts = []
     finals = []
+    model_calls = []
+    step_limits = []
     chunk_tokens = []
     chunk_chars = []
     chunk_windows = []
@@ -94,7 +97,39 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
     unsupported_candidates = 0
     for event in events:
         event_type = event.get("type")
-        if event_type == "task_plan":
+        if event_type == "model_call":
+            model_calls.append(
+                {
+                    key: event.get(key)
+                    for key in (
+                        "seq",
+                        "timestamp",
+                        "phase",
+                        "status",
+                        "operation",
+                        "provider",
+                        "backend",
+                        "model",
+                        "duration_ms",
+                        "prompt_tokens",
+                        "completion_tokens",
+                        "input_messages",
+                        "prompt",
+                        "output",
+                        "error",
+                    )
+                    if key in event
+                }
+            )
+        elif event_type == "step_limit_reached":
+            step_limits.append(
+                {
+                    key: event.get(key)
+                    for key in ("seq", "timestamp", "step", "phase", "action", "max_steps", "evidence_rounds", "message")
+                    if key in event
+                }
+            )
+        elif event_type == "task_plan":
             plan = event.get("data") or {}
             plans.append(
                 {
@@ -206,6 +241,8 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
         "completion_judgements": judgements,
         "contexts": contexts,
         "finals": finals,
+        "model_calls": model_calls,
+        "step_limits": step_limits,
         "final": finals[-1] if finals else None,
         "stats": {
             "action_counts": dict(action_counts),
@@ -217,6 +254,8 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                 "with_task_point_id": sum(bool(item.get("task_point_id")) for item in decisions),
             },
             "page_fetches": len(evidence),
+            "model_call_count": len(model_calls),
+            "step_limit_count": len(step_limits),
             "page_evidence_statuses": dict(evidence_statuses),
             "page_chars": _numeric_summary(
                 [(row.get("data") or {}).get("page_chars") for row in evidence]
@@ -276,12 +315,15 @@ def run(input_path: Path, output_path: Path) -> dict[str, Any]:
         if case.get("max_tool_steps") is not None:
             metadata["max_tool_steps"] = int(case["max_tool_steps"])
         query = str(case["query"])
+        task_token = current_task_id.set(task_id)
         try:
             answer = Orchestrator().run(query, task_id=task_id, run_metadata=metadata)
             error = ""
         except Exception as exc:
             answer = ""
             error = f"{type(exc).__name__}: {exc}"
+        finally:
+            current_task_id.reset(task_token)
         trace = _trace_summary(task_id)
         final_status = str((trace.get("final") or {}).get("status") or "")
         status = "completed" if final_status.startswith("completed") else "failed"

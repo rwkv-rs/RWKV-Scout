@@ -344,12 +344,30 @@ def synthesize_retrieval_answer(
     data: dict[str, Any],
     llm=None,
     constraints: dict[str, Any] | None = None,
+    execution_context: str = "",
+    termination_reason: str = "model_requested_finish",
 ) -> dict[str, Any]:
     """Ask local RWKV for the final answer and expose the exact prompt context."""
     strategy = normalize_strategy((constraints or {}).get("strategy_config") or data.get("strategy_config"))
     context = build_evidence_context(data, constraints=constraints)
     context_fields = _context_fields(context)
     context_text = context["text"]
+    execution_context = str(execution_context or "").strip()
+    if execution_context:
+        # Evidence remains first, while the visible routing transcript lets a
+        # forced final call explain what was attempted and what is missing.
+        combined_context = (
+            f"{context_text}\n\n"
+            "Execution context (visible planner/tool transcript):\n"
+            f"{execution_context}"
+        )
+        context_text = _truncate_markdown_by_tokens(
+            combined_context,
+            max(2048, min(7500, int(get_llm_context_length()) - 3500)),
+        )
+        context_fields["context_text"] = context_text
+        context_fields["context_stats"]["execution_context_chars"] = len(execution_context)
+        context_fields["context_stats"]["termination_reason"] = termination_reason
     context_citation_refs = _citation_refs_for_context(data, context)
     acceptance_context = _plan_acceptance_context(constraints)
     policy = risk_context(constraints)
@@ -400,6 +418,7 @@ def synthesize_retrieval_answer(
         "Do not copy an evidence record as the answer. If a requested fact is not supported, say what is missing. A citation to a general source page is not a substitute for an exact resource link requested by the user.\n\n"
         f"{risk_instructions}{criteria_instructions}{acceptance_instruction}"
         f"Question: {query}\n"
+        f"Retrieval termination: {termination_reason}. Always return a user-facing answer, even when evidence is incomplete; clearly separate supported facts from missing or failed retrieval.\n"
         "Evidence:\n"
         f"{context_text}\n"
         "Assistant: <think>\n</think>\n"

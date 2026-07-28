@@ -506,6 +506,100 @@ class ExperimentPipelineTests(unittest.TestCase):
             self.assertEqual(trace["context_trace"][0]["data"]["context_stats"]["chunk_count"], 1)
             self.assertEqual(trace["ranking_trace"][0]["data"]["method"], "candidate_support_then_rank.v1")
 
+    def test_agentic_loop_allows_repeat_and_forces_summary_at_step_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task_dir = Path(directory) / "task"
+            task_dir.mkdir()
+            orchestrator = Orchestrator()
+            orchestrator.state.task_id = "REPEAT_STEP_TRACE"
+            orchestrator.state.task_output_dir = str(task_dir)
+            orchestrator.state.user_query = "find stations"
+            orchestrator.state.run_metadata = {"max_tool_steps": 3}
+            plan = {
+                "schema_version": "task_plan.v1",
+                "goal": "find stations",
+                "atomic_points": [
+                    {
+                        "id": "P1",
+                        "task": "find stations",
+                        "objective": "find station list",
+                        "evidence_needed": ["station list"],
+                        "acceptance_criteria": ["list is directly supported"],
+                        "output_format": "list",
+                        "status": "pending",
+                    }
+                ],
+                "completion_rule": "supported",
+            }
+            decisions = iter(
+                [
+                    {"action": "search_mediawiki", "args": {"query": "stations", "max_results": 2}},
+                    {"action": "fetch_mediawiki_page", "args": {"url": "https://example.com/one"}},
+                    {"action": "fetch_mediawiki_page", "args": {"url": "https://example.com/one"}},
+                ]
+            )
+            executed = []
+            synthesis_calls = []
+
+            def fake_execute(action, args, context, phase=None):
+                executed.append((action, args, phase))
+                if action == "search_mediawiki":
+                    return json.dumps(
+                        {
+                            "status": "ok",
+                            "retrieval_role": "discovery",
+                            "results": [
+                                {"title": "one", "url": "https://example.com/one"},
+                                {"title": "two", "url": "https://example.com/two"},
+                            ],
+                        }
+                    )
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "retrieval_role": "evidence",
+                        "message": "temporary page failure",
+                        "results": [],
+                    }
+                )
+
+            def fake_synthesis(*args, **kwargs):
+                synthesis_calls.append(kwargs)
+                return {
+                    "content": "A bounded summary of the attempted retrieval.",
+                    "mode": "test_final",
+                    "evidence_count": 0,
+                    "citation_refs": [],
+                    "prompt": "final prompt",
+                    "model_output": "A bounded summary of the attempted retrieval.",
+                    "context_text": kwargs.get("execution_context", ""),
+                    "selected_evidence": [],
+                    "context_stats": {},
+                }
+
+            with (
+                patch("agent.orchestrator.append_task_event"),
+                patch("agent.orchestrator.ToolRegistry.execute", side_effect=fake_execute),
+                patch("agent.orchestrator.synthesize_retrieval_answer", side_effect=fake_synthesis),
+            ):
+                orchestrator.planner.create_task_plan = lambda *_args: plan
+                orchestrator.planner.begin_task = lambda *_args: None
+                orchestrator.planner.plan_next_action = lambda *_args: next(decisions)
+                orchestrator.planner.observe_tool_result = lambda *_args: None
+                orchestrator.planner.judge_completion = lambda *_args: {
+                    "schema_version": "completion_judgement.v1",
+                    "status": "incomplete",
+                    "missing_point_ids": ["P1"],
+                    "missing_criteria": ["list is directly supported"],
+                    "next_focus": [],
+                }
+                result = orchestrator._run_model_tool_loop("find stations", {})
+
+            self.assertIn("bounded summary", result)
+            self.assertEqual([item[0] for item in executed], ["search_mediawiki", "fetch_mediawiki_page", "fetch_mediawiki_page"])
+            self.assertEqual(len(synthesis_calls), 1)
+            self.assertEqual(synthesis_calls[0]["termination_reason"], "max_steps_reached")
+
     def test_invalid_citation_triggers_one_bounded_recovery_round(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -66,6 +66,15 @@ class Orchestrator:
         context["agentic_tool_loop"] = True
         return context
 
+    def _model_execution_context(self) -> str:
+        """Project visible routing state into the forced final prompt."""
+        return (
+            "Agent state:\n"
+            f"{self.state.to_markdown_context()}\n\n"
+            "RWKV planner transcript:\n"
+            f"{self.planner.execution_transcript()}"
+        )
+
     def _process_single_page_result(
         self,
         evidence_query: str,
@@ -360,14 +369,127 @@ class Orchestrator:
         self.planner.update_task_plan(followup_plan)
         return True
 
+    def _complete_without_evidence(
+        self,
+        user_query: str,
+        action: str,
+        step: int,
+        *,
+        termination_reason: str,
+    ) -> str:
+        """Force a visible final model answer even when no page was usable."""
+        execution_context = self._model_execution_context()
+        data = {
+            "query": user_query,
+            "status": "no_evidence",
+            "results": [],
+            "citation_refs": [],
+            "sources": [],
+        }
+        synthesis = synthesize_retrieval_answer(
+            user_query,
+            data,
+            llm=self.analyzer.llm,
+            constraints=self.state.run_metadata,
+            execution_context=execution_context,
+            termination_reason=termination_reason,
+        )
+        answer = str(synthesis.get("content") or "RWKV did not return a final summary.")
+        task_plan = self._task_plan or self.state.run_metadata.get("task_plan") or {}
+        judgement = self.planner.judge_completion(
+            user_query,
+            task_plan,
+            answer,
+            synthesis.get("context_text", ""),
+        )
+        self._last_completion_judgement = judgement
+        self._last_completion_context = synthesis.get("context_text", "")
+        append_task_event(
+            self.state.task_id,
+            "context_build",
+            step=step,
+            phase="CONTEXT",
+            data={
+                "context_text": synthesis.get("context_text", ""),
+                "selected_evidence": synthesis.get("selected_evidence") or [],
+                "context_stats": synthesis.get("context_stats") or {},
+                "execution_context": execution_context,
+            },
+        )
+        append_task_event(
+            self.state.task_id,
+            "synthesis",
+            step=step,
+            phase="SYNTHESIS",
+            action=action,
+            content=answer,
+            mode=synthesis.get("mode") or "local_rwkv_final",
+            evidence_count=0,
+            citation_refs=synthesis.get("citation_refs") or [],
+            prompt=synthesis.get("prompt", ""),
+            model_output=synthesis.get("model_output", ""),
+            context_text=synthesis.get("context_text", ""),
+            selected_evidence=synthesis.get("selected_evidence") or [],
+            context_stats=synthesis.get("context_stats") or {},
+            termination_reason=termination_reason,
+        )
+        append_task_event(
+            self.state.task_id,
+            "completion_judgement",
+            step=step,
+            phase="VALIDATION",
+            data=judgement,
+        )
+        self.state.final_result = answer
+        self.state.is_finished = True
+        append_task_event(
+            self.state.task_id,
+            "final",
+            status=("completed" if judgement.get("status") == "complete" else "failed"),
+            content=answer,
+            action=action,
+            mode=synthesis.get("mode") or "local_rwkv_final",
+            termination_reason=termination_reason,
+            completion_judgement=judgement,
+        )
+        self._write_agentic_report(
+            user_query,
+            action,
+            answer,
+            data={**data, "task_plan": task_plan, "completion_judgement": judgement},
+            mode=synthesis.get("mode") or "local_rwkv_final",
+        )
+        return answer
+
     def _complete_model_tool_loop(
         self,
         user_query: str,
         action: str,
         rounds: list[tuple[str, dict]],
         step: int,
+        *,
+        termination_reason: str = "model_requested_finish",
     ) -> str:
-        """Generate the final answer only after the model chose to finish."""
+        """Generate the final answer for a finish decision or step limit."""
+        if termination_reason == "max_steps_reached":
+            append_task_event(
+                self.state.task_id,
+                "step_limit_reached",
+                step=step,
+                phase="SYNTHESIS",
+                action=action,
+                max_steps=step,
+                evidence_rounds=len(rounds),
+                message="The retrieval loop reached max_tool_steps; force a final RWKV summary.",
+            )
+        if not rounds:
+            return self._complete_without_evidence(
+                user_query,
+                action,
+                step,
+                termination_reason=termination_reason,
+            )
+        execution_context = self._model_execution_context()
         if rounds:
             merged = merge_retrieval_results(
                 user_query,
@@ -381,6 +503,8 @@ class Orchestrator:
                 merged,
                 llm=self.analyzer.llm,
                 constraints=self.state.run_metadata,
+                execution_context=execution_context,
+                termination_reason=termination_reason,
             )
             answer = synthesis.get("content") or ""
             citation_validation = validate_citations(
@@ -479,14 +603,24 @@ class Orchestrator:
                     data=judgement,
                 )
                 return answer
-            if judgement.get("status") == "error":
-                answer = "当前无法完成可靠的完成性判断，因此不能确认检索结果已经完成。"
+            force_output = termination_reason == "max_steps_reached"
+            if judgement.get("status") == "error" and not force_output:
+                # The synthesis model has already produced a user-facing
+                # answer. A judge failure must not erase it; the final status
+                # remains failed because completion was not verified.
+                answer = answer or "当前无法完成可靠的完成性判断，因此不能确认检索结果已经完成。"
                 synthesis["mode"] = "model_completion_judgement_failed"
                 risk_validation = validate_risk_answer(answer, self.state.run_metadata)
-            elif judgement.get("status") == "incomplete":
+            elif judgement.get("status") == "incomplete" and not force_output:
                 missing = "、".join(judgement.get("missing_point_ids") or []) or "未说明的任务点"
                 answer = f"检索未完成，完成性判断仍缺少任务点：{missing}。"
                 synthesis["mode"] = "model_completion_incomplete"
+            elif force_output:
+                # The step budget controls termination, not answer visibility.
+                # Keep the final RWKV summary even when the judge says the
+                # retrieval is incomplete; the final event remains failed.
+                answer = answer or "RWKV did not return a final summary."
+                synthesis["mode"] = f"{synthesis.get('mode') or 'local_rwkv_final'}_step_limit"
             self.state.final_result = answer
             self.state.is_finished = True
             merged["task_plan"] = task_plan
@@ -534,13 +668,11 @@ class Orchestrator:
         """Let RWKV choose tools, URLs and arguments until it chooses to answer."""
         max_steps = max(1, min(int(self.state.run_metadata.get("max_tool_steps", 8) or 8), 16))
         rounds: list[tuple[str, dict]] = []
-        seen_tool_calls: dict[str, int] = {}
         phase = "DISCOVERY"
         last_action = "model_tool_loop"
         retrieval_attempted = False
         last_discovery_results: list[dict] = []
         empty_evidence_attempts = 0
-        repeat_recovery_attempts = 0
         self.planner.reset()
         self._last_completion_judgement = {}
         self._last_completion_context = ""
@@ -664,7 +796,13 @@ class Orchestrator:
                     phase = "DISCOVERY"
                     continue
                 if rounds:
-                    answer = self._complete_model_tool_loop(user_query, last_action, rounds, step)
+                    answer = self._complete_model_tool_loop(
+                        user_query,
+                        last_action,
+                        rounds,
+                        step,
+                        termination_reason=("max_steps_reached" if step >= max_steps else "model_requested_finish"),
+                    )
                     if self._replan_after_incomplete_judgement(user_query, step):
                         phase = "DISCOVERY"
                         continue
@@ -675,7 +813,13 @@ class Orchestrator:
                     # launching a second free-form answer call.  This is a
                     # fail-closed boundary, not a routing or repetition
                     # penalty: the model still owns every tool and URL choice.
-                    return self._complete_model_tool_loop(user_query, last_action, [], step)
+                    return self._complete_model_tool_loop(
+                        user_query,
+                        last_action,
+                        [],
+                        step,
+                        termination_reason=("max_steps_reached" if step >= max_steps else "model_requested_finish"),
+                    )
                 result = ToolRegistry.execute(
                     "answer_user",
                     {"original_goal": user_query},
@@ -703,65 +847,6 @@ class Orchestrator:
                 )
                 self._write_agentic_report(user_query, "answer_user", answer)
                 return answer
-
-            call_key = f"{action}:{json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
-            repeat_count = seen_tool_calls.get(call_key, 0)
-            seen_tool_calls[call_key] = repeat_count + 1
-            if repeat_count:
-                repeated_result = {
-                    "schema_version": "retrieval.v1",
-                    "status": "error",
-                    "error_class": "repeated_tool_call",
-                    "message": (
-                        "the exact tool and arguments were already executed in this retrieval episode; "
-                        "do not repeat them. Choose another listed tool or make a materially different query."
-                    ),
-                    "action": action,
-                    "args": args,
-                    "repeat_count": repeat_count,
-                    "allowed_tools": ToolRegistry.names(phase),
-                    "results": [],
-                }
-                self.state.last_feedback = json.dumps(repeated_result, ensure_ascii=False)
-                self.planner.observe_tool_result(repeated_result)
-                append_task_event(
-                    self.state.task_id,
-                    "error",
-                    step=step,
-                    phase="ROUTING",
-                    action=action,
-                    args=args,
-                    error=repeated_result["message"],
-                    error_class="repeated_tool_call",
-                    repeat_count=repeat_count,
-                )
-                if repeat_count >= 2:
-                    if repeat_recovery_attempts < 1:
-                        repeat_recovery_attempts += 1
-                        if self._replan_after_retrieval_failure(user_query, repeated_result, step):
-                            phase = "DISCOVERY"
-                            continue
-                    answer = "模型在检索过程中重复执行相同工具调用，无法安全继续。"
-                    self.state.final_result = answer
-                    self.state.is_finished = True
-                    append_task_event(
-                        self.state.task_id,
-                        "final",
-                        status="failed",
-                        content=answer,
-                        action=action,
-                        mode="model_repeated_tool_call",
-                        repeat_count=repeat_count,
-                    )
-                    self._write_agentic_report(
-                        user_query,
-                        action,
-                        answer,
-                        mode="model_repeated_tool_call",
-                    )
-                    return answer
-                phase = "RECOVERY"
-                continue
 
             if not ToolRegistry.can_execute(action, phase):
                 allowed_tools = ToolRegistry.names(phase)
@@ -929,7 +1014,13 @@ class Orchestrator:
                     # synthesis and independent completion judgment.  If the
                     # judgment is incomplete, the model receives a follow-up
                     # atomic plan before another discovery turn.
-                    answer = self._complete_model_tool_loop(user_query, action, rounds, step)
+                    answer = self._complete_model_tool_loop(
+                        user_query,
+                        action,
+                        rounds,
+                        step,
+                        termination_reason=("max_steps_reached" if step >= max_steps else "model_requested_finish"),
+                    )
                     if self._replan_after_incomplete_judgement(user_query, step):
                         phase = "DISCOVERY"
                         continue
@@ -952,9 +1043,13 @@ class Orchestrator:
             else:
                 phase = "DISCOVERY"
 
-        if rounds:
-            return self._complete_model_tool_loop(user_query, last_action, rounds, max_steps)
-        return self._complete_model_tool_loop(user_query, last_action, [], max_steps)
+        return self._complete_model_tool_loop(
+            user_query,
+            last_action,
+            rounds,
+            max_steps,
+            termination_reason="max_steps_reached",
+        )
 
     def _strategy(self) -> dict:
         return normalize_strategy(self.state.run_metadata.get("strategy_config"))

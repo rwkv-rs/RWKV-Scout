@@ -53,6 +53,19 @@ class RetrievalSynthesisTests(unittest.TestCase):
         self.assertIn("row/column relationship", llm.calls[0][0])
         self.assertIn("https://example.com/stations", result["content"])
 
+    def test_final_summary_receives_visible_execution_context_at_step_limit(self):
+        llm = _FakeLLM()
+        result = synthesize_retrieval_answer(
+            "查找事实",
+            {"query": "查找事实", "results": [], "citation_refs": []},
+            llm=llm,
+            execution_context="RWKV planner transcript:\nAssistant: search_mediawiki\nFunction output: status=ok",
+            termination_reason="max_steps_reached",
+        )
+        self.assertIn("max_steps_reached", llm.calls[0][0])
+        self.assertIn("search_mediawiki", llm.calls[0][0])
+        self.assertIn("status=ok", result["context_text"])
+
 
 if __name__ == "__main__":
     unittest.main()
