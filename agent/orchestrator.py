@@ -586,6 +586,8 @@ class Orchestrator:
         those calls, records the branch transcript, enforces the global step
         budget, and sends all page evidence to the final RWKV synthesis.
         """
+        generic_web_mode = bool(self.state.run_metadata.get("generic_web_search_only"))
+        branch_phase = "GENERIC_WEB" if generic_web_mode else "ALL"
         points = [
             point for point in (task_plan.get("atomic_points") or [])
             if isinstance(point, dict)
@@ -612,6 +614,8 @@ class Orchestrator:
             "retrieval_fork_started",
             step=0,
             phase="FORK",
+            retrieval_phase=branch_phase,
+            generic_web_search_only=generic_web_mode,
             branch_width=len(points),
             max_tool_steps=max_steps,
             branches=[
@@ -629,11 +633,21 @@ class Orchestrator:
         total_steps = 0
         for index, point in enumerate(points, start=1):
             branch_id = f"B{index}"
+            if generic_web_mode:
+                branch_planner = self.planner.fork_for_point(
+                    branch_id,
+                    point,
+                    phase=branch_phase,
+                )
+            else:
+                # Preserve the legacy test-double call shape for the
+                # provider-specific Fork path.
+                branch_planner = self.planner.fork_for_point(branch_id, point)
             branch_states.append(
                 {
                     "branch_id": branch_id,
                     "point": point,
-                    "planner": self.planner.fork_for_point(branch_id, point),
+                    "planner": branch_planner,
                     "tools": [],
                     "evidence_count": 0,
                     "discovery_results": [],
@@ -659,7 +673,7 @@ class Orchestrator:
                 branch_planner = branch["planner"]
                 branch_step = branch["branch_step"]
                 check_time_budget(minimum_seconds=0.2)
-                plan = branch_planner.plan_next_action(user_query, {}, "", "ALL")
+                plan = branch_planner.plan_next_action(user_query, {}, "", branch_phase)
                 action = str(plan.get("action") or "").strip()
                 args = dict(plan.get("args") or {}) if isinstance(plan.get("args"), dict) else {}
                 branch["tools"].append(action or "(empty)")
@@ -695,13 +709,13 @@ class Orchestrator:
                     branch["stop_reason"] = "model_requested_finish"
                     branch["active"] = False
                     continue
-                if not ToolRegistry.can_execute(action, "ALL"):
+                if not ToolRegistry.can_execute(action, branch_phase):
                     observation = {
                         "schema_version": "retrieval.v1",
                         "status": "error",
                         "error_class": "tool_not_allowed",
                         "message": f"tool '{action or '(empty)'}' is not available in retrieval episode",
-                        "allowed_tools": ToolRegistry.names("ALL"),
+                        "allowed_tools": ToolRegistry.names(branch_phase),
                         "results": [],
                     }
                     branch_planner.observe_tool_result(observation)
@@ -710,6 +724,7 @@ class Orchestrator:
                         "tool_result",
                         step=total_steps,
                         phase="FORK",
+                        retrieval_phase=branch_phase,
                         branch_id=branch_id,
                         branch_step=branch_step,
                         action=action,
@@ -735,7 +750,7 @@ class Orchestrator:
                         action,
                         args,
                         self._agentic_tool_context(),
-                        phase="ALL",
+                        phase=branch_phase,
                     )
                     structured_result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
                 except (TypeError, json.JSONDecodeError):
@@ -754,7 +769,15 @@ class Orchestrator:
                 tool_meta = ToolRegistry.metadata(action)
                 retrieval_role = str(tool_meta.get("retrieval_role") or "")
                 observed_result = structured_result
-                if retrieval_role == "evidence" and not is_error(structured_result):
+                if generic_web_mode and action == "web_search" and not is_error(structured_result):
+                    branch["discovery_results"] = [
+                        item for item in (structured_result.get("results") or [])
+                        if isinstance(item, dict)
+                    ]
+                    if structured_result.get("evidence_ready") and branch["discovery_results"]:
+                        branch["evidence_count"] += len(branch["discovery_results"])
+                        rounds.append((str(args.get("query") or user_query), structured_result))
+                elif retrieval_role == "evidence" and not is_error(structured_result):
                     evidence_query = self._evidence_query_for_point(str(point.get("id") or ""), user_query)
                     observed_result = self._process_single_page_result(
                         evidence_query,
@@ -785,6 +808,7 @@ class Orchestrator:
                     decision_source="model",
                     retrieval_role=retrieval_role,
                     evidence_count=len(observed_result.get("results") or []),
+                    retrieval_phase=branch_phase,
                 )
             if not progress:
                 break
@@ -814,6 +838,8 @@ class Orchestrator:
             "retrieval_fork_completed",
             step=total_steps,
             phase="FORK",
+            retrieval_phase=branch_phase,
+            generic_web_search_only=generic_web_mode,
             branch_count=len(branch_records),
             evidence_rounds=len(rounds),
             total_tool_steps=total_steps,

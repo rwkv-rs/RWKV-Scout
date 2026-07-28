@@ -39,6 +39,7 @@ from utils.token_tracker import current_task_id
 from utils.trace_validation import validate_replay_trace
 from config import get_experiment_model_config, validate_experiment_model_contract
 from agent.orchestrator import Orchestrator
+from tools.registry import ToolRegistry
 
 
 class ExperimentPipelineTests(unittest.TestCase):
@@ -688,7 +689,7 @@ class ExperimentPipelineTests(unittest.TestCase):
             ):
                 orchestrator.planner.create_task_plan = lambda *_args: plan
                 orchestrator.planner.begin_task = lambda *_args: None
-                orchestrator.planner.fork_for_point = lambda *_args: FakeBranch()
+                orchestrator.planner.fork_for_point = lambda *_args, **_kwargs: FakeBranch()
                 result = orchestrator._run_model_tool_loop("collect the fact", {})
 
             self.assertEqual(result, "The fact is 42.")
@@ -696,6 +697,108 @@ class ExperimentPipelineTests(unittest.TestCase):
                 [(action, phase) for action, _args, phase in executed],
                 [("search_web_keyless", "ALL"), ("fetch_web_url", "ALL")],
             )
+
+    def test_generic_web_fork_exposes_only_model_owned_web_search(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task_dir = Path(directory) / "task"
+            task_dir.mkdir()
+            orchestrator = Orchestrator()
+            orchestrator.state.task_id = "GENERIC_FORK_TRACE"
+            orchestrator.state.task_output_dir = str(task_dir)
+            orchestrator.state.user_query = "collect the generic web fact"
+            orchestrator.state.run_metadata = {
+                "max_tool_steps": 2,
+                "retrieval_fork": True,
+                "generic_web_search_only": True,
+                "retrieval_branch_width": 1,
+            }
+            plan = {
+                "schema_version": "task_plan.v1",
+                "goal": "collect the generic web fact",
+                "atomic_points": [
+                    {
+                        "id": "P1",
+                        "task": "collect the generic web fact",
+                        "objective": "collect one directly supported fact",
+                        "evidence_needed": ["the source fact"],
+                        "acceptance_criteria": ["the source directly supports the fact"],
+                        "output_format": "prose",
+                        "status": "pending",
+                    }
+                ],
+                "completion_rule": "supported",
+            }
+
+            class FakeBranch:
+                def __init__(self):
+                    self.calls = 0
+
+                def plan_next_action(self, *_args):
+                    self.calls += 1
+                    if self.calls == 1:
+                        return {
+                            "action": "web_search",
+                            "args": {"query": "generic web fact"},
+                            "task_point_id": "P1",
+                        }
+                    return {"action": "finish_task", "args": {}, "task_point_id": "P1"}
+
+                def observe_tool_result(self, *_args):
+                    return None
+
+                def execution_transcript(self):
+                    return "generic branch transcript"
+
+            executed = []
+
+            def fake_execute(action, args, context, phase=None):
+                executed.append((action, args, phase))
+                return json.dumps(
+                    {
+                        "status": "ok",
+                        "retrieval_role": "discovery",
+                        "evidence_ready": True,
+                        "results": [
+                            {
+                                "title": "Fact",
+                                "url": "https://example.com/fact",
+                                "page_excerpt": "The fact is 42.",
+                            }
+                        ],
+                        "page_evidence": [
+                            {"url": "https://example.com/fact", "status": "ok"}
+                        ],
+                    }
+                )
+
+            with (
+                patch("agent.orchestrator.append_task_event"),
+                patch("agent.orchestrator.ToolRegistry.execute", side_effect=fake_execute),
+                patch("agent.orchestrator.synthesize_retrieval_answer", return_value={
+                    "content": "The fact is 42.",
+                    "mode": "test_final",
+                    "model_output": "The fact is 42.",
+                    "context_text": "The fact is 42.",
+                    "selected_evidence": [],
+                    "context_stats": {},
+                    "citation_refs": [],
+                }),
+            ):
+                orchestrator.planner.create_task_plan = lambda *_args: plan
+                orchestrator.planner.begin_task = lambda *_args: None
+                orchestrator.planner.fork_for_point = lambda *_args, **_kwargs: FakeBranch()
+                result = orchestrator._run_model_tool_loop(
+                    "collect the generic web fact",
+                    {},
+                )
+
+            self.assertEqual(result, "The fact is 42.")
+            self.assertEqual(
+                [(action, phase) for action, _args, phase in executed],
+                [("web_search", "GENERIC_WEB")],
+            )
+            self.assertTrue(ToolRegistry.can_execute("web_search", "GENERIC_WEB"))
+            self.assertFalse(ToolRegistry.can_execute("search_web_keyless", "GENERIC_WEB"))
 
     def test_invalid_citation_triggers_one_bounded_recovery_round(self):
         with tempfile.TemporaryDirectory() as directory:

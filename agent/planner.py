@@ -135,6 +135,10 @@ class Planner:
             "specify completeness, exact artifacts, counts, ordering, URLs, or route fields when the user asks for them. "
             "If the task requests a list or table, set output_format to list or table and explicitly require every row, "
             "column relationship, and original order to be preserved; never accept an '等/等等' summary as complete. "
+            "When the user asks who founded an organization or project, do not assume there is only one founder: "
+            "make the acceptance criteria enumerate all founders or explicitly state that the source supports only one. "
+            "Keep founder, co-founder, CEO, COO, author, and project originator as distinct roles unless the evidence equates them. "
+            "If the user requests links, each listed paper or project must have its own exact URL; a domain-only citation is incomplete. "
             "Return exactly one JSON object and no explanation. "
             "Use this fixed format: "
             '{"schema_version":"task_plan.v1","goal":"...",'
@@ -197,7 +201,12 @@ class Planner:
         )
         self._trim_conversation()
 
-    def fork_for_point(self, branch_id: str, point: dict[str, Any]) -> "Planner":
+    def fork_for_point(
+        self,
+        branch_id: str,
+        point: dict[str, Any],
+        phase: str = "ALL",
+    ) -> "Planner":
         """Fork the visible planner state for one model-generated task point.
 
         This is a logical RWKV state fork at the workflow layer. Runtime
@@ -209,13 +218,21 @@ class Planner:
         branch.llm = self.llm
         branch._messages = deepcopy(self._messages)
         branch._task_plan = deepcopy(self._task_plan)
+        branch_phase = str(phase or "ALL").upper()
+        if branch._messages:
+            branch._messages[0]["content"] = self._system_prompt(branch_phase)
+        branch_instruction = (
+            "Choose whether to call the generic web_search capability and write one concise query yourself. "
+            if branch_phase == "GENERIC_WEB"
+            else "Choose the retrieval tool and arguments yourself from the complete catalog. "
+        )
         branch._messages.append(
             {
                 "role": "user",
                 "content": (
                     f"Retrieval branch {branch_id}: work only on this model-generated point.\n"
                     f"{json.dumps(point, ensure_ascii=False, separators=(',', ':'))}\n"
-                    "Choose the retrieval tool and arguments yourself from the complete catalog. "
+                    f"{branch_instruction}"
                     "After a discovery result, select a returned URL with an evidence tool when needed. "
                     "Do not write a final answer in this branch; return the next JSON tool call."
                 ),

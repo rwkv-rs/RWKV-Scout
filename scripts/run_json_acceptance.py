@@ -85,6 +85,8 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
     finals = []
     model_calls = []
     step_limits = []
+    web_search_stages = []
+    web_search_chunks = []
     chunk_tokens = []
     chunk_chars = []
     chunk_windows = []
@@ -132,6 +134,55 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     if key in event
                 }
             )
+        elif event_type == "web_search_stage":
+            stage = str(event.get("stage") or "")
+            page = event.get("page") or {}
+            web_search_stages.append(
+                {
+                    "seq": event.get("seq"),
+                    "step": event.get("step"),
+                    "phase": event.get("phase"),
+                    "stage": stage,
+                    "status": event.get("status") or page.get("status") or "",
+                    "query": event.get("query") or "",
+                    "candidate_count": event.get("candidate_count"),
+                    "fetched_count": event.get("fetched_count"),
+                    "evidence_count": event.get("evidence_count"),
+                    "url": page.get("url") or "",
+                    "page_chars": page.get("page_chars"),
+                    "chunk_count": page.get("chunk_count"),
+                    "chunk_window_tokens": page.get("chunk_window_tokens"),
+                    "parallel_candidate": page.get("parallel_candidate") or {},
+                    "errors": page.get("errors") or [],
+                }
+            )
+            if stage == "page_evidence" and page:
+                evidence.append(
+                    {
+                        "step": event.get("step"),
+                        "url": page.get("url") or "",
+                        "data": page,
+                        "compact_facts": "",
+                        "source": "generic_web_search",
+                    }
+                )
+                chunk_windows.append(page.get("chunk_window_tokens"))
+        elif event_type == "web_search_chunk":
+            chunk = event.get("chunk") or {}
+            web_search_chunks.append(
+                {
+                    "seq": event.get("seq"),
+                    "phase": event.get("phase"),
+                    "url": event.get("url") or "",
+                    "chunk_id": chunk.get("chunk_id") or "",
+                    "index": chunk.get("index"),
+                    "chars": chunk.get("chars") or len(str(chunk.get("text") or "")),
+                    "token_count": chunk.get("token_count"),
+                    "candidate": event.get("candidate") or {},
+                }
+            )
+            chunk_tokens.append(chunk.get("token_count"))
+            chunk_chars.append(chunk.get("chars") or len(str(chunk.get("text") or "")))
         elif event_type == "task_plan":
             plan = event.get("data") or {}
             plans.append(
@@ -219,6 +270,8 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "phase": event.get("phase"),
                     "branch_width": event.get("branch_width"),
                     "max_tool_steps": event.get("max_tool_steps"),
+                    "retrieval_phase": event.get("retrieval_phase"),
+                    "generic_web_search_only": event.get("generic_web_search_only"),
                     "branch_count": event.get("branch_count"),
                     "evidence_rounds": event.get("evidence_rounds"),
                     "total_tool_steps": event.get("total_tool_steps"),
@@ -300,6 +353,8 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
         "finals": finals,
         "model_calls": model_calls,
         "step_limits": step_limits,
+        "web_search_stages": web_search_stages,
+        "web_search_chunks": web_search_chunks,
         "final": finals[-1] if finals else None,
         "stats": {
             "action_counts": dict(action_counts),
@@ -311,6 +366,10 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                 "with_task_point_id": sum(bool(item.get("task_point_id")) for item in decisions),
             },
             "page_fetches": len(evidence),
+            "web_search_page_evidence": sum(
+                1 for item in web_search_stages if item.get("stage") == "page_evidence"
+            ),
+            "web_search_chunk_events": len(web_search_chunks),
             "model_call_count": len(model_calls),
             "step_limit_count": len(step_limits),
             "page_evidence_statuses": dict(evidence_statuses),
@@ -371,9 +430,13 @@ def run(input_path: Path, output_path: Path) -> dict[str, Any]:
         metadata = {}
         if case.get("max_tool_steps") is not None:
             metadata["max_tool_steps"] = int(case["max_tool_steps"])
-        for key in ("generic_web_search_only", "retrieval_fork"):
+        for key in ("generic_web_search_only", "retrieval_fork", "retrieval_branch_width", "architecture"):
             if key in case:
-                metadata[key] = bool(case[key])
+                metadata[key] = (
+                    bool(case[key])
+                    if key in {"generic_web_search_only", "retrieval_fork"}
+                    else case[key]
+                )
         query = str(case["query"])
         task_token = current_task_id.set(task_id)
         try:
@@ -392,6 +455,9 @@ def run(input_path: Path, output_path: Path) -> dict[str, Any]:
                 "case_id": case_id,
                 "task_id": task_id,
                 "query": query,
+                "architecture": case.get("architecture") or (
+                    "forked" if metadata.get("retrieval_fork") else "single_loop"
+                ),
                 "status": status,
                 "answer": answer,
                 "error": error,
