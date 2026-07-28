@@ -91,7 +91,8 @@ def semantic_chunk_text(text: str, max_tokens: int = 800, overlap_ratio: float =
     # 💥 直接进行破坏性过滤：替换标准 Markdown 图片/HTML 图片
     text = re.sub(r'!\[[^\]]*\]\([^\)]*\)|<img\b[^>]*>', mask_str, text, flags=re.IGNORECASE)
     # 💥 直接进行破坏性过滤：替换 Markdown 复杂表格（连续至少两行包含 | 的区域）
-    text = re.sub(r'(?:^\s*\|.*\|.*$\n?){2,}', mask_str, text, flags=re.MULTILINE)
+    # Tables are evidence, not decoration. Keep Markdown rows intact so
+    # downstream candidates can preserve row/column relationships.
     
     chunks = []
     current_chunk = []

@@ -348,7 +348,10 @@ def extract_single_page_evidence(
         "first_chunk_text": chunks[0]["text"] if chunks else "",
         "chunk_candidates": parsed,
         "candidates": merged,
-        "compact_facts": "\n".join(compact_facts)[:6000],
+        # This is still bounded evidence, not the raw page.  Do not use the
+        # old 6k-character cap here: it could cut the last rows of a Markdown
+        # table before the final synthesis context was built.
+        "compact_facts": "\n".join(compact_facts)[:14000],
         "errors": errors,
         "parallel_candidate": {
             "strategy": "one-RWKV-call-per-chunk",

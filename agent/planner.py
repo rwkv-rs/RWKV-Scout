@@ -71,15 +71,31 @@ class Planner:
             if not isinstance(point, dict):
                 raise ValueError("each atomic point must be an object")
             point_id = str(point.get("id") or "").strip()
+            task = str(point.get("task") or "").strip()
             objective = str(point.get("objective") or "").strip()
             evidence_needed = point.get("evidence_needed")
-            if not point_id or not objective or not isinstance(evidence_needed, list):
-                raise ValueError("each atomic point requires id, objective and evidence_needed")
+            acceptance_criteria = point.get("acceptance_criteria")
+            if (
+                not point_id
+                or not task
+                or not objective
+                or not isinstance(evidence_needed, list)
+                or not isinstance(acceptance_criteria, list)
+                or not acceptance_criteria
+            ):
+                raise ValueError(
+                    "each atomic point requires id, task, objective, evidence_needed and acceptance_criteria"
+                )
             normalized_points.append(
                 {
                     "id": point_id,
+                    "task": task,
                     "objective": objective,
                     "evidence_needed": [str(item).strip() for item in evidence_needed if str(item).strip()],
+                    "acceptance_criteria": [
+                        str(item).strip() for item in acceptance_criteria if str(item).strip()
+                    ],
+                    "output_format": str(point.get("output_format") or "prose").strip(),
                     "status": str(point.get("status") or "pending"),
                 }
             )
@@ -99,13 +115,20 @@ class Planner:
             "System:\nYou are the task-planning RWKV. Decompose the user's goal into the smallest "
             "independently verifiable atomic points. Do not choose a provider, tool, query, "
             "or URL. Do not assume the local workspace is relevant unless the user explicitly asks about it. "
-            "Describe evidence as the fact that must be verified, not as a preselected source. Do not add facts. Return exactly one JSON object and no explanation. "
+            "Describe evidence as the fact that must be verified, not as a preselected source. Do not add facts. "
+            "For every P1/P2/P3-style point, state the task to perform and produce concrete acceptance_criteria "
+            "that another model can check literally from the evidence and final answer. Acceptance criteria must "
+            "specify completeness, exact artifacts, counts, ordering, URLs, or route fields when the user asks for them. "
+            "If the task requests a list or table, set output_format to list or table and explicitly require every row, "
+            "column relationship, and original order to be preserved; never accept an '等/等等' summary as complete. "
+            "Return exactly one JSON object and no explanation. "
             "Use this fixed format: "
             '{"schema_version":"task_plan.v1","goal":"...",'
-            '"atomic_points":[{"id":"P1","objective":"...",'
-            '"evidence_needed":["..."],"status":"pending"}],'
+            '"atomic_points":[{"id":"P1","task":"...","objective":"...",'
+            '"evidence_needed":["..."],"acceptance_criteria":["..."],'
+            '"output_format":"prose|list|table|route|links|mixed","status":"pending"}],'
             '"completion_rule":"..."}. '
-            "Every point must have a unique id, a concrete objective, and an evidence_needed array.\n\n"
+            "Every point must have a unique id, task, concrete objective, evidence_needed array, and at least one acceptance_criteria item.\n\n"
             f"\n\nUser:\nUser goal: {user_query}\n"
             f"Current environment summary: {env_context[:2400]}\n\n"
             "Assistant: ```json\n"
@@ -179,11 +202,14 @@ class Planner:
         prompt = (
             "System:\nYou are the follow-up task-planning RWKV. The previous plan was judged incomplete. "
             "Create a new fixed-schema plan containing only the remaining independently verifiable "
-            "points. Do not choose a provider, tool, query, or URL and do not invent facts. Return "
+            "points. Do not choose a provider, tool, query, or URL and do not invent facts. Re-state the "
+            "remaining task and concrete acceptance_criteria for each P point. Preserve list/table row and "
+            "column requirements when they are part of the goal. Return "
             "exactly one JSON object and no explanation using: "
             '{"schema_version":"task_plan.v1","goal":"...",'
-            '"atomic_points":[{"id":"P1","objective":"...",'
-            '"evidence_needed":["..."],"status":"pending"}],'
+            '"atomic_points":[{"id":"P1","task":"...","objective":"...",'
+            '"evidence_needed":["..."],"acceptance_criteria":["..."],'
+            '"output_format":"prose|list|table|route|links|mixed","status":"pending"}],'
             '"completion_rule":"..."}.\n\n'
             f"\n\nUser:\nUser goal: {user_query}\n"
             f"Previous plan: {json.dumps(task_plan, ensure_ascii=False, separators=(',', ':'))[:5000]}\n"
@@ -228,11 +254,11 @@ class Planner:
             "the retrieved evidence, and the draft answer. Do not retrieve, repair, or invent facts. "
             "Return exactly one JSON object and no explanation. Use this format: "
             '{"schema_version":"completion_judgement.v1","status":"complete|incomplete",'
-            '"reason":"...","missing_point_ids":[],"next_focus":[]}. '
+            '"reason":"...","missing_point_ids":[],"missing_criteria":[],"next_focus":[]}. '
             "Use incomplete when any atomic point is not answered by supported evidence. "
             "Use complete only when the draft is adequately supported for the stated plan. "
             "The status field inside atomic_points is only a planning annotation and may remain pending because the controller does not mutate model plans; ignore those status values. Judge each point from the draft answer and the retrieved evidence text itself. If the draft directly answers a point and the evidence contains the requested artifact or fact, mark the judgement complete even when that point's status is pending. "
-            "Check each point against its evidence_needed literally. A page's citation URL is not automatically the requested resource URL; when a point asks for a link, repository, identifier, or other exact artifact, the evidence must contain that artifact or the point remains incomplete. Do not infer completion from a general article mention.\n\n"
+            "Check each point against its evidence_needed and acceptance_criteria literally. A page's citation URL is not automatically the requested resource URL; when a point asks for a link, repository, identifier, or other exact artifact, the evidence must contain that artifact or the point remains incomplete. For list/table output, verify every required row and column relationship and reject ellipses or partial lists. Do not infer completion from a general article mention.\n\n"
             f"\n\nUser:\nUser goal: {user_query}\n"
             f"Task plan: {json.dumps(task_plan, ensure_ascii=False, separators=(',', ':'))[:5000]}\n"
             f"Draft answer: {str(answer or '')[:4000]}\n"
@@ -267,6 +293,9 @@ class Planner:
                     "status": status,
                     "reason": str(payload.get("reason") or ""),
                     "missing_point_ids": [str(item) for item in missing],
+                    "missing_criteria": [
+                        str(item) for item in (payload.get("missing_criteria") or []) if str(item).strip()
+                    ],
                     "next_focus": [str(item) for item in next_focus],
                 }
             except Exception as exc:

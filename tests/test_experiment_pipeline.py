@@ -562,8 +562,11 @@ class ExperimentPipelineTests(unittest.TestCase):
                     "atomic_points": [
                         {
                             "id": "P1",
+                            "task": "verify the reviewed fact",
                             "objective": "recover the reviewed fact",
                             "evidence_needed": ["reviewed fact"],
+                            "acceptance_criteria": ["the reviewed fact is directly supported"],
+                            "output_format": "prose",
                             "status": "pending",
                         }
                     ],

@@ -160,8 +160,12 @@ class Orchestrator:
             structured_facts.append(f"Evidence source: {page.get('source')}")
         first_chunk_text = str(evidence.get("first_chunk_text") or "").strip()
         if first_chunk_text:
-            structured_facts.append(f"Selected source chunk (chunk-1): {first_chunk_text[:3200]}")
-        compact_facts = "\n".join([*structured_facts, str(evidence.get("compact_facts") or "")]).strip()[:6000]
+            structured_facts.append(f"Selected source chunk (chunk-1): {first_chunk_text[:9000]}")
+        # Keep the complete bounded evidence chunk available to the final
+        # synthesis model.  The final context builder applies the model
+        # context budget; this intermediate projection must not discard the
+        # tail of a Markdown table before that stage can see it.
+        compact_facts = "\n".join([*structured_facts, str(evidence.get("compact_facts") or "")]).strip()[:14000]
         chunk_candidates = evidence.get("candidates") or []
         if structured_facts:
             chunk_candidates = [
@@ -309,10 +313,20 @@ class Orchestrator:
         for point in self._task_plan.get("atomic_points") or []:
             if isinstance(point, dict) and str(point.get("id") or "").strip() == point_id:
                 objective = str(point.get("objective") or "").strip()
+                task = str(point.get("task") or "").strip()
                 needed = point.get("evidence_needed") or []
+                acceptance = point.get("acceptance_criteria") or []
+                output_format = str(point.get("output_format") or "prose").strip()
                 if objective:
                     needed_text = "; ".join(str(item).strip() for item in needed if str(item).strip())
-                    return f"Atomic objective: {objective}\nEvidence needed: {needed_text}"
+                    criteria_text = "; ".join(str(item).strip() for item in acceptance if str(item).strip())
+                    return (
+                        f"Task: {task or objective}\n"
+                        f"Atomic objective: {objective}\n"
+                        f"Output format: {output_format}\n"
+                        f"Evidence needed: {needed_text}\n"
+                        f"Acceptance criteria: {criteria_text}"
+                    )
         # A missing point id is a model protocol omission, not permission to
         # inject the entire checklist into every page chunk.  The checklist
         # remains available to planning and judging; page extraction should

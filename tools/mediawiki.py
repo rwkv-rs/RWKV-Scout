@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import re
-from html import unescape
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 from tools.registry import ToolRegistry
+from utils.html_markdown import html_to_markdown, markdown_table
 from utils.network_fetch import NetworkFetchError, fetch_json
 
 
@@ -80,9 +80,7 @@ def _page_url(base: str, title: str) -> str:
 
 
 def _strip_html(value: Any) -> str:
-    text = unescape(str(value or ""))
-    text = re.sub(r"<(?:style|script)[^>]*>.*?</(?:style|script)>", " ", text, flags=re.DOTALL | re.IGNORECASE)
-    return " ".join(re.sub(r"<[^>]+>", " ", text).split())
+    return html_to_markdown(value)
 
 
 def _revision_content(payload: dict[str, Any]) -> str:
@@ -96,21 +94,48 @@ def _revision_content(payload: dict[str, Any]) -> str:
 
 
 def _clean_wikitext(value: str) -> str:
-    """Keep readable page/table fields while removing presentation syntax."""
+    """Convert readable wikitext fields and simple tables to Markdown."""
 
     text = str(value or "")
     text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
     text = re.sub(r"<ref[^>]*>.*?</ref>|<ref[^>]*/>", " ", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\[\[[^\]|]+\|([^\]]+)\]\]", r"\1", text)
+    text = re.sub(r"\[\[([^\]|]+)\|([^\]]+)\]\]", r"[\2](\1)", text)
     text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", text)
-    text = re.sub(r"\[https?://\S+\s+([^\]]+)\]", r"\1", text)
+    text = re.sub(r"\[https?://(\S+)\s+([^\]]+)\]", r"[\2](https://\1)", text)
     text = re.sub(r"'{2,}", "", text)
     lines: list[str] = []
+    table_rows: list[list[str]] = []
+    in_table = False
+
+    def flush_table() -> None:
+        nonlocal table_rows
+        if table_rows:
+            lines.extend(markdown_table(table_rows))
+            lines.append("")
+            table_rows = []
+
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if not line or line in {"{|", "|}", "|-"}:
+        if line.startswith("{|"):
+            flush_table()
+            in_table = True
+            continue
+        if in_table and line.startswith("|}"):
+            flush_table()
+            in_table = False
+            continue
+        if in_table and line.startswith("|-"):
+            continue
+        if in_table and (line.startswith("!") or line.startswith("|")):
+            marker = line[1:].strip()
+            delimiter = "!!" if line.startswith("!") else "||"
+            cells = [re.sub(r"\s+", " ", cell).strip() for cell in marker.split(delimiter)]
+            if cells and any(cells):
+                table_rows.append(cells)
+            continue
+        if not line:
             continue
         if line.startswith(("|", "!")):
             line = line[1:].strip()
@@ -119,6 +144,8 @@ def _clean_wikitext(value: str) -> str:
         line = re.sub(r"\s+", " ", line).strip()
         if line:
             lines.append(line)
+    if in_table:
+        flush_table()
     return "\n".join(lines)
 
 

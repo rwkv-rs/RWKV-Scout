@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from tools.registry import ToolRegistry
 from utils.harness_fixtures import fixture_payload, resolve_fixture_variant
+from utils.html_markdown import html_to_markdown
 from utils.network_fetch import NetworkFetchError, fetch_text
 from utils.retrieval_events import record_retrieval_event
 
@@ -93,27 +94,6 @@ class _BingResultParser(HTMLParser):
                 self._current = None
 
 
-class _VisibleTextParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.parts: list[str] = []
-        self._skip_depth = 0
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in {"script", "style", "noscript", "svg", "template"}:
-            self._skip_depth += 1
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style", "noscript", "svg", "template"} and self._skip_depth:
-            self._skip_depth -= 1
-
-    def handle_data(self, data: str) -> None:
-        if not self._skip_depth:
-            text = " ".join(data.split())
-            if text:
-                self.parts.append(text)
-
-
 def _unwrap_ddg_url(value: str) -> str:
     if value.startswith("//"):
         value = "https:" + value
@@ -160,9 +140,9 @@ def _page_excerpt(url: str, limit: int = 2600) -> str:
     if not url.startswith(("http://", "https://")):
         return ""
     body = fetch_text(url, timeout=15)
-    parser = _VisibleTextParser()
-    parser.feed(body[:180_000])
-    return " ".join(parser.parts)[:limit]
+    # Keep headings, links, lists and HTML table rows/columns.  A flat text
+    # projection is not sufficient evidence for station, author or file lists.
+    return html_to_markdown(body[:180_000], max_chars=limit)
 
 
 def _safe_key(query: str) -> str:
