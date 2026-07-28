@@ -36,6 +36,9 @@ from tools.builtin import load_builtin_tools
 from retrieval_plugins import is_error, plugin_environment_snapshot
 
 
+DEFAULT_MAX_TOOL_STEPS = 100
+
+
 class Orchestrator:
     def __init__(self):
         load_builtin_tools()
@@ -830,7 +833,16 @@ class Orchestrator:
 
     def _run_model_tool_loop(self, user_query: str, model_profile: dict) -> str:
         """Let RWKV choose tools, URLs and arguments until it chooses to answer."""
-        max_steps = max(1, int(self.state.run_metadata.get("max_tool_steps", 8) or 8))
+        max_steps = max(
+            1,
+            int(
+                self.state.run_metadata.get(
+                    "max_tool_steps",
+                    DEFAULT_MAX_TOOL_STEPS,
+                )
+                or DEFAULT_MAX_TOOL_STEPS
+            ),
+        )
         rounds: list[tuple[str, dict]] = []
         phase = "DISCOVERY"
         last_action = "model_tool_loop"
