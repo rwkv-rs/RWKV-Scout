@@ -58,3 +58,24 @@ runtime.ModelBackend
 - 没有 wigolo 或云端 API 时，仍可使用现有无 Key 搜索。
 - 前端继续读取原有任务、事件和报告 JSON 结构。
 - 文件路径统一经过 app.services.workspace_files 校验。
+
+## 检索执行策略
+
+首个 Planner RWKV 只负责把用户目标拆成 `task_plan.v1` 的
+`atomic_points`，不输出工具、搜索源、查询词、URL 或执行策略。策略由
+`agent/execution_strategy.py` 根据分点数量选择：一个或两个分点进入
+Single-loop，三个及以上分点进入 Fork。`retrieval_strategy` 和旧的
+`retrieval_fork` 仅作为受控实验的显式覆盖，不参与普通请求的默认路由。
+
+```text
+task_plan.v1
+    ↓
+execution_strategy.select_strategy
+    ├── single_loop → SingleLoopRunner
+    └── fork        → ForkRunner
+```
+
+两种 Runner 共享工具注册表、网页证据管线、Evidence、RetrievalLedger、
+事件追踪和最终总结；差异只在模型上下文的调度方式。策略选择会写入
+`retrieval_strategy_selected` 事件，便于前端、JSON 测试报告和回归分析读取
+真实执行架构。

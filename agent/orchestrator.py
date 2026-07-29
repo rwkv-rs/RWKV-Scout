@@ -34,6 +34,9 @@ from utils.experiment_strategies import normalize_strategy
 from utils.time_budget import check_time_budget
 from tools.builtin import load_builtin_tools
 from retrieval_plugins import is_error, plugin_environment_snapshot
+from utils.retrieval_ledger import RetrievalLedger
+from agent.execution_strategy import StrategyDecision, select_strategy
+from agent.retrieval_runners import build_runner
 
 
 DEFAULT_MAX_TOOL_STEPS = 100
@@ -49,6 +52,7 @@ class Orchestrator:
         self.planner = Planner()
         self._task_plan: dict = {}
         self._fork_transcripts: list[dict] = []
+        self._retrieval_ledger = RetrievalLedger()
 
     def _retrieval_context(self) -> dict:
         return {
@@ -66,6 +70,7 @@ class Orchestrator:
         """Build the context passed to a model-selected tool call."""
         context = self._retrieval_context()
         context["agentic_tool_loop"] = True
+        context["retrieval_ledger"] = self._retrieval_ledger.observation()
         return context
 
     def _model_execution_context(self) -> str:
@@ -94,10 +99,67 @@ class Orchestrator:
         else:
             lines.append("- No retrieval fork record was created.")
         lines.append(
+            "Shared retrieval ledger (observational; the model still decides the next action):"
+        )
+        lines.append(
+            json.dumps(
+                self._retrieval_ledger.observation(limit=16),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        lines.append(
             "The complete event trace contains the raw model calls and tool results. "
             "Use only the Evidence section for factual claims; this summary is only a record of what was attempted."
         )
         return "\n".join(lines)
+
+    def _record_retrieval_progress(
+        self,
+        result: dict,
+        *,
+        query: str,
+        step: int,
+        action: str,
+        phase: str,
+        branch_id: str = "",
+        task_point_id: str = "",
+    ) -> dict:
+        """Attach shared progress to the next model observation.
+
+        This is deliberately advisory.  The ledger never rejects a repeated
+        query and never manufactures a replacement action.
+        """
+
+        delta = self._retrieval_ledger.record(
+            query,
+            result,
+            step=step,
+            branch_id=branch_id,
+            task_point_id=task_point_id,
+            action=action,
+            phase=phase,
+        )
+        observation = self._retrieval_ledger.observation(
+            branch_id=branch_id,
+            task_point_id=task_point_id,
+        )
+        enriched = dict(result)
+        enriched["retrieval_delta"] = delta
+        enriched["retrieval_ledger"] = observation
+        append_task_event(
+            self.state.task_id,
+            "retrieval_ledger",
+            step=step,
+            phase=phase,
+            branch_id=branch_id,
+            task_point_id=task_point_id,
+            action=action,
+            query=query,
+            data=delta,
+            snapshot=observation,
+        )
+        return enriched
 
     def _process_single_page_result(
         self,
@@ -794,6 +856,16 @@ class Orchestrator:
                         if isinstance(item, dict)
                     ]
 
+                if retrieval_role in {"discovery", "evidence"} or action == "web_search":
+                    observed_result = self._record_retrieval_progress(
+                        observed_result,
+                        query=str(args.get("query") or args.get("url") or user_query),
+                        step=total_steps,
+                        action=action,
+                        phase=branch_phase,
+                        branch_id=branch_id,
+                        task_point_id=str(point.get("id") or ""),
+                    )
                 branch_planner.observe_tool_result(observed_result)
                 append_task_event(
                     self.state.task_id,
@@ -828,6 +900,10 @@ class Orchestrator:
                 "evidence_count": branch["evidence_count"],
                 "discovery_count": len(branch["discovery_results"]),
                 "stop_reason": branch["stop_reason"],
+                "retrieval_ledger": self._retrieval_ledger.observation(
+                    branch_id=branch["branch_id"],
+                    task_point_id=str(branch["point"].get("id") or ""),
+                ),
                 "transcript": branch["planner"].execution_transcript(),
             }
             branch_records.append(branch_record)
@@ -843,6 +919,7 @@ class Orchestrator:
             branch_count=len(branch_records),
             evidence_rounds=len(rounds),
             total_tool_steps=total_steps,
+            retrieval_ledger=self._retrieval_ledger.snapshot(),
             branches=[
                 dict(item)
                 for item in branch_records
@@ -857,8 +934,74 @@ class Orchestrator:
             termination_reason=termination_reason,
         )
 
+    def _prepare_task_plan(self, user_query: str, phase: str) -> dict:
+        """Create the model plan once and initialize the shared transcript."""
+        self.planner.reset()
+        # Planning starts from the user goal only. Workspace contents remain
+        # available to later tool turns, but cannot bias decomposition into a
+        # local-file plan.
+        plan_context = ""
+        task_plan = self.planner.create_task_plan(user_query, plan_context)
+        append_task_event(
+            self.state.task_id,
+            "task_plan",
+            step=0,
+            phase="ROUTING",
+            data=task_plan,
+        )
+        if task_plan.get("status") == "error":
+            return task_plan
+
+        self._task_plan = task_plan
+        self.state.run_metadata["task_plan"] = task_plan
+        generic_web_mode = bool(self.state.run_metadata.get("generic_web_search_only"))
+        # Keep the legacy call shape for existing planner test doubles. The
+        # generic web mode is the only path that needs an explicit phase.
+        if generic_web_mode:
+            self.planner.begin_task(user_query, plan_context, task_plan, phase)
+        else:
+            self.planner.begin_task(user_query, plan_context, task_plan)
+        self._fork_transcripts = []
+        return task_plan
+
+    def _fail_task_plan(self, user_query: str, task_plan: dict) -> str:
+        answer = "Task planning failed; retrieval did not start."
+        self.state.final_result = answer
+        self.state.is_finished = True
+        append_task_event(
+            self.state.task_id,
+            "final",
+            status="failed",
+            content=answer,
+            action="task_plan",
+            mode="model_task_plan_failed",
+            planner_error=task_plan.get("message", ""),
+        )
+        self._write_agentic_report(user_query, "task_plan", answer, mode="model_task_plan_failed")
+        return answer
+
+    def _select_retrieval_strategy(self, task_plan: dict) -> StrategyDecision:
+        """Persist and trace the policy chosen from the atomic task points."""
+        decision = select_strategy(task_plan, self.state.run_metadata)
+        selected = decision.as_dict()
+        self.state.run_metadata["retrieval_strategy"] = decision.strategy
+        self.state.run_metadata["retrieval_strategy_decision"] = selected
+        append_task_event(
+            self.state.task_id,
+            "retrieval_strategy_selected",
+            step=0,
+            phase="ROUTING",
+            strategy=decision.strategy,
+            point_count=decision.point_count,
+            point_ids=list(decision.point_ids),
+            source=decision.source,
+            reason=decision.reason,
+            override=decision.source.endswith("override"),
+        )
+        return decision
+
     def _run_model_tool_loop(self, user_query: str, model_profile: dict) -> str:
-        """Let RWKV choose tools, URLs and arguments until it chooses to answer."""
+        """Prepare the task once, select a runner, and execute the episode."""
         generic_web_mode = bool(self.state.run_metadata.get("generic_web_search_only"))
         max_steps = max(
             1,
@@ -870,57 +1013,30 @@ class Orchestrator:
                 or DEFAULT_MAX_TOOL_STEPS
             ),
         )
+        phase = "GENERIC_WEB" if generic_web_mode else "DISCOVERY"
+        task_plan = self._prepare_task_plan(user_query, phase)
+        if task_plan.get("status") == "error":
+            return self._fail_task_plan(user_query, task_plan)
+
+        decision = self._select_retrieval_strategy(task_plan)
+        runner = build_runner(decision, self)
+        return runner.run(user_query, task_plan, model_profile, max_steps)
+
+    def _run_single_loop(
+        self,
+        user_query: str,
+        model_profile: dict,
+        task_plan: dict,
+        max_steps: int,
+    ) -> str:
+        """Run one continuous RWKV retrieval context."""
+        generic_web_mode = bool(self.state.run_metadata.get("generic_web_search_only"))
         rounds: list[tuple[str, dict]] = []
         phase = "GENERIC_WEB" if generic_web_mode else "DISCOVERY"
         last_action = "model_tool_loop"
         retrieval_attempted = False
         last_discovery_results: list[dict] = []
         empty_evidence_attempts = 0
-        self.planner.reset()
-        # Planning starts from the user goal only.  Workspace contents remain
-        # available to the later tool-decision turn, but cannot bias the
-        # semantic decomposition into a local-file plan.
-        plan_context = ""
-        task_plan = self.planner.create_task_plan(user_query, plan_context)
-        append_task_event(
-            self.state.task_id,
-            "task_plan",
-            step=0,
-            phase="ROUTING",
-            data=task_plan,
-        )
-        if task_plan.get("status") == "error":
-            answer = "任务规划失败，无法安全开始检索。"
-            self.state.final_result = answer
-            self.state.is_finished = True
-            append_task_event(
-                self.state.task_id,
-                "final",
-                status="failed",
-                content=answer,
-                action="task_plan",
-                mode="model_task_plan_failed",
-                planner_error=task_plan.get("message", ""),
-            )
-            self._write_agentic_report(user_query, "task_plan", answer, mode="model_task_plan_failed")
-            return answer
-        self._task_plan = task_plan
-        self.state.run_metadata["task_plan"] = task_plan
-        # Keep the legacy call shape for existing planner test doubles. The
-        # generic web mode is the only path that needs to override the phase.
-        if generic_web_mode:
-            self.planner.begin_task(user_query, plan_context, task_plan, phase)
-        else:
-            self.planner.begin_task(user_query, plan_context, task_plan)
-        self._fork_transcripts = []
-        if self.state.run_metadata.get("retrieval_fork", True):
-            return self._run_forked_retrieval(
-                user_query,
-                task_plan,
-                model_profile,
-                max_steps,
-            )
-
         for step in range(1, max_steps + 1):
             check_time_budget(minimum_seconds=0.2)
             if is_task_stopped(self.state.task_id):
@@ -1163,6 +1279,15 @@ class Orchestrator:
                     f"[{action}] execution failed; plugin is unavailable for this turn:\n"
                     f"{json.dumps(structured_result, ensure_ascii=False)[:6000]}"
                 )
+                if retrieval_role in {"discovery", "evidence"} or action == "web_search":
+                    structured_result = self._record_retrieval_progress(
+                        structured_result,
+                        query=str(args.get("query") or args.get("url") or user_query),
+                        step=step,
+                        action=action,
+                        phase=phase,
+                        task_point_id=task_point_id,
+                    )
                 self.planner.observe_tool_result(structured_result)
                 append_task_event(
                     self.state.task_id,
@@ -1214,6 +1339,15 @@ class Orchestrator:
                             "The selected page produced no evidence. Choose one different URL from alternative_urls "
                             "with the matching evidence tool before refining the search."
                         )
+            if retrieval_role in {"discovery", "evidence"} or action == "web_search":
+                observed_result = self._record_retrieval_progress(
+                    observed_result,
+                    query=str(args.get("query") or args.get("url") or user_query),
+                    step=step,
+                    action=action,
+                    phase=phase,
+                    task_point_id=task_point_id,
+                )
             self.state.last_feedback = (
                 f"[{action}] model-selected tool result:\n"
                 f"{json.dumps(observed_result, ensure_ascii=False)[:6000]}"
@@ -1850,6 +1984,8 @@ class Orchestrator:
         check_time_budget(minimum_seconds=0.2)
         self.state.task_id = task_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.state.run_metadata = dict(run_metadata or {})
+        self._retrieval_ledger = RetrievalLedger()
+        self._fork_transcripts = []
         self.state.task_output_dir = os.path.join(DATA_PIPELINE.get("output_directory", "./data/output"), self.state.task_id)
         os.makedirs(self.state.task_output_dir, exist_ok=True)
         

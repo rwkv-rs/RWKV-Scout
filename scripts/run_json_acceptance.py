@@ -80,11 +80,14 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
     forks = []
     evidence = []
     plans = []
+    strategy_selections = []
     judgements = []
     contexts = []
     finals = []
     model_calls = []
     step_limits = []
+    ledger_events = []
+    ledger_snapshot = {}
     web_search_stages = []
     web_search_chunks = []
     chunk_tokens = []
@@ -134,6 +137,21 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     if key in event
                 }
             )
+        elif event_type == "retrieval_ledger":
+            ledger_events.append(
+                {
+                    "step": event.get("step"),
+                    "phase": event.get("phase"),
+                    "branch_id": event.get("branch_id") or "",
+                    "task_point_id": event.get("task_point_id") or "",
+                    "action": event.get("action") or "",
+                    "query": event.get("query") or "",
+                    "data": event.get("data") or {},
+                    "snapshot": event.get("snapshot") or {},
+                }
+            )
+            if isinstance(event.get("snapshot"), dict):
+                ledger_snapshot = event.get("snapshot") or {}
         elif event_type == "web_search_stage":
             stage = str(event.get("stage") or "")
             page = event.get("page") or {}
@@ -209,6 +227,18 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                         for point in (plan.get("atomic_points") or [])
                         if isinstance(point, dict)
                     ],
+                }
+            )
+        elif event_type == "retrieval_strategy_selected":
+            strategy_selections.append(
+                {
+                    "step": event.get("step"),
+                    "strategy": event.get("strategy") or "",
+                    "point_count": event.get("point_count") or 0,
+                    "point_ids": event.get("point_ids") or [],
+                    "source": event.get("source") or "",
+                    "reason": event.get("reason") or "",
+                    "override": bool(event.get("override")),
                 }
             )
         elif event_type == "model_tool_decision":
@@ -343,6 +373,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
     return {
         "event_count": len(events),
         "plans": plans,
+        "strategy_selections": strategy_selections,
         "decisions": decisions,
         "tool_calls": tool_calls,
         "tool_results": tool_results,
@@ -353,6 +384,10 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
         "finals": finals,
         "model_calls": model_calls,
         "step_limits": step_limits,
+        "retrieval_ledger": {
+            "events": ledger_events,
+            "snapshot": ledger_snapshot,
+        },
         "web_search_stages": web_search_stages,
         "web_search_chunks": web_search_chunks,
         "final": finals[-1] if finals else None,
@@ -372,6 +407,10 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             "web_search_chunk_events": len(web_search_chunks),
             "model_call_count": len(model_calls),
             "step_limit_count": len(step_limits),
+            "ledger_event_count": len(ledger_events),
+            "ledger_total_searches": int(ledger_snapshot.get("total_searches") or 0),
+            "ledger_unique_queries": int(ledger_snapshot.get("unique_queries") or 0),
+            "ledger_exact_repeat_count": int(ledger_snapshot.get("exact_repeat_count") or 0),
             "page_evidence_statuses": dict(evidence_statuses),
             "page_chars": _numeric_summary(
                 [(row.get("data") or {}).get("page_chars") for row in evidence]
@@ -430,7 +469,13 @@ def run(input_path: Path, output_path: Path) -> dict[str, Any]:
         metadata = {}
         if case.get("max_tool_steps") is not None:
             metadata["max_tool_steps"] = int(case["max_tool_steps"])
-        for key in ("generic_web_search_only", "retrieval_fork", "retrieval_branch_width", "architecture"):
+        for key in (
+            "generic_web_search_only",
+            "retrieval_fork",
+            "retrieval_strategy",
+            "retrieval_branch_width",
+            "architecture",
+        ):
             if key in case:
                 metadata[key] = (
                     bool(case[key])
@@ -455,11 +500,15 @@ def run(input_path: Path, output_path: Path) -> dict[str, Any]:
                 "case_id": case_id,
                 "task_id": task_id,
                 "query": query,
-                "architecture": case.get("architecture") or (
-                    "forked" if metadata.get("retrieval_fork") else "single_loop"
+                "architecture": (
+                    (trace.get("strategy_selections") or [{}])[-1].get("strategy")
+                    or case.get("architecture")
+                    or "single_loop"
                 ),
                 "status": status,
                 "answer": answer,
+                "final_output": answer,
+                "final_output_chars": len(answer),
                 "error": error,
                 "trace": trace,
             }

@@ -130,15 +130,11 @@ class Planner:
             "independently verifiable atomic points. Do not choose a provider, tool, query, "
             "or URL. Do not assume the local workspace is relevant unless the user explicitly asks about it. "
             "Describe evidence as the fact that must be verified, not as a preselected source. Do not add facts. "
-            "For every P1/P2/P3-style point, state the task to perform and produce concrete acceptance_criteria "
-            "that another model can check literally from the evidence and final answer. Acceptance criteria must "
-            "specify completeness, exact artifacts, counts, ordering, URLs, or route fields when the user asks for them. "
+            "For each point, state the task, evidence_needed, and concise acceptance_criteria. Preserve requested "
+            "completeness, exact artifacts, counts, ordering, URLs, or route fields. "
             "If the task requests a list or table, set output_format to list or table and explicitly require every row, "
             "column relationship, and original order to be preserved; never accept an '等/等等' summary as complete. "
-            "When the user asks who founded an organization or project, do not assume there is only one founder: "
-            "make the acceptance criteria enumerate all founders or explicitly state that the source supports only one. "
-            "Keep founder, co-founder, CEO, COO, author, and project originator as distinct roles unless the evidence equates them. "
-            "If the user requests links, each listed paper or project must have its own exact URL; a domain-only citation is incomplete. "
+            "Keep distinct roles distinct, and give each requested paper or project its own exact URL. "
             "Return exactly one JSON object and no explanation. "
             "Use this fixed format: "
             '{"schema_version":"task_plan.v1","goal":"...",'
@@ -418,6 +414,8 @@ class Planner:
                 "missing_point_ids",
                 "next_focus",
                 "page_evidence",
+                "retrieval_delta",
+                "retrieval_ledger",
             )
             if key in value
         }
@@ -502,6 +500,12 @@ class Planner:
             rendered += (
                 "\nController evidence state: the previously selected page did not support the user question. "
                 "Use the observation to decide the next model-owned step. Repeating a fetch or refining the search is allowed and consumes step budget."
+            )
+        if value.get("retrieval_ledger"):
+            rendered += (
+                "\nShared retrieval ledger: the following is progress context from this episode and sibling Forks. "
+                "It is not a controller decision. Use it to avoid needless exact repeats when a better query, URL, "
+                "or unfinished task point is available; repeating is allowed and costs one step."
             )
         return rendered
 

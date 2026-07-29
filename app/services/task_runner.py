@@ -66,6 +66,8 @@ def run_background_analysis(
             "search_action": request.search_action or "",
             "baseline_search_action": request.baseline_search_action or "",
             "retrieval_only": request.retrieval_only,
+            "retrieval_strategy": request.retrieval_strategy or "",
+            "retrieval_fork": request.retrieval_fork,
             "strategy_config": request.strategy_config,
         }
         with task_time_budget(task_id), analysis_slot(task_id):
