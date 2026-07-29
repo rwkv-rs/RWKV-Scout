@@ -1,0 +1,108 @@
+{
+  "schema_version": "test_question_catalog.v1",
+  "purpose": "Review the existing evaluation questions before adding new cases.",
+  "canonical_architecture_cases": [
+    {
+      "id": "core_1_metro_list",
+      "question": "深圳地铁一号线有哪些站点？请按线路顺序列出完整站点，并给出来源链接。",
+      "checks": ["complete ordered list", "long factual list", "source links", "list/table preservation"],
+      "source_files": ["architecture_core_three_single_loop.json", "architecture_core_three_forked.json"]
+    },
+    {
+      "id": "core_2_route_destination",
+      "question": "如何从上海到 RWKV 公司？请先确认公司的准确目的地，再说明适合的公共交通路线，并给出来源链接。",
+      "checks": ["destination disambiguation", "route planning", "multiple facts", "source links"],
+      "source_files": ["architecture_core_three_single_loop.json", "architecture_core_three_forked.json"]
+    },
+    {
+      "id": "core_3_founder_papers_projects",
+      "question": "RWKV 的公司或项目创始人是谁？请区分创始人、联合创始人和项目发起人，并列出相关论文和 GitHub 项目；每篇论文和每个项目都要给出准确链接。",
+      "checks": ["role distinction", "multi-fact evidence", "paper links", "GitHub links"],
+      "source_files": ["architecture_core_three_single_loop.json", "architecture_core_three_forked.json"]
+    }
+  ],
+  "architecture_extension_cases": [
+    {
+      "id": "extension_1_rwkv_version_papers",
+      "question": "RWKV 官方资料列出的 RWKV-4、RWKV-5/6、RWKV-7 论文分别是什么？请列出论文标题、对应版本和准确论文链接。",
+      "checks": ["version mapping", "paper metadata", "one exact URL per paper"]
+    },
+    {
+      "id": "extension_2_rwkv_github_ecosystem",
+      "question": "RWKV 官方 GitHub 生态有哪些核心项目？请列出项目名、用途和每个项目准确的 GitHub 仓库链接。",
+      "checks": ["repository discovery", "project description", "one exact URL per project"]
+    },
+    {
+      "id": "extension_3_shanghai_shenzhen_north",
+      "question": "从上海到深圳北站，公共交通有哪些常见方案？请比较高铁和飞机接驳的差异，并给出来源链接；如果没有足够实时信息，请明确说明。",
+      "checks": ["route alternatives", "comparison", "time-sensitive uncertainty", "source links"]
+    }
+  ],
+  "regression_cases": [
+    {
+      "id": "regression_1_beijing_metro",
+      "question": "北京地铁一号线有哪些站点？"
+    },
+    {
+      "id": "regression_2_guangzhou_shenzhen_rwkv",
+      "question": "如何从广州到深圳的 RWKV 公司，公共交通怎么走？"
+    },
+    {
+      "id": "regression_3_rwkv7_paper",
+      "question": "RWKV-7 的主要论文、作者和官方项目链接是什么？"
+    },
+    {
+      "id": "regression_4_architecture_comparison",
+      "question": "RWKV 是什么架构？它和 Transformer 的主要区别是什么？"
+    },
+    {
+      "id": "regression_5_shenzhen_metro_facts",
+      "question": "深圳地铁一号线何时开通、共有多少站、首末站是什么？"
+    },
+    {
+      "id": "regression_6_official_entries",
+      "question": "RWKV 官方网站、文档入口和代码仓库分别是什么？请给出有正文证据的链接。"
+    }
+  ],
+  "tool_contract_cases": [
+    {
+      "id": "tool_1_crossref",
+      "question": "通过 Crossref 查询 RWKV: Reinventing RNNs for the Transformer Era 这篇论文的 DOI、作者和发表信息",
+      "scope": "Tool/plugin contract test only; not a provider-neutral architecture benchmark.",
+      "source_files": ["manual_real_queries.json", "manual_real_api_focus.json"]
+    },
+    {
+      "id": "tool_2_github_rest",
+      "question": "使用 GitHub REST 查询 BlinkDL/RWKV-LM 仓库的项目链接、默认分支、主要语言和项目简介",
+      "scope": "Tool/plugin contract test only; not a provider-neutral architecture benchmark.",
+      "source_files": ["manual_real_queries.json", "manual_real_queries_step100.json"]
+    },
+    {
+      "id": "tool_3_mediawiki",
+      "question": "使用 MediaWiki/Wikimedia API 查询深圳地铁一号线的站点列表",
+      "scope": "Tool/plugin contract test only; not a provider-neutral architecture benchmark.",
+      "source_files": ["manual_real_queries.json", "manual_real_api_focus.json"]
+    }
+  ],
+  "existing_input_files": [
+    "architecture_core_three_single_loop.json",
+    "architecture_core_three_forked.json",
+    "architecture_core_three_forked_budget4.json",
+    "architecture_comparison_single_loop.json",
+    "architecture_comparison_forked.json",
+    "manual_real_queries.json",
+    "manual_real_queries_generic_web.json",
+    "manual_real_queries_step100.json",
+    "manual_real_regression.json",
+    "manual_real_api_focus.json",
+    "manual_real_followup.json",
+    "manual_real_query_q3_generic_web.json",
+    "manual_real_query_step_control.json"
+  ],
+  "review_notes": [
+    "core_1/core_2/core_3 are the canonical provider-neutral architecture cases.",
+    "tool_contract_cases explicitly name an API and should be evaluated separately.",
+    "The same question appears in several files with different wording or step budgets; keep one canonical case and record variants as metadata.",
+    "New cases should state the expected artifact, completeness requirement, and whether real-time information is required."
+  ]
+}

@@ -12,6 +12,7 @@ app/
     └── workspace_files.py    # 文件、路径和报告读写
 agent/
 ├── orchestrator.py           # 流程编排，不拥有底层文件实现
+├── controlled_retrieval.py   # 仅用于显式受控实验和 retrieval-only 诊断
 ├── state.py                  # 单任务状态与上下文投影
 ├── slm_scheduler.py          # 本地 SLM 批量调度
 ├── planner.py                # 查询/动作路由

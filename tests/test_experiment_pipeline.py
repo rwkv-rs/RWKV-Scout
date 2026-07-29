@@ -445,10 +445,10 @@ class ExperimentPipelineTests(unittest.TestCase):
             with (
                 patch.dict("config.DATA_PIPELINE", {"output_directory": str(output)}, clear=False),
                 patch.dict("config.TRACKING", {"log_dir": str(trace_log), "enable": False}, clear=False),
-                patch("agent.orchestrator.generate_query_candidates", return_value={"queries": ["fixture fact"], "source": "test"}),
-                patch("agent.orchestrator.execute_parallel_candidates", return_value=[("fixture fact", retrieved)]),
+                patch("agent.controlled_retrieval.generate_query_candidates", return_value={"queries": ["fixture fact"], "source": "test"}),
+                patch("agent.controlled_retrieval.execute_parallel_candidates", return_value=[("fixture fact", retrieved)]),
                 patch(
-                    "agent.orchestrator.synthesize_retrieval_answer",
+                    "agent.controlled_retrieval.synthesize_retrieval_answer",
                     return_value={
                         "content": "The fixture fact is 42 [S1].",
                         "mode": "test_model",
@@ -843,11 +843,11 @@ class ExperimentPipelineTests(unittest.TestCase):
                 patch.dict("config.DATA_PIPELINE", {"output_directory": str(output)}, clear=False),
                 patch.dict("config.TRACKING", {"log_dir": str(trace_log), "enable": False}, clear=False),
                 patch(
-                    "agent.orchestrator.generate_query_candidates",
+                    "agent.controlled_retrieval.generate_query_candidates",
                     side_effect=[{"queries": ["bad"], "source": "test"}, {"queries": ["good"], "source": "test"}],
                 ),
-                patch("agent.orchestrator.execute_parallel_candidates", side_effect=[[('bad', bad)], [('good', good)]]),
-                patch("agent.orchestrator.synthesize_retrieval_answer", side_effect=syntheses),
+                patch("agent.controlled_retrieval.execute_parallel_candidates", side_effect=[[('bad', bad)], [('good', good)]]),
+                patch("agent.controlled_retrieval.synthesize_retrieval_answer", side_effect=syntheses),
             ):
                 orchestrator = Orchestrator()
                 orchestrator.planner.create_task_plan = lambda *_args: {
@@ -912,10 +912,10 @@ class ExperimentPipelineTests(unittest.TestCase):
             with (
                 patch.dict("config.DATA_PIPELINE", {"output_directory": str(output)}, clear=False),
                 patch.dict("config.TRACKING", {"log_dir": str(trace_log), "enable": False}, clear=False),
-                patch("agent.orchestrator.generate_query_candidates", return_value={"queries": ["fixture fact"], "source": "test"}),
-                patch("agent.orchestrator.execute_parallel_candidates", return_value=[("fixture fact", retrieved)]),
+                patch("agent.controlled_retrieval.generate_query_candidates", return_value={"queries": ["fixture fact"], "source": "test"}),
+                patch("agent.controlled_retrieval.execute_parallel_candidates", return_value=[("fixture fact", retrieved)]),
                 patch(
-                    "agent.orchestrator.synthesize_retrieval_answer",
+                    "agent.controlled_retrieval.synthesize_retrieval_answer",
                     side_effect=AssertionError("retrieval-only mode must not call synthesis"),
                 ),
             ):
