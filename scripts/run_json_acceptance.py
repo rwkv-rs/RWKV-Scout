@@ -672,7 +672,7 @@ def run(
                 "validation_architecture": (
                     (trace.get("validation_architectures") or [{}])[-1].get("architecture")
                     or case.get("validation_architecture")
-                    or "rwkv_verifier"
+                    or "engineering_validator"
                 ),
                 "status": status,
                 "answer": answer,

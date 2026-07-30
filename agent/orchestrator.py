@@ -81,12 +81,15 @@ class Orchestrator(ControlledRetrievalMixin):
 
     def _validation_architecture(self) -> str:
         """Return the explicitly selected evidence-validation architecture."""
-        value = str(self.state.run_metadata.get("validation_architecture") or "rwkv_verifier").strip().casefold()
+        # The production default is deterministic engineering validation.  The
+        # model verifier remains an explicit experiment-only opt-in; it adds a
+        # model round trip and its control decision is not trusted as fact.
+        value = str(self.state.run_metadata.get("validation_architecture") or "engineering_validator").strip().casefold()
         if value in {"engineering", "engineering_validator", "rules", "deterministic"}:
             return "engineering_validator"
         if value in {"rwkv", "rwkv_verifier", "model", "model_verifier"}:
             return "rwkv_verifier"
-        return "rwkv_verifier"
+        return "engineering_validator"
 
     def _model_execution_context(self) -> str:
         """Return a safe execution summary for the final RWKV call.
