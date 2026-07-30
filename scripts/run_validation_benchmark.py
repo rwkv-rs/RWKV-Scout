@@ -18,7 +18,9 @@ from typing import Any
 SUITES = (
     ("100", "data/evaluation/rwkv_search_100_fixed_20260729.json"),
     ("50", "data/evaluation/rwkv_search_50_fixed_20260729.json"),
-    ("date", "data/evaluation/date_retrieval_fixed_20260729.json"),
+    # The fixed JSON is a prior result file.  Use the UTF-8 JSONL task source
+    # for fresh runs so old answers/traces cannot become accidental input.
+    ("date", "data/evaluation/date_retrieval_tasks_20260729.jsonl"),
 )
 ARCHITECTURES = ("engineering_validator", "rwkv_verifier")
 
