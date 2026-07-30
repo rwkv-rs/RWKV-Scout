@@ -1530,11 +1530,59 @@ class Orchestrator(ControlledRetrievalMixin):
                     termination_reason="duplicate_query_blocked",
                     evidence_rounds=len(rounds),
                 )
+                if rounds and self._validation_architecture() == "rwkv_verifier":
+                    merged, verification = self._verify_retrieval_completion(
+                        user_query,
+                        action,
+                        rounds,
+                        step,
+                    )
+                    if verification.get("requires_replan") and replan_attempts < max_replan_attempts:
+                        replan_attempts += 1
+                        append_task_event(
+                            self.state.task_id,
+                            "task_replan_attempt",
+                            step=step,
+                            phase="RECOVERY",
+                            attempt=replan_attempts,
+                            max_attempts=max_replan_attempts,
+                            reason="evidence_verifier_found_missing_or_conflicting_points",
+                            missing_point_ids=verification.get("missing_point_ids") or [],
+                            conflict_point_ids=verification.get("conflict_point_ids") or [],
+                            next_queries=verification.get("next_queries") or [],
+                            counts_toward_global_steps=False,
+                        )
+                        replanned = self._replan_after_retrieval_failure(
+                            user_query,
+                            merged,
+                            step,
+                            attempt=replan_attempts,
+                            max_attempts=max_replan_attempts,
+                            validation=verification,
+                        )
+                        if replanned:
+                            retrieval_attempted = True
+                            phase = "GENERIC_WEB" if generic_web_mode else "ALL"
+                            continue
+                    elif verification.get("requires_replan"):
+                        append_task_event(
+                            self.state.task_id,
+                            "task_replan_limit_reached",
+                            step=step,
+                            phase="RECOVERY",
+                            attempts=replan_attempts,
+                            max_attempts=max_replan_attempts,
+                            reason="evidence_verifier_still_found_missing_or_conflicting_points",
+                            missing_point_ids=verification.get("missing_point_ids") or [],
+                            conflict_point_ids=verification.get("conflict_point_ids") or [],
+                            transition="final_synthesis",
+                        )
                 # A duplicate is an execution error, not a new observation
                 # that should re-enter the same model loop. Greedy RWKV can
-                # reproduce the same JSON forever; transition directly to
-                # synthesis and let the final model answer from existing
-                # evidence or state that evidence is insufficient.
+                # reproduce the same JSON forever.  Verification may grant a
+                # bounded replan first; after that, transition to synthesis
+                # and let the final model answer from existing evidence or
+                # state that evidence is insufficient.
                 return self._complete_model_tool_loop(
                     user_query,
                     action,
