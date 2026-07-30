@@ -7,6 +7,7 @@ from typing import Any
 
 from config import get_llm_context_length
 from utils.chunker import get_token_count, semantic_chunk_text
+from utils.model_budget import bounded_completion_budget
 from utils.evidence_quality import (
     date_mentions,
     evidence_provenance,
@@ -442,8 +443,12 @@ def _needs_answer_repair(answer: str) -> bool:
 def _final_completion_budget(prompt: str) -> int:
     """Use the remaining model context instead of a fixed 3K final cap."""
 
-    remaining = int(get_llm_context_length()) - get_token_count(prompt) - 256
-    return max(1024, min(8192, remaining))
+    return bounded_completion_budget(
+        prompt,
+        context_limit=get_llm_context_length(),
+        requested_max=8192,
+        safety_margin=256,
+    )
 
 
 def _context_fields(context: dict[str, Any]) -> dict[str, Any]:

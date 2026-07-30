@@ -12,6 +12,7 @@ from typing import Any
 
 from config import get_llm_context_length
 from utils.chunker import get_token_count
+from utils.model_budget import bounded_completion_budget
 from utils.model_events import visible_model_text
 from utils.rwkv_prompt import JSON_CALL_STOP_SUFFIXES, assistant_json_prefix
 
@@ -204,7 +205,12 @@ def verify_evidence(
         base["error"] = "verifier model is not configured"
         return base
     try:
-        budget = max(768, min(2048, int(get_llm_context_length()) - get_token_count(prompt) - 256))
+        budget = bounded_completion_budget(
+            prompt,
+            context_limit=get_llm_context_length(),
+            requested_max=2048,
+            safety_margin=256,
+        )
         if hasattr(llm, "text_completion"):
             try:
                 response = llm.text_completion(prompt, max_tokens=budget, stop=JSON_CALL_STOP_SUFFIXES)

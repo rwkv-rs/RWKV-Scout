@@ -1,7 +1,9 @@
 import unittest
 from types import SimpleNamespace
 
-from agent.retrieval_synthesis import synthesize_retrieval_answer
+from agent.retrieval_synthesis import _final_completion_budget, synthesize_retrieval_answer
+from config import get_llm_context_length
+from utils.chunker import get_token_count
 
 
 class _FakeLLM:
@@ -16,6 +18,15 @@ class _FakeLLM:
 
 
 class RetrievalSynthesisTests(unittest.TestCase):
+    def test_final_budget_never_requests_more_than_remaining_context(self):
+        prompt = "token " * 11265
+        budget = _final_completion_budget(prompt)
+        self.assertGreaterEqual(budget, 1)
+        self.assertLessEqual(
+            get_token_count(prompt) + budget + 256,
+            get_llm_context_length(),
+        )
+
     def test_final_summary_uses_remaining_context_budget_and_acceptance_plan(self):
         llm = _FakeLLM()
         result = synthesize_retrieval_answer(
