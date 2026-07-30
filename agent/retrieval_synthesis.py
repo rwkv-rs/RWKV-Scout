@@ -40,6 +40,15 @@ def _clean_answer(text: str) -> str:
         return ""
     text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
     text = text.replace("</think>", "").strip()
+    # A continuation model may copy the evidence preamble instead of writing
+    # the answer.  Treat that as protocol output so the bounded retry can
+    # regenerate a user-facing response; never expose retrieval data blocks
+    # through the public ``answer`` field.
+    if re.match(
+        r"(?is)^\s*(?:BEGIN\s+EVIDENCE(?:\s+(?:DATA|SOURCE))?|RETRIEVAL\s+EXECUTION\s+SUMMARY|BEGIN\s+EXECUTION\s+RECORD)\b",
+        text,
+    ):
+        return ""
     # A prose continuation must never expose a tool transcript. Returning an
     # empty value lets the bounded retry generate a real user-facing answer.
     if re.match(

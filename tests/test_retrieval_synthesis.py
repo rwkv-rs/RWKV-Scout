@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from agent.retrieval_synthesis import _final_completion_budget, synthesize_retrieval_answer
+from agent.retrieval_synthesis import _clean_answer, _final_completion_budget, synthesize_retrieval_answer
 from config import get_llm_context_length
 from utils.chunker import get_token_count
 
@@ -18,6 +18,16 @@ class _FakeLLM:
 
 
 class RetrievalSynthesisTests(unittest.TestCase):
+    def test_evidence_protocol_is_not_a_user_facing_answer(self):
+        self.assertEqual(
+            _clean_answer(
+                "BEGIN EVIDENCE SOURCE S1\n"
+                "URL (citation metadata only): https://example.com\n"
+                "EVIDENCE BODY\nSome source text"
+            ),
+            "",
+        )
+
     def test_final_budget_never_requests_more_than_remaining_context(self):
         prompt = "token " * 11265
         budget = _final_completion_budget(prompt)
