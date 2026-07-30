@@ -9,9 +9,11 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import signal
 import statistics
 import re
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,13 +25,37 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent.orchestrator import Orchestrator
+from config import get_analysis_timeout_seconds
 from utils.token_tracker import current_task_id
-from utils.task_events import get_task_events
+from utils.task_events import append_task_event, get_task_events
 
 
 def _safe_id(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "case"))
     return cleaned.strip("._") or "case"
+
+
+@contextmanager
+def _case_timeout(seconds: float):
+    """Bound one case while retaining any partial task events."""
+    if seconds <= 0 or not hasattr(signal, "setitimer"):
+        yield
+        return
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+
+    def _raise_timeout(_signum, _frame):
+        raise TimeoutError(f"case exceeded timeout of {seconds:.1f} seconds")
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, float(seconds))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer and previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
 def _load_cases(path: Path) -> list[dict[str, Any]]:
@@ -539,9 +565,15 @@ def run(
     input_path: Path,
     output_path: Path,
     default_validation_architecture: str | None = None,
+    case_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     cases = _load_cases(input_path)
     started_at = datetime.now().isoformat(timespec="seconds")
+    case_timeout = (
+        get_analysis_timeout_seconds()
+        if case_timeout_seconds is None
+        else max(0.0, float(case_timeout_seconds))
+    )
     rows = []
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -554,6 +586,7 @@ def run(
             "finished_at": datetime.now().isoformat(timespec="seconds") if finished else None,
             "completed_cases": len(rows),
             "total_cases": len(cases),
+            "case_timeout_seconds": case_timeout,
             "cases": rows,
             "aggregate_trace_summary": _aggregate_trace_summaries(rows),
         }
@@ -587,8 +620,19 @@ def run(
         query = str(case["query"])
         task_token = current_task_id.set(task_id)
         try:
-            answer = Orchestrator().run(query, task_id=task_id, run_metadata=metadata)
+            with _case_timeout(case_timeout):
+                answer = Orchestrator().run(query, task_id=task_id, run_metadata=metadata)
             error = ""
+        except TimeoutError as exc:
+            append_task_event(
+                task_id,
+                "case_timeout",
+                phase="RUNTIME",
+                error=str(exc),
+                timeout_seconds=case_timeout,
+            )
+            answer = ""
+            error = f"TimeoutError: {exc}"
         except Exception as exc:
             answer = ""
             error = f"{type(exc).__name__}: {exc}"
@@ -643,11 +687,18 @@ def main() -> None:
         default=None,
         help="Override the evidence-validation architecture for every case.",
     )
+    parser.add_argument(
+        "--case-timeout-seconds",
+        type=float,
+        default=None,
+        help="Hard wall-clock limit per case; defaults to RUNTIME.analysis_timeout_seconds.",
+    )
     args = parser.parse_args()
     report = run(
         Path(args.input),
         Path(args.output),
         default_validation_architecture=args.validation_architecture,
+        case_timeout_seconds=args.case_timeout_seconds,
     )
     # Keep stdout ASCII-safe on Windows; the full UTF-8 report is the file.
     print(json.dumps({"output": str(args.output), "case_count": len(report["cases"])}, ensure_ascii=True))
