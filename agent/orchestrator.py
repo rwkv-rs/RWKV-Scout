@@ -470,8 +470,6 @@ class Orchestrator(ControlledRetrievalMixin):
                 "missing_point_ids",
                 "conflict_point_ids",
                 "next_queries",
-                "reason",
-                "model_confidence",
                 "is_truth_judgement",
             )
         }

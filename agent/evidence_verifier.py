@@ -84,7 +84,6 @@ def _normalize_result(
                 "id": point_id,
                 "status": status,
                 "evidence": sorted(set(refs)),
-                "reason": str(item.get("reason") or item.get("explanation") or "")[:1200],
                 "missing": [str(value) for value in item.get("missing") or item.get("missing_information") or [] if str(value).strip()][:12],
                 "next_queries": [str(value) for value in item.get("next_queries") or item.get("next_searches") or [] if str(value).strip()][:8],
             }
@@ -100,7 +99,6 @@ def _normalize_result(
                 "id": point_id,
                 "status": status,
                 "evidence": [],
-                "reason": "The verifier did not return a complete row for this task point.",
                 "missing": ["direct evidence for this task point"],
                 "next_queries": [],
             }
@@ -140,8 +138,6 @@ def _normalize_result(
         "missing_point_ids": missing_ids,
         "conflict_point_ids": conflict_ids,
         "next_queries": next_queries,
-        "reason": str(raw.get("reason") or raw.get("explanation") or "")[:2000],
-        "model_confidence": raw.get("confidence"),
         "is_truth_judgement": False,
     }
 
@@ -163,8 +159,8 @@ def build_verifier_prompt(
         "relationships. Return exactly one JSON object and no explanation with this schema:\n"
         '{"schema_version":"evidence_verification.v1","status":"supported|needs_more_evidence|conflict|insufficient",'
         '"completion_ready":true,"points":[{"id":"P1","status":"supported|missing|conflict|unclear",'
-        '"evidence":["S1"],"reason":"...","missing":["..."],"next_queries":["..."]}],'
-        '"missing_point_ids":["P1"],"next_queries":["..."],"reason":"..."}.\n\n'
+        '"evidence":["S1"],"missing":["..."],"next_queries":["..."]}],'
+        '"missing_point_ids":["P1"],"next_queries":["..."]}.\n\n'
         f"User question: {query}\n"
         f"Task plan (routing metadata): {plan}\n"
         f"Mechanical validation report (routing metadata): {report}\n"
