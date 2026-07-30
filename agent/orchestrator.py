@@ -633,6 +633,22 @@ class Orchestrator(ControlledRetrievalMixin):
                 step,
                 termination_reason=termination_reason,
             )
+        # Every terminal path must pass through the selected evidence
+        # architecture before synthesis.  The ordinary ``finish_task`` path
+        # performs verification earlier so it can replan; duplicate-query,
+        # parse-error, and max-step paths can arrive here without that earlier
+        # hook.  Keep this as a one-call fallback rather than allowing those
+        # paths to silently skip the model verifier.
+        if (
+            self._validation_architecture() == "rwkv_verifier"
+            and not self._last_evidence_verification
+        ):
+            self._verify_retrieval_completion(
+                user_query,
+                action,
+                rounds,
+                step,
+            )
         execution_context = self._model_execution_context()
         if rounds:
             merged = merge_retrieval_results(
