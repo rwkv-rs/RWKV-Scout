@@ -1,0 +1,69 @@
+{
+  "schema_version": "validation_comparison_manifest.v1",
+  "status": "running",
+  "created_at": "2026-07-30T00:00:00",
+  "description": "Same-suite comparison of the current engineering validator and the RWKV control-only evidence verifier. Each batch keeps its complete trace.events.",
+  "suites": {
+    "100": {
+      "input": "data/evaluation/rwkv_search_100_fixed_20260729.json",
+      "case_count": 100
+    },
+    "50": {
+      "input": "data/evaluation/rwkv_search_50_fixed_20260729.json",
+      "case_count": 50
+    },
+    "date": {
+      "canonical_input": "data/evaluation/date_retrieval_fixed_20260729.json",
+      "verifier_input": "data/evaluation/date_retrieval_tasks_20260729.jsonl",
+      "case_count": 12,
+      "case_id_query_sha256": "9e3b6d6d1af88ea492e3902024ced7badb04164af695cf2ce56626d1114efd05",
+      "inputs_equivalent": true
+    }
+  },
+  "batches": [
+    {
+      "batch_id": "current_engineering_validator_100",
+      "architecture": "engineering_validator",
+      "suite": "100",
+      "input": "data/evaluation/rwkv_search_100_fixed_20260729.json",
+      "output": "data/evaluation/parallel_engineering_validator_100_20260730.json"
+    },
+    {
+      "batch_id": "current_engineering_validator_50",
+      "architecture": "engineering_validator",
+      "suite": "50",
+      "input": "data/evaluation/rwkv_search_50_fixed_20260729.json",
+      "output": "data/evaluation/parallel_engineering_validator_50_20260730.json"
+    },
+    {
+      "batch_id": "current_engineering_validator_date",
+      "architecture": "engineering_validator",
+      "suite": "date",
+      "input": "data/evaluation/date_retrieval_fixed_20260729.json",
+      "output": "data/evaluation/parallel_engineering_validator_date_20260730.json"
+    },
+    {
+      "batch_id": "current_rwkv_verifier_100",
+      "architecture": "rwkv_verifier",
+      "suite": "100",
+      "input": "data/evaluation/rwkv_search_100_fixed_20260729.json",
+      "output": "data/evaluation/parallel_rwkv_verifier_100_20260730.json"
+    },
+    {
+      "batch_id": "current_rwkv_verifier_50",
+      "architecture": "rwkv_verifier",
+      "suite": "50",
+      "input": "data/evaluation/rwkv_search_50_fixed_20260729.json",
+      "output": "data/evaluation/parallel_rwkv_verifier_50_20260730.json"
+    },
+    {
+      "batch_id": "current_rwkv_verifier_date",
+      "architecture": "rwkv_verifier",
+      "suite": "date",
+      "input": "data/evaluation/date_retrieval_tasks_20260729.jsonl",
+      "canonical_input": "data/evaluation/date_retrieval_fixed_20260729.json",
+      "input_equivalence_sha256": "9e3b6d6d1af88ea492e3902024ced7badb04164af695cf2ce56626d1114efd05",
+      "output": "data/evaluation/parallel_rwkv_verifier_date_20260730.json"
+    }
+  ]
+}
