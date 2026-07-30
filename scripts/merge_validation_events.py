@@ -32,6 +32,26 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _enrich_case(case: Any) -> Any:
+    """Add missing failure metadata without changing the raw event trace."""
+    if not isinstance(case, dict) or case.get("status") == "completed":
+        return case
+    if case.get("failure_reason"):
+        return case
+    trace = case.get("trace") if isinstance(case.get("trace"), dict) else {}
+    events = [event for event in trace.get("events") or [] if isinstance(event, dict)]
+    final = trace.get("final") if isinstance(trace.get("final"), dict) else {}
+    final_status = str(case.get("final_status") or final.get("status") or "missing")
+    last_event_type = str(events[-1].get("type") or "missing") if events else "missing"
+    enriched = dict(case)
+    enriched["failure_reason"] = str(case.get("error") or (
+        "orchestrator ended without a completed final event"
+        f" (final_status={final_status}, last_event_type={last_event_type})"
+    ))
+    enriched["failure_reason_derived"] = True
+    return enriched
+
+
 def merge(manifest_path: Path, output_path: Path) -> dict[str, Any]:
     manifest_path = manifest_path.resolve()
     manifest = _read_json(manifest_path)
@@ -67,7 +87,8 @@ def merge(manifest_path: Path, output_path: Path) -> dict[str, Any]:
             batches.append(record)
             continue
         source = _read_json(output)
-        cases = source.get("cases") if isinstance(source.get("cases"), list) else []
+        raw_cases = source.get("cases") if isinstance(source.get("cases"), list) else []
+        cases = [_enrich_case(case) for case in raw_cases]
         record.update(
             {
                 "status": source.get("status") or spec.get("status") or "unknown",
