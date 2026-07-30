@@ -94,6 +94,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
     evidence = []
     plans = []
     strategy_selections = []
+    validation_architectures = []
     judgements = []
     contexts = []
     validations = []
@@ -256,6 +257,13 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "override": bool(event.get("override")),
                 }
             )
+        elif event_type == "validation_architecture_selected":
+            validation_architectures.append(
+                {
+                    "architecture": event.get("architecture") or "",
+                    "verifier_message_contract": event.get("verifier_message_contract") or "",
+                }
+            )
         elif event_type == "model_tool_decision":
             action = str(event.get("action") or "")
             phase = str(event.get("phase") or "")
@@ -415,6 +423,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
         "event_count": len(events),
         "plans": plans,
         "strategy_selections": strategy_selections,
+        "validation_architectures": validation_architectures,
         "decisions": decisions,
         "tool_calls": tool_calls,
         "tool_results": tool_results,
@@ -433,6 +442,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
         },
         "web_search_stages": web_search_stages,
         "web_search_chunks": web_search_chunks,
+        "events": events,
         "final": finals[-1] if finals else None,
         "stats": {
             "action_counts": dict(action_counts),
@@ -452,6 +462,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             "step_limit_count": len(step_limits),
             "validation_event_count": len(validations),
             "verification_event_count": len(verifications),
+            "event_type_counts": dict(collections.Counter(str(event.get("type") or "unknown") for event in events)),
             "ledger_event_count": len(ledger_events),
             "ledger_total_searches": int(ledger_snapshot.get("total_searches") or 0),
             "ledger_unique_queries": int(ledger_snapshot.get("unique_queries") or 0),
@@ -524,7 +535,11 @@ def _aggregate_trace_summaries(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def run(input_path: Path, output_path: Path) -> dict[str, Any]:
+def run(
+    input_path: Path,
+    output_path: Path,
+    default_validation_architecture: str | None = None,
+) -> dict[str, Any]:
     cases = _load_cases(input_path)
     started_at = datetime.now().isoformat(timespec="seconds")
     rows = []
@@ -557,6 +572,7 @@ def run(input_path: Path, output_path: Path) -> dict[str, Any]:
             "generic_web_search_only",
             "retrieval_fork",
             "retrieval_strategy",
+            "validation_architecture",
             "retrieval_branch_width",
             "architecture",
         ):
@@ -566,6 +582,8 @@ def run(input_path: Path, output_path: Path) -> dict[str, Any]:
                     if key in {"generic_web_search_only", "retrieval_fork"}
                     else case[key]
                 )
+        if default_validation_architecture:
+            metadata["validation_architecture"] = default_validation_architecture
         query = str(case["query"])
         task_token = current_task_id.set(task_id)
         try:
@@ -588,6 +606,11 @@ def run(input_path: Path, output_path: Path) -> dict[str, Any]:
                     (trace.get("strategy_selections") or [{}])[-1].get("strategy")
                     or case.get("architecture")
                     or "single_loop"
+                ),
+                "validation_architecture": (
+                    (trace.get("validation_architectures") or [{}])[-1].get("architecture")
+                    or case.get("validation_architecture")
+                    or "rwkv_verifier"
                 ),
                 "status": status,
                 "answer": answer,
@@ -614,8 +637,18 @@ def main() -> None:
         default="data/evaluation/manual_real_results.json",
         help="UTF-8 JSON output file",
     )
+    parser.add_argument(
+        "--validation-architecture",
+        choices=("engineering_validator", "rwkv_verifier"),
+        default=None,
+        help="Override the evidence-validation architecture for every case.",
+    )
     args = parser.parse_args()
-    report = run(Path(args.input), Path(args.output))
+    report = run(
+        Path(args.input),
+        Path(args.output),
+        default_validation_architecture=args.validation_architecture,
+    )
     # Keep stdout ASCII-safe on Windows; the full UTF-8 report is the file.
     print(json.dumps({"output": str(args.output), "case_count": len(report["cases"])}, ensure_ascii=True))
 

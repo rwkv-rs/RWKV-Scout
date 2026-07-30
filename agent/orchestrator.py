@@ -79,6 +79,15 @@ class Orchestrator(ControlledRetrievalMixin):
         context["retrieval_ledger"] = self._retrieval_ledger.observation()
         return context
 
+    def _validation_architecture(self) -> str:
+        """Return the explicitly selected evidence-validation architecture."""
+        value = str(self.state.run_metadata.get("validation_architecture") or "rwkv_verifier").strip().casefold()
+        if value in {"engineering", "engineering_validator", "rules", "deterministic"}:
+            return "engineering_validator"
+        if value in {"rwkv", "rwkv_verifier", "model", "model_verifier"}:
+            return "rwkv_verifier"
+        return "rwkv_verifier"
+
     def _model_execution_context(self) -> str:
         """Return a safe execution summary for the final RWKV call.
 
@@ -1322,52 +1331,61 @@ class Orchestrator(ControlledRetrievalMixin):
                     phase = "GENERIC_WEB" if generic_web_mode else "ALL"
                     continue
                 if rounds:
-                    merged, verification = self._verify_retrieval_completion(
-                        user_query,
-                        last_action,
-                        rounds,
-                        step,
-                    )
-                    if verification.get("requires_replan") and replan_attempts < max_replan_attempts:
-                        replan_attempts += 1
-                        append_task_event(
-                            self.state.task_id,
-                            "task_replan_attempt",
-                            step=step,
-                            phase="RECOVERY",
-                            attempt=replan_attempts,
-                            max_attempts=max_replan_attempts,
-                            reason="evidence_verifier_found_missing_or_conflicting_points",
-                            missing_point_ids=verification.get("missing_point_ids") or [],
-                            conflict_point_ids=verification.get("conflict_point_ids") or [],
-                            next_queries=verification.get("next_queries") or [],
-                            counts_toward_global_steps=False,
-                        )
-                        replanned = self._replan_after_retrieval_failure(
+                    if self._validation_architecture() == "rwkv_verifier":
+                        merged, verification = self._verify_retrieval_completion(
                             user_query,
-                            merged,
+                            last_action,
+                            rounds,
                             step,
-                            attempt=replan_attempts,
-                            max_attempts=max_replan_attempts,
-                            validation=verification,
                         )
-                        if replanned:
-                            retrieval_attempted = True
-                            phase = "GENERIC_WEB" if generic_web_mode else "ALL"
-                            continue
-                    elif verification.get("requires_replan"):
-                        append_task_event(
-                            self.state.task_id,
-                            "task_replan_limit_reached",
-                            step=step,
-                            phase="RECOVERY",
-                            attempts=replan_attempts,
-                            max_attempts=max_replan_attempts,
-                            reason="evidence_verifier_still_found_missing_or_conflicting_points",
-                            missing_point_ids=verification.get("missing_point_ids") or [],
-                            conflict_point_ids=verification.get("conflict_point_ids") or [],
-                            transition="final_synthesis",
+                        if verification.get("requires_replan") and replan_attempts < max_replan_attempts:
+                            replan_attempts += 1
+                            append_task_event(
+                                self.state.task_id,
+                                "task_replan_attempt",
+                                step=step,
+                                phase="RECOVERY",
+                                attempt=replan_attempts,
+                                max_attempts=max_replan_attempts,
+                                reason="evidence_verifier_found_missing_or_conflicting_points",
+                                missing_point_ids=verification.get("missing_point_ids") or [],
+                                conflict_point_ids=verification.get("conflict_point_ids") or [],
+                                next_queries=verification.get("next_queries") or [],
+                                counts_toward_global_steps=False,
+                            )
+                            replanned = self._replan_after_retrieval_failure(
+                                user_query,
+                                merged,
+                                step,
+                                attempt=replan_attempts,
+                                max_attempts=max_replan_attempts,
+                                validation=verification,
+                            )
+                            if replanned:
+                                retrieval_attempted = True
+                                phase = "GENERIC_WEB" if generic_web_mode else "ALL"
+                                continue
+                        elif verification.get("requires_replan"):
+                            append_task_event(
+                                self.state.task_id,
+                                "task_replan_limit_reached",
+                                step=step,
+                                phase="RECOVERY",
+                                attempts=replan_attempts,
+                                max_attempts=max_replan_attempts,
+                                reason="evidence_verifier_still_found_missing_or_conflicting_points",
+                                missing_point_ids=verification.get("missing_point_ids") or [],
+                                conflict_point_ids=verification.get("conflict_point_ids") or [],
+                                transition="final_synthesis",
+                            )
+                    else:
+                        merged = merge_retrieval_results(
+                            user_query,
+                            last_action,
+                            rounds,
+                            ranking_strategy=self._strategy()["ranking_strategy"],
                         )
+                        self._last_evidence_verification = {}
                     answer = self._complete_model_tool_loop(
                         user_query,
                         last_action,
@@ -1867,6 +1885,16 @@ class Orchestrator(ControlledRetrievalMixin):
             },
             prompt_version=(run_metadata or {}).get("prompt_version", "unversioned"),
             run_metadata=run_metadata or {},
+        )
+        append_task_event(
+            self.state.task_id,
+            "validation_architecture_selected",
+            phase="ROUTING",
+            architecture=self._validation_architecture(),
+            verifier_message_contract=(
+                "control-only: task-point status, evidence refs, missing fields, conflicts, and next queries; "
+                "never an answer or new factual claim"
+            ),
         )
         
         debug_dir = DATA_PIPELINE.get("debug_directory", "./data/debug_slm")
