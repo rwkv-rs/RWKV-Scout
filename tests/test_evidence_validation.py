@@ -1,5 +1,5 @@
 from utils.evidence_validation import assess_answer_alignment, build_evidence_validation, source_quality
-from agent.retrieval_synthesis import build_evidence_context
+from agent.retrieval_synthesis import build_evidence_context, _verification_prompt
 from agent.evidence_verifier import verify_evidence
 
 
@@ -136,3 +136,30 @@ def test_mechanical_missing_boundary_overrides_verifier_claim_of_completion():
     assert result["completion_ready"] is False
     assert result["requires_replan"] is True
     assert result["missing_point_ids"] == ["P1"]
+
+
+def test_final_model_receives_only_verifier_control_fields():
+    prompt = _verification_prompt(
+        {
+            "status": "needs_more_evidence",
+            "completion_ready": False,
+            "requires_replan": True,
+            "points": [
+                {
+                    "id": "P1",
+                    "status": "missing",
+                    "evidence": [],
+                    "missing": ["the verifier's free-form factual detail"],
+                    "next_queries": ["a verifier-generated routing query"],
+                }
+            ],
+            "missing_point_ids": ["P1"],
+            "conflict_point_ids": [],
+            "next_queries": ["another verifier-generated routing query"],
+        }
+    )
+
+    assert "P1" in prompt
+    assert "status=missing" in prompt
+    assert "the verifier's free-form factual detail" not in prompt
+    assert "verifier-generated routing query" not in prompt

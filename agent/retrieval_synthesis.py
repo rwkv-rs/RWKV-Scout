@@ -501,17 +501,19 @@ def _verification_prompt(verification: dict[str, Any] | None) -> str:
         if not isinstance(item, dict):
             continue
         rows.append(
-            f"{item.get('id')}: status={item.get('status')}; evidence={','.join(item.get('evidence') or []) or 'none'}; "
-            f"missing={','.join(item.get('missing') or []) or 'none'}"
+            f"{item.get('id')}: status={item.get('status')}; "
+            f"evidence={','.join(item.get('evidence') or []) or 'none'}"
         )
     return (
-        "BEGIN INDEPENDENT VERIFIER RESULT (control metadata only; never factual evidence)\n"
+        "BEGIN INDEPENDENT VERIFIER RESULT (strict control metadata only; never factual evidence)\n"
         f"status={verification.get('status')}; completion_ready={verification.get('completion_ready')}; "
         f"requires_replan={verification.get('requires_replan')}\n"
         f"Task-point decisions: {' | '.join(rows) or 'none'}\n"
         f"Missing points: {','.join(verification.get('missing_point_ids') or []) or 'none'}\n"
-        f"Verifier next queries: {' | '.join(verification.get('next_queries') or []) or 'none'}\n"
-        "Treat this result as an audit signal. Re-check every claim against EVIDENCE BODY and do not copy it as a fact.\n"
+        f"Conflicting points: {','.join(verification.get('conflict_point_ids') or []) or 'none'}\n"
+        "Only status, task-point IDs and S# references are exposed here. The verifier's explanations, "
+        "missing-field prose and next-query text are intentionally withheld. Re-check every claim "
+        "against EVIDENCE BODY and do not copy this control signal as a fact.\n"
         "END INDEPENDENT VERIFIER RESULT\n"
     )
 def _build_answer_repair_prompt(query: str, evidence: str, draft: str) -> str:
