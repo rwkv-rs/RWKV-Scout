@@ -28,3 +28,12 @@ evidence page → page_evidence chunks (默认 2048 tokens) → parallel candida
 网络请求统一经过 `utils/network_fetch.py`。WSL 会自动读取 Windows 的代理设置，也可以用 `RWKV_ECRA_HTTP_PROXY`、`RWKV_ECRA_HTTPS_PROXY` 显式覆盖；任何 Key 都只从环境变量读取，不写入仓库。
 
 真实回归输入见 `data/evaluation/manual_real_queries.json`，最终结果见 `data/evaluation/manual_real_results_api_six_final.json`。完整的逐阶段事件仍保存在对应任务的 `data/output/<task_id>/events.jsonl` 中。
+## Model-facing contract
+
+The real-time RWKV loop exposes one retrieval capability: `web_search(query)`.
+`finish_task` is a terminal control action, not a retrieval provider. Tavily,
+keyless Bing/HTML search, GitHub REST, Crossref, MediaWiki, URL fetching,
+Markdown conversion, chunking and parallel-candidate extraction are internal
+adapters executed by the bounded `web_search` transaction. They remain
+registered for backend compatibility and direct tests, but they are not added
+to the Planner's model-visible catalog.

@@ -9,6 +9,8 @@ from agent.page_evidence import (
     parse_chunk_candidate,
 )
 from tools.web_search_keyless import search_web_keyless
+from tools.web_search_generic import _merge_candidates
+from utils.network_fetch import NetworkFetchError, fetch_text
 
 
 class _FakeLLM:
@@ -58,11 +60,29 @@ class PageEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(len(llm.prompts), evidence["chunk_count"])
         self.assertTrue(all("网页正文片段" in prompt for prompt, _ in llm.prompts))
-        self.assertTrue(all(max_tokens == 8192 for _, max_tokens in llm.prompts))
+        self.assertTrue(all(max_tokens >= 384 for _, max_tokens in llm.prompts))
         self.assertGreaterEqual(len(evidence["candidates"]), 1)
         self.assertEqual(evidence["parallel_candidate"]["strategy"], "one-RWKV-call-per-chunk")
         self.assertEqual(evidence["parallel_candidate"]["completed_calls"], evidence["chunk_count"])
         self.assertNotIn("第79段", evidence["compact_facts"])
+
+    def test_short_cleaned_page_stays_single_pass(self):
+        page = "\n".join(f"事实{i}: 深圳地铁一号线站点信息。" for i in range(160))
+        from utils.chunker import get_token_count
+
+        self.assertLessEqual(get_token_count(page), 7000)
+        chunks = build_page_chunks(page)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["token_count"], get_token_count(page))
+
+    def test_long_cleaned_page_uses_parallel_chunks(self):
+        page = "\n".join(f"事实{i}: 深圳地铁一号线站点信息。" for i in range(2600))
+        from utils.chunker import get_token_count
+
+        self.assertGreater(get_token_count(page), 7000)
+        chunks = build_page_chunks(page)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(item["token_count"] <= 4096 for item in chunks))
 
     def test_plain_candidate_is_not_allowed_to_be_a_tool_call(self):
         candidate = parse_chunk_candidate(
@@ -95,6 +115,26 @@ class PageEvidenceTests(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["results"][0]["page_excerpt"], "")
         self.assertEqual(result["results"][0]["url"], "https://example.com/a")
+
+    def test_pdf_urls_are_not_sent_to_html_evidence_pipeline(self):
+        with self.assertRaises(NetworkFetchError):
+            fetch_text("https://example.com/archive/trustees.pdf")
+
+    def test_generic_search_prefers_html_over_pdf_candidates(self):
+        candidates = _merge_candidates(
+            "VLDB Endowment Board of Directors 2022",
+            [
+                {
+                    "provider": "test",
+                    "results": [
+                        {"title": "old trustees PDF", "url": "https://vldb.org/old.pdf", "snippet": "trustees"},
+                        {"title": "current trustees", "url": "https://vldb.org/trustees.html", "snippet": "Board of Directors"},
+                    ],
+                }
+            ],
+            limit=2,
+        )
+        self.assertEqual(candidates[0]["url"], "https://vldb.org/trustees.html")
 
 
 if __name__ == "__main__":

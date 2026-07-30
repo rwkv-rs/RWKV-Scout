@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from config import get_search_api_key
+from config import get_search_api_keys
 from tools.registry import ToolRegistry
 from utils.network_fetch import create_network_session
 
@@ -42,8 +42,8 @@ def search_web_tavily(
     if not query:
         return json.dumps({"status": "error", "message": "query is empty", "results": []}, ensure_ascii=False)
 
-    api_key = get_search_api_key("tavily")
-    if not api_key:
+    api_keys = get_search_api_keys("tavily")
+    if not api_keys:
         return json.dumps(
             {
                 "status": "error",
@@ -55,51 +55,70 @@ def search_web_tavily(
             ensure_ascii=False,
         )
 
-    try:
-        normalized_depth = str(search_depth or "advanced").strip().lower()
-        if normalized_depth not in {"basic", "advanced"}:
-            normalized_depth = "advanced"
-        normalized_topic = str(topic or "general").strip().lower()
-        if normalized_topic not in {"general", "news", "finance"}:
-            normalized_topic = "general"
-        normalized_time_range = str(time_range or "").strip().lower()
-        if normalized_time_range not in {"day", "week", "month", "year"}:
-            normalized_time_range = ""
-        params: dict[str, Any] = {
-            "query": query,
-            "search_depth": normalized_depth,
-            "max_results": max(1, min(int(max_results or 8), 10)),
-            "include_answer": False,
-            "include_raw_content": False,
-            "include_images": False,
-            "topic": normalized_topic,
-        }
-        if normalized_time_range:
-            params["time_range"] = normalized_time_range
-        # The desktop Windows process may inherit a proxy that aborts HTTPS
-        # connections to api.tavily.com. Use a direct session, like the local
-        # RWKV bridge client does, and keep the key in the Authorization header.
-        session = create_network_session(
-            {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            }
-        )
-        response = session.post(
-            "https://api.tavily.com/search",
-            json=params,
-            timeout=(15, 45),
-        )
-        response.raise_for_status()
-        payload = response.json() or {}
-    except Exception as exc:
+    normalized_depth = str(search_depth or "advanced").strip().lower()
+    if normalized_depth not in {"basic", "advanced"}:
+        normalized_depth = "advanced"
+    normalized_topic = str(topic or "general").strip().lower()
+    if normalized_topic not in {"general", "news", "finance"}:
+        normalized_topic = "general"
+    normalized_time_range = str(time_range or "").strip().lower()
+    if normalized_time_range not in {"day", "week", "month", "year"}:
+        normalized_time_range = ""
+    params: dict[str, Any] = {
+        "query": query,
+        "search_depth": normalized_depth,
+        "max_results": max(1, min(int(max_results or 8), 10)),
+        "include_answer": False,
+        "include_raw_content": False,
+        "include_images": False,
+        "topic": normalized_topic,
+    }
+    if normalized_time_range:
+        params["time_range"] = normalized_time_range
+
+    payload: dict[str, Any] | None = None
+    provider_errors: list[str] = []
+    for api_key in api_keys:
+        try:
+            # The desktop Windows process may inherit a proxy that aborts HTTPS
+            # connections to api.tavily.com. Use a direct session, like the
+            # local RWKV bridge client does, and keep the key in the header.
+            session = create_network_session(
+                {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                }
+            )
+            response = session.post(
+                "https://api.tavily.com/search",
+                json=params,
+                timeout=(15, 45),
+            )
+            response.raise_for_status()
+            payload = response.json() or {}
+            break
+        except Exception as exc:
+            response_error = getattr(exc, "response", None)
+            response_body = ""
+            if response_error is not None:
+                try:
+                    response_body = str(response_error.text or "").strip()[:300]
+                except Exception:
+                    response_body = ""
+            detail = f"{type(exc).__name__}: {exc}"
+            if response_body:
+                detail = f"{detail}; response_body={response_body}"
+            provider_errors.append(detail[:800])
+
+    if payload is None:
         return json.dumps(
             {
                 "status": "error",
                 "provider": "Tavily API",
                 "query": query,
                 "results": [],
-                "provider_errors": [f"{type(exc).__name__}: {exc}"[:500]],
+                "provider_attempts": len(api_keys),
+                "provider_errors": provider_errors,
             },
             ensure_ascii=False,
         )
@@ -141,7 +160,8 @@ def search_web_tavily(
                 }
                 for index, row in enumerate(rows, start=1)
             ],
-            "provider_errors": [],
+            "provider_attempts": len(provider_errors) + 1,
+            "provider_errors": provider_errors,
             "evidence_policy": "search results are discovery metadata; fetch one selected URL for page evidence",
         },
         ensure_ascii=False,

@@ -10,17 +10,19 @@ is complete.
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import re
 from datetime import datetime
 from typing import Any
-
 from agent.page_evidence import extract_single_page_evidence
 from clients.llm_client import LLMClient
+from config import DATA_PIPELINE, get_llm_context_length
 from tools.registry import ToolRegistry
 from tools.web_search_keyless import _is_search_result_url, search_web_keyless
 from tools.web_search_tavily import search_web_tavily
 from utils.task_events import append_task_event
+from utils.evidence_quality import MIN_PAGE_BODY_CHARS, has_substantive_evidence
 from utils.web_retrieval import candidate_score, normalize_url
 
 
@@ -137,6 +139,17 @@ def _compact_page(
 
     page = pages[0]
     url = str(page.get("url") or candidate["url"])
+    page_text = str(page.get("page_excerpt") or page.get("content") or "").strip()
+    if len(page_text) < MIN_PAGE_BODY_CHARS:
+        return None, {
+            "url": url,
+            "title": str(page.get("title") or candidate.get("title") or url),
+            "status": "no_evidence",
+            "page_chars": len(page_text),
+            "chunk_count": 0,
+            "candidate_count": 0,
+            "errors": ["cleaned page body is below the substantive evidence threshold"],
+        }
 
     def on_chunk(*, chunk: dict[str, Any], prompt: str, candidate: dict[str, Any], task_id: str) -> None:
         append_task_event(
@@ -163,7 +176,7 @@ def _compact_page(
             "status": "error",
             "url": url,
             "title": page.get("title") or url,
-            "page_chars": len(str(page.get("page_excerpt") or page.get("content") or "")),
+            "page_chars": len(page_text),
             "chunk_count": 0,
             "candidates": [],
             "compact_facts": "",
@@ -171,6 +184,7 @@ def _compact_page(
         }
 
     compact_facts = str(evidence.get("compact_facts") or "").strip()
+    source_excerpt = str(evidence.get("source_excerpt") or page_text[:14000]).strip()
     page_evidence = {
         "url": url,
         "title": str(page.get("title") or candidate.get("title") or url),
@@ -182,23 +196,48 @@ def _compact_page(
         "parallel_candidate": evidence.get("parallel_candidate") or {},
         "errors": evidence.get("errors") or [],
     }
-    if not compact_facts:
+    if not source_excerpt:
         return None, page_evidence
+
+    if not compact_facts:
+        page_evidence["status"] = "ok"
+        page_evidence["evidence_origin"] = "fetched_page_body"
+        page_evidence["model_extraction_status"] = "no_evidence"
+    else:
+        page_evidence["evidence_origin"] = "fetched_page_body_with_model_locator"
+        page_evidence["model_extraction_status"] = "ok"
 
     record = {
         "title": page_evidence["title"],
         "url": url,
         "snippet": str(candidate.get("snippet") or "")[:800],
         "source": str(candidate.get("source") or "web"),
-        "content": compact_facts[:14000],
-        "page_excerpt": compact_facts[:14000],
+        "candidate_score": candidate.get("candidate_score", 0.0),
+        "content": source_excerpt[:14000],
+        "page_excerpt": source_excerpt[:14000],
+        "source_excerpt": source_excerpt[:14000],
+        "model_extracted_facts": compact_facts[:14000],
         "untrusted_content": True,
+        "evidence_origin": "fetched_page_body",
+        "evidence_kind": "page_body",
+        "evidence_boundary": "page_body_only",
+        "body_verified": True,
+        "content_sha256": hashlib.sha256(source_excerpt[:14000].encode("utf-8")).hexdigest(),
+        "source_locator": {
+            "type": "page_excerpt",
+            "char_start": 0,
+            "char_end": len(source_excerpt[:14000]),
+        },
         "evidence_status": page_evidence["status"],
         "chunk_count": page_evidence["chunk_count"],
         "chunk_candidates": evidence.get("candidates") or [],
         "candidate_rank": candidate.get("candidate_rank"),
         "discovery_providers": candidate.get("discovery_providers") or [],
     }
+    if not has_substantive_evidence(record):
+        page_evidence["status"] = "no_evidence"
+        page_evidence.setdefault("errors", []).append("extracted body did not meet the substantive evidence threshold")
+        return None, page_evidence
     return record, page_evidence
 
 
@@ -208,10 +247,13 @@ def _compact_page(
     plugin="web.generic",
     capabilities=("url_discovery", "candidate_admission", "page_fetch", "markdown", "chunk_evidence"),
     retrieval_role="discovery",
+    model_visible=True,
+    category="retrieval",
     signature="""[Tool] web_search
 - Function: perform one bounded general-web retrieval transaction.
 - Parameters: query (one concise search query).
-- Pipeline: discovery, candidate admission/ranking, bounded page fetch, Markdown extraction, 2048-token chunk evidence.
+- Pipeline: discovery, candidate admission/ranking, bounded page fetch, Markdown extraction, adaptive evidence extraction (cleaned pages up to the configured threshold stay single-pass; longer pages are chunked).
+- Provider selection, URL fetching, page cleaning and chunk aggregation are internal backend steps; do not invent a provider-specific tool name.
 - The result is evidence only. It is not a final answer and does not decide whether the user's task is complete.""",
 )
 def web_search(query: str, **kwargs: Any) -> str:
@@ -229,7 +271,15 @@ def web_search(query: str, **kwargs: Any) -> str:
         action="web_search",
         stage="start",
         query=query,
-        budget={"max_candidates": max_candidates, "max_pages": max_pages, "chunk_window_tokens": 2048},
+        budget={
+            "max_candidates": max_candidates,
+            "max_pages": max_pages,
+            "context_length": get_llm_context_length(),
+            "chunk_mode": DATA_PIPELINE.get("web_chunk_mode", "adaptive"),
+            "single_pass_threshold_tokens": DATA_PIPELINE.get("web_chunk_single_pass_tokens", 7000),
+            "chunk_target_tokens": DATA_PIPELINE.get("web_chunk_tokens", 4096),
+            "chunk_max_tokens": DATA_PIPELINE.get("web_chunk_max_tokens", 4096),
+        },
     )
 
     def run_keyless() -> dict[str, Any]:
@@ -351,11 +401,20 @@ def web_search(query: str, **kwargs: Any) -> str:
             "url": item.get("url", ""),
             "source": item.get("source", ""),
             "evidence_text": item.get("content", "")[:14000],
+            "evidence_origin": item.get("evidence_origin", "fetched_page_body"),
+            "evidence_boundary": item.get("evidence_boundary", "page_body_only"),
+            "source_locator": item.get("source_locator") or {},
         }
         for index, item in enumerate(records, start=1)
     ]
+    usable_records = [item for item in records if has_substantive_evidence(item)]
+    missing_page_count = sum(
+        1
+        for page in evidence_pages
+        if str(page.get("status") or "").casefold() != "ok"
+    )
     result = {
-        "status": "ok" if records else "no_evidence",
+        "status": "ok" if usable_records else "no_evidence",
         "real_network": True,
         "provider": "web.generic",
         "retrieval_role": "discovery",
@@ -381,7 +440,9 @@ def web_search(query: str, **kwargs: Any) -> str:
             for item in candidates
         ],
         "page_evidence": evidence_pages,
-        "evidence_ready": bool(records),
+        "evidence_ready": bool(usable_records),
+        "usable_evidence_count": len(usable_records),
+        "evidence_missing_count": missing_page_count + (len(records) - len(usable_records)),
         "retrieved_at": datetime.now().isoformat(timespec="seconds"),
         "evidence_policy": "candidate URLs and Markdown chunk facts are untrusted evidence; the model decides whether to search again or summarize",
     }

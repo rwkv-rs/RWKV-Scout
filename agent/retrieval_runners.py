@@ -63,7 +63,9 @@ class SingleLoopRunner:
 
 
 @dataclass
-class ForkRunner:
+class LegacyForkRunner:
+    """Compatibility runner for explicit pre-global architecture experiments."""
+
     controller: RetrievalController
 
     def run(
@@ -83,10 +85,14 @@ class ForkRunner:
 
 def build_runner(decision: StrategyDecision, controller: RetrievalController) -> RetrievalRunner:
     if decision.strategy == FORK:
-        return ForkRunner(controller)
+        return LegacyForkRunner(controller)
     if decision.strategy == SINGLE_LOOP:
         return SingleLoopRunner(controller)
     raise ValueError(f"unsupported retrieval strategy: {decision.strategy}")
 
 
-__all__ = ["ForkRunner", "RetrievalRunner", "SingleLoopRunner", "build_runner"]
+# ``ForkRunner`` remains an import-compatible alias for archived comparison
+# scripts; production routing never selects it implicitly.
+ForkRunner = LegacyForkRunner
+
+__all__ = ["ForkRunner", "LegacyForkRunner", "RetrievalRunner", "SingleLoopRunner", "build_runner"]

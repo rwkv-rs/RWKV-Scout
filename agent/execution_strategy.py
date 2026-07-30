@@ -64,11 +64,11 @@ def select_strategy(
 ) -> StrategyDecision:
     """Select Single-loop or Fork from the model-generated point list.
 
-    Production routing is based on the number of independently verifiable
-    atomic points: one or two use one continuous context, three or more use
-    workflow-level Fork.  Explicit overrides remain available for controlled
-    architecture comparisons and backwards-compatible ``retrieval_fork``
-    cases; normal requests do not need to provide either field.
+    Production routing always uses one global model-facing loop.  The number
+    of atomic points remains part of the plan and can be used by bounded
+    retrieval backends for concurrency, but it never creates independent
+    Planner conversations.  Explicit Fork overrides remain available only for
+    controlled historical architecture comparisons.
     """
 
     metadata = run_metadata if isinstance(run_metadata, Mapping) else {}
@@ -97,21 +97,12 @@ def select_strategy(
             reason=f"explicit retrieval_fork={bool(metadata.get('retrieval_fork'))}",
         )
 
-    if len(points) >= 3:
-        return StrategyDecision(
-            strategy=FORK,
-            point_count=len(points),
-            point_ids=point_ids,
-            source="atomic_point_count",
-            reason="three or more independently verifiable task points",
-        )
-
     return StrategyDecision(
         strategy=SINGLE_LOOP,
         point_count=len(points),
         point_ids=point_ids,
-        source="atomic_point_count",
-        reason="one or two task points, or a conservative fallback for an invalid plan",
+        source="global_shared_state",
+        reason="all task points share one Planner, ledger, evidence store, and step budget",
     )
 
 

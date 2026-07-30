@@ -66,25 +66,23 @@ class ToolRegistry:
     def _phase_allows(meta: dict[str, Any], phase: str | None) -> bool:
         """Apply the declared tool phase and retrieval role contract.
 
-        ``phase=ALL`` exposes the complete non-legacy catalog so the model can
-        choose discovery, evidence, or synthesis tools itself. Other phases
-        remain explicit compatibility filters for callers that need them.
+        ``phase=ALL`` is the executor's broad compatibility gate. The model
+        catalog is filtered separately by ``model_visible_only`` so backend
+        adapters do not become routing choices. Other phases remain explicit
+        compatibility filters for callers that need them.
         """
         if phase is None:
             return True
         if str(phase).upper() == "GENERIC_WEB":
-            # The first-stage open-web experiment intentionally exposes one
-            # provider-agnostic retrieval capability plus the two terminal
-            # actions.  Provider plugins remain registered and available to
-            # the normal model-owned episode; this boundary keeps the generic
-            # benchmark from silently turning into a provider-selection test.
+            # The open-web episode permits one provider-agnostic retrieval
+            # capability plus the terminal actions. Provider adapters remain
+            # registered for the backend transaction, never as model choices.
             name = str(meta.get("name") or "")
             return name in {"web_search", "answer_user", "finish_task"} and meta.get("phase") != "LEGACY"
         if str(phase).upper() == "ALL":
-            # The model-owned retrieval episode intentionally exposes the
-            # complete retrieval catalog.  Discovery/evidence sequencing is
-            # a model decision in this mode; the step budget remains the
-            # execution boundary.
+            # Internal callers may execute any non-legacy registered tool in
+            # this phase. Planner-facing visibility is handled separately by
+            # model_visible metadata.
             return str(meta.get("phase") or "").upper() != "LEGACY"
         if meta.get("phase") not in {phase, "ALL"}:
             return False
@@ -104,7 +102,27 @@ class ToolRegistry:
         ]
 
     @classmethod
-    def get_json_catalog(cls, phase: str | None = None) -> str:
+    def model_visible_names(cls, phase: str | None = None) -> list[str]:
+        """Return only the small public tool surface shown to the model.
+
+        Provider adapters and workflow helpers remain registered so the
+        executor and compatibility tests can use them, but they are not
+        model-facing choices. This prevents the model from treating Tavily,
+        Bing, or a page fetcher as separate research strategies.
+        """
+        return [
+            name
+            for name, meta in cls._tools.items()
+            if meta.get("model_visible", False) and cls._phase_allows(meta, phase)
+        ]
+
+    @classmethod
+    def get_json_catalog(
+        cls,
+        phase: str | None = None,
+        *,
+        model_visible_only: bool = False,
+    ) -> str:
         """Render the RWKV agent-loop tool catalog.
 
         rwkv-skills does not expose Python signatures as an ad-hoc prose
@@ -118,6 +136,8 @@ class ToolRegistry:
         for name, meta in cls._tools.items():
             if not cls._phase_allows(meta, phase):
                 continue
+            if model_visible_only and not meta.get("model_visible", False):
+                continue
             rows.append(
                 {
                     "name": name,
@@ -127,6 +147,7 @@ class ToolRegistry:
                     "capabilities": list(meta.get("capabilities") or ()),
                     "retrieval_role": meta.get("retrieval_role", ""),
                     "phase": meta.get("phase", ""),
+                    "category": meta.get("category", "internal"),
                 }
             )
         return json.dumps(rows, ensure_ascii=False, indent=2)
@@ -142,6 +163,8 @@ class ToolRegistry:
         capabilities: Iterable[str] = (),
         retrieval_role: str = "",
         strict_args: bool = True,
+        model_visible: bool = False,
+        category: str = "internal",
     ):
         def decorator(func: Callable):
             capabilities_tuple = tuple(str(item) for item in capabilities)
@@ -180,6 +203,8 @@ class ToolRegistry:
                 "capabilities": capabilities_tuple,
                 "retrieval_role": retrieval_role,
                 "strict_args": strict_args,
+                "model_visible": bool(model_visible),
+                "category": str(category or "internal"),
                 "allowed_args": tuple(allowed),
                 "required_args": tuple(required),
                 "argument_schema": {
@@ -292,6 +317,8 @@ class ToolRegistry:
 @ToolRegistry.register(
     name="finish_task",
     phase="SYNTHESIS",
+    model_visible=True,
+    category="control",
     signature="""[Tool] finish_task
 - 功能: 认为用户所有的目标已经完全达成，退出系统。
 - 参数: 无"""

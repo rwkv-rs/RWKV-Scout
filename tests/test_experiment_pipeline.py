@@ -505,9 +505,9 @@ class ExperimentPipelineTests(unittest.TestCase):
             self.assertEqual(trace["manifest"]["experiment"]["dataset_version"], "eval-test")
             self.assertEqual(trace["model_outputs"][0]["prompt"], "test prompt")
             self.assertEqual(trace["context_trace"][0]["data"]["context_stats"]["chunk_count"], 1)
-            self.assertEqual(trace["ranking_trace"][0]["data"]["method"], "candidate_support_then_rank.v1")
+            self.assertEqual(trace["ranking_trace"][0]["data"]["method"], "evidence_quality.v1")
 
-    def test_agentic_loop_allows_repeat_and_forces_summary_at_step_limit(self):
+    def test_agentic_loop_bounds_repeat_and_forces_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             task_dir = Path(directory) / "task"
             task_dir.mkdir()
@@ -590,9 +590,9 @@ class ExperimentPipelineTests(unittest.TestCase):
                 result = orchestrator._run_model_tool_loop("find stations", {})
 
             self.assertIn("bounded summary", result)
-            self.assertEqual([item[0] for item in executed], ["search_mediawiki", "fetch_mediawiki_page", "fetch_mediawiki_page"])
+            self.assertEqual([item[0] for item in executed], ["search_mediawiki", "fetch_mediawiki_page"])
             self.assertEqual(len(synthesis_calls), 1)
-            self.assertEqual(synthesis_calls[0]["termination_reason"], "max_steps_reached")
+            self.assertEqual(synthesis_calls[0]["termination_reason"], "repeated_failed_request")
 
     def test_retrieval_fork_lets_each_task_point_choose_tools_from_all(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -808,7 +808,7 @@ class ExperimentPipelineTests(unittest.TestCase):
             bad = {
                 "status": "ok",
                 "real_network": False,
-                "results": [{"title": "Search page", "url": "https://www.google.com/search?q=bad", "page_excerpt": "bad"}],
+                "results": [{"title": "Search page", "url": "https://www.google.com/search?q=bad", "page_excerpt": "The search page body is intentionally invalid and does not support the requested fact."}],
                 "sources": ["https://www.google.com/search?q=bad"],
                 "citation_refs": [{"ref_id": "BAD", "url": "https://www.google.com/search?q=bad"}],
                 "provider_errors": [],
@@ -816,7 +816,7 @@ class ExperimentPipelineTests(unittest.TestCase):
             good = {
                 "status": "ok",
                 "real_network": False,
-                "results": [{"title": "Primary", "url": "https://example.com/primary", "page_excerpt": "The reviewed fact is 7."}],
+                "results": [{"title": "Primary", "url": "https://example.com/primary", "page_excerpt": "The reviewed fact is 7, and this source body directly supports the requested citation recovery test."}],
                 "sources": ["https://example.com/primary"],
                 "citation_refs": [{"ref_id": "GOOD", "url": "https://example.com/primary"}],
                 "provider_errors": [],

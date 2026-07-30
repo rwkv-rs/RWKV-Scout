@@ -83,6 +83,8 @@ export async function getReport(id) {
       });
     } else if (record.record_type === "final_beautified_markdown") {
       report.markdown = record.content || "";
+    } else if (record.record_type === "final" || record.record_type === "synthesis") {
+      report.markdown = record.content || record.answer || report.markdown;
     }
   }
   

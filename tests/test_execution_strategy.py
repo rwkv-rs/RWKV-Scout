@@ -24,10 +24,11 @@ class ExecutionStrategyTests(unittest.TestCase):
         self.assertEqual(select_strategy(_plan(1)).strategy, SINGLE_LOOP)
         self.assertEqual(select_strategy(_plan(2)).strategy, SINGLE_LOOP)
 
-    def test_three_or_more_points_use_fork(self):
+    def test_three_or_more_points_still_use_one_global_loop(self):
         decision = select_strategy(_plan(3))
-        self.assertEqual(decision.strategy, FORK)
+        self.assertEqual(decision.strategy, SINGLE_LOOP)
         self.assertEqual(decision.point_ids, ("P1", "P2", "P3"))
+        self.assertEqual(decision.source, "global_shared_state")
 
     def test_explicit_strategy_override_is_reserved_for_experiments(self):
         decision = select_strategy(_plan(1), {"retrieval_strategy": "fork"})
@@ -43,10 +44,14 @@ class ExecutionStrategyTests(unittest.TestCase):
         self.assertEqual(decision.strategy, SINGLE_LOOP)
         self.assertEqual(decision.point_count, 0)
 
-    def test_runner_factory_keeps_two_execution_policies(self):
+    def test_runner_factory_uses_global_loop_by_default(self):
         controller = object()
         self.assertIsInstance(build_runner(select_strategy(_plan(1)), controller), SingleLoopRunner)
-        self.assertIsInstance(build_runner(select_strategy(_plan(3)), controller), ForkRunner)
+        self.assertIsInstance(build_runner(select_strategy(_plan(3)), controller), SingleLoopRunner)
+        self.assertIsInstance(
+            build_runner(select_strategy(_plan(3), {"retrieval_strategy": "fork"}), controller),
+            ForkRunner,
+        )
 
     def test_orchestrator_routes_from_plan_without_a_strategy_field_in_the_plan(self):
         class FakeRunner:
@@ -56,7 +61,7 @@ class ExecutionStrategyTests(unittest.TestCase):
             def run(self, *_args):
                 return self.decision.strategy
 
-        for count, expected in ((1, SINGLE_LOOP), (3, FORK)):
+        for count, expected in ((1, SINGLE_LOOP), (3, SINGLE_LOOP)):
             orchestrator = Orchestrator()
             orchestrator.state.task_id = f"STRATEGY_{count}"
             plan = _plan(count)

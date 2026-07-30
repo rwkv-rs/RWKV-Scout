@@ -20,6 +20,7 @@ from agent.retrieval_synthesis import synthesize_retrieval_answer
 from config import get_citation_remote_validation
 from tools.registry import ToolRegistry
 from utils.citation_validator import validate_citations
+from utils.evidence_quality import substantive_evidence_items
 from utils.experiment_strategies import normalize_strategy
 from utils.risk_policy import risk_context, validate_risk_answer
 from utils.task_events import append_task_event
@@ -250,7 +251,7 @@ class ControlledRetrievalMixin:
             citation_validation = validate_citations(
                 citation_refs,
                 answer="",
-                evidence=working_data.get("results") or [],
+                evidence=substantive_evidence_items(working_data.get("results") or []),
                 check_remote=get_citation_remote_validation(),
             )
             append_task_event(
@@ -447,10 +448,21 @@ class ControlledRetrievalMixin:
                     "context_stats": synthesis.get("context_stats") or {},
                 },
             )
+            append_task_event(
+                self.state.task_id,
+                "evidence_validation",
+                step=step + attempt,
+                phase="VALIDATION",
+                attempt=attempt + 1,
+                data={
+                    "validation": synthesis.get("validation") or {},
+                    "answer_alignment": synthesis.get("answer_alignment") or {},
+                },
+            )
             citation_validation = validate_citations(
                 synthesis.get("citation_refs") or working_data.get("citation_refs") or [],
                 answer=answer,
-                evidence=working_data.get("results") or [],
+                evidence=substantive_evidence_items(working_data.get("results") or []),
                 check_remote=get_citation_remote_validation(),
             )
             append_task_event(
@@ -539,7 +551,9 @@ class ControlledRetrievalMixin:
         self.state.is_finished = True
         self.state.final_result = synthesis.get("content") or ""
         risk_validation = validate_risk_answer(self.state.final_result, self.state.run_metadata)
-        if citation_validation.get("invalid"):
+        if synthesis.get("mode") in {"local_rwkv_error", "local_rwkv_empty", "rwkv_unavailable"} or not str(synthesis.get("model_output") or "").strip():
+            final_status = "failed"
+        elif citation_validation.get("invalid"):
             final_status = "completed_with_citation_warnings"
         elif not risk_validation.get("valid", True):
             final_status = "completed_with_risk_warnings"
@@ -557,6 +571,8 @@ class ControlledRetrievalMixin:
             citation_refs=synthesis.get("citation_refs") or [],
             citation_validation=citation_validation,
             risk_validation=risk_validation,
+            validation=synthesis.get("validation") or {},
+            answer_alignment=synthesis.get("answer_alignment") or {},
             prompt=synthesis.get("prompt", ""),
             model_output=synthesis.get("model_output", ""),
             repair_prompt=synthesis.get("repair_prompt", ""),
@@ -577,6 +593,8 @@ class ControlledRetrievalMixin:
             citation_refs=synthesis.get("citation_refs") or [],
             citation_validation=citation_validation,
             risk_validation=risk_validation,
+            validation=synthesis.get("validation") or {},
+            answer_alignment=synthesis.get("answer_alignment") or {},
             citation_recovery_attempted=recovery_attempted,
             duration_ms=synthesis_duration_ms,
         )
@@ -592,6 +610,8 @@ class ControlledRetrievalMixin:
                 "answer_mode": synthesis.get("mode"),
                 "citation_validation": citation_validation,
                 "risk_validation": risk_validation,
+                "validation": synthesis.get("validation") or {},
+                "answer_alignment": synthesis.get("answer_alignment") or {},
                 "citation_recovery_attempted": recovery_attempted,
                 "data": working_data,
             }, ensure_ascii=False) + "\n")

@@ -144,6 +144,42 @@ def get_search_api_key(service: str) -> str:
         return ""
     return os.environ.get(f"{name}_API_KEY", "") or API_KEYS.get(service, "")
 
+
+def get_search_api_keys(service: str) -> list[str]:
+    """Return configured search keys in deterministic failover order.
+
+    A service may define its primary key as ``API_KEYS[service]`` and optional
+    fallbacks as ``API_KEYS[f"{service}_pool"]``.  Environment overrides are
+    supported for local deployment, but configuration remains the normal
+    project-level path.  Duplicate values are removed without exposing keys to
+    callers or logs.
+    """
+
+    name = str(service or "").strip()
+    env_name = name.upper()
+    candidates: list[str] = []
+
+    def add(value: object) -> None:
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                add(item)
+            return
+        text = str(value or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    configured_env_pool = os.environ.get(f"{env_name}_API_KEYS", "").strip()
+    if configured_env_pool:
+        try:
+            parsed = json.loads(configured_env_pool)
+        except json.JSONDecodeError:
+            parsed = configured_env_pool.replace("\n", ",").split(",")
+        add(parsed)
+    add(os.environ.get(f"{env_name}_API_KEY", ""))
+    add(API_KEYS.get(name, ""))
+    add(API_KEYS.get(f"{name}_pool", []))
+    return candidates
+
 def get_llm_base_url() -> str:
     provider = get_llm_provider()
     return override_llm_url.get() or LLM_ENDPOINTS.get(provider, {}).get("base_url", "")

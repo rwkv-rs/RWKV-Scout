@@ -172,8 +172,16 @@ def read_task_report(output_root: str | os.PathLike[str], task_id: str) -> list[
     if not task_directory.exists() or not task_directory.is_dir():
         return None
 
+    # ``events.jsonl`` is the audit stream, not a user-facing report.  It is
+    # usually newer than ``retrieval_report.jsonl`` and has no ``record_type``
+    # records, so treating it as the report makes the UI render an empty
+    # answer even though synthesis completed successfully.
     jsonl_candidates = sorted(
-        (path for path in task_directory.rglob("*.jsonl") if path.is_file()),
+        (
+            path
+            for path in task_directory.rglob("*.jsonl")
+            if path.is_file() and path.name != "events.jsonl"
+        ),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )

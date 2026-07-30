@@ -4,6 +4,7 @@
     "baidu": "key",
     "volcengine": "key",
     "tavily": "",
+    "tavily_pool": [],
     "local": "rwkv-skills",
     "local_7b": "rwkv-skills",
     "local_13b": "rwkv-skills"
@@ -73,7 +74,14 @@
     "enable_debug_slm": false, 
     "allowed_extensions": [".txt", ".md"],
     "max_chunk_tokens": 2400,
-    "web_chunk_tokens": 2048,
+    "web_chunk_mode": "adaptive",
+    "web_chunk_single_pass_tokens": 7000,
+    "web_chunk_tokens": 4096,
+    "web_chunk_min_tokens": 1024,
+    "web_chunk_max_tokens": 4096,
+    "web_chunk_prompt_reserve_tokens": 1024,
+    "web_chunk_output_reserve_tokens": 4096,
+    "web_chunk_safety_margin_tokens": 512,
     "web_chunk_overlap_ratio": 0.1,
     "web_candidate_max_tokens": 8192,
     "web_candidate_max_facts": 64,
@@ -97,13 +105,13 @@
     "memory_truncate_length": 60000
   },
   "LLM_CONFIG": {
-    "concurrency": 2
+    "concurrency": 4
   },
   "SLM_CONFIG": {
     "endpoint": "http://172.21.122.93:29613/v1/chat/completions",
     "protocol": "openai",
     "password": "rwkv-skills",
-    "concurrency": 2,
+    "concurrency": 4,
     "enable_async_parallel": false,
     "async_parallelism": 2,
     "async_batch_wait_ms": 20

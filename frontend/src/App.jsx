@@ -12,24 +12,22 @@ import {
   Files,
   Folder,
   FolderOpen,
-  Gauge,
   Loader2,
   ListPlus,
   MessageCircle,
   RefreshCw,
+  Search,
   StopCircle,
   Trash2,
   Upload,
   X,
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
-  import { getHistory, getReport, getTaskEvents, startAnalyze, sendChat, stopTask, deleteTask, getFiles, deleteFile, getFileContent, uploadFile, getRuntimeConfig, getTokenUsage, getAcceptanceMetrics } from "./api.js";
-import { extractMarkdownOutline, renderMarkdown, reportToMarkdown } from "./markdown.js";
+  import { getHistory, getReport, getTaskEvents, startAnalyze, stopTask, deleteTask, getFiles, deleteFile, getFileContent, uploadFile, getRuntimeConfig } from "./api.js";
+import { extractMarkdownOutline, renderModelMarkdown, renderMarkdown, reportToMarkdown } from "./markdown.js";
 import { AppSidebar } from "@/components/app-sidebar";
 import { TaskStatusBadge } from "@/components/task-status-badge";
 import ExecutionEventFeed from "@/components/execution-event-feed";
-import AcceptancePanel from "@/components/acceptance-panel";
-import AcceptanceMetrics from "@/components/acceptance-metrics";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -51,7 +49,6 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
@@ -569,11 +566,22 @@ function Composer({
   onModelChange,
   variant = "compact",
   onOpenFiles,
+  autoFocus = false,
 }) {
   const [query, setQuery] = useState("");
   const textareaRef = useRef(null);
   const shouldEnqueue = !asyncEnabled && isAnyRunning;
   const isCreateMode = variant === "create";
+
+  useEffect(() => {
+    if (!autoFocus) return undefined;
+
+    const frame = window.requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [autoFocus]);
 
   function resizeTextarea(target) {
     target.style.height = "auto";
@@ -789,53 +797,6 @@ function TaskTimingCard({ task }) {
             </span>
           </div>
         ))}
-      </div>
-    </section>
-  );
-}
-
-function TokenUsageCard({ data }) {
-  if (!data) return null;
-
-  const rwkv = data.rwkv_slm || { input_tokens: 0, output_tokens: 0 };
-  const cloud = data.cloud_llm || { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 };
-  const totalRwkv = (rwkv.input_tokens || 0) + (rwkv.output_tokens || 0);
-  const totalCloud = (cloud.input_tokens || 0) + (cloud.output_tokens || 0) + (cloud.reasoning_tokens || 0);
-
-  if (totalRwkv === 0 && totalCloud === 0) return null;
-
-  return (
-    <section className="report-side-section shadow-lg border border-border/60 bg-secondary/95 backdrop-blur">
-      <div className="flex items-center gap-2 text-sm font-semibold">
-        <Gauge className="size-4 text-primary" />
-        Token 消耗统计
-      </div>
-      <div className="mt-4 space-y-3">
-        <div>
-          <div className="flex items-center justify-between text-[11px] mb-1">
-            <span className="text-muted-foreground font-medium">RWKV (本地基座)</span>
-            <span className="font-mono font-medium text-foreground/80">{totalRwkv.toLocaleString()}</span>
-          </div>
-          <div className="flex items-baseline justify-between gap-3 text-[10px]">
-            <span className="text-muted-foreground/50">Input / Output</span>
-            <span className="font-mono tabular-nums text-muted-foreground/70">
-              {rwkv.input_tokens?.toLocaleString() || 0} / {rwkv.output_tokens?.toLocaleString() || 0}
-            </span>
-          </div>
-        </div>
-        
-        <div className="pt-2 border-t border-border/50">
-          <div className="flex items-center justify-between text-[11px] mb-1">
-            <span className="text-muted-foreground font-medium">Cloud LLM (云端推理)</span>
-            <span className="font-mono font-medium text-foreground/80">{totalCloud.toLocaleString()}</span>
-          </div>
-          <div className="flex items-baseline justify-between gap-3 text-[10px]">
-            <span className="text-muted-foreground/50">In / Out / Reason</span>
-            <span className="font-mono tabular-nums text-muted-foreground/70">
-              {cloud.input_tokens?.toLocaleString() || 0} / {cloud.output_tokens?.toLocaleString() || 0} / {cloud.reasoning_tokens?.toLocaleString() || 0}
-            </span>
-          </div>
-        </div>
       </div>
     </section>
   );
@@ -1063,7 +1024,7 @@ function ReportSurface({ report, surfaceRef, scrollAffordance }) {
                 ) : (
                   <div
                     className="report-markdown"
-                    dangerouslySetInnerHTML={{ __html: renderMarkdown(node.content || "") }}
+                    dangerouslySetInnerHTML={{ __html: renderModelMarkdown(node.content || "") }}
                   />
                 )}
               </section>
@@ -1071,7 +1032,7 @@ function ReportSurface({ report, surfaceRef, scrollAffordance }) {
           </article>
         ) : (
           <article className="report-markdown">
-            <div dangerouslySetInnerHTML={{ __html: renderMarkdown(report.markdown || "") }} />
+            <div dangerouslySetInnerHTML={{ __html: renderModelMarkdown(report.markdown || "") }} />
           </article>
         )}
       </div>
@@ -1157,24 +1118,26 @@ function LandingState({
   isAnyRunning,
   isSubmitting,
   asyncEnabled,
-  onAsyncEnabledChange,
   modelProfiles,
   modelKey,
   onModelChange,
   onOpenFiles,
+  resetKey,
 }) {
   return (
     <div className="flex min-h-[calc(100vh-12rem)] items-start justify-center pt-[10vh]">
       <section className="w-full max-w-3xl">
         <header className="mb-6">
-          <h1 className="text-2xl font-semibold tracking-[-0.025em]">新建研究任务</h1>
+          <h1 className="text-2xl font-semibold tracking-[-0.025em]">RWKV 检索对话</h1>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            描述研究目标，系统将结合工作区资料生成结构化报告。
+            像普通聊天一样提问。联网检索默认开启，由 RWKV 自主决定是否搜索、补充证据和汇总。
           </p>
         </header>
 
         <Composer
           variant="create"
+          key={resetKey}
+          autoFocus
           onSubmit={onSubmit}
           isAnyRunning={isAnyRunning}
           isSubmitting={isSubmitting}
@@ -1195,16 +1158,6 @@ function LandingState({
               <FolderOpen className="size-3.5" />
               文件目录
             </button>
-            <label className="inline-flex cursor-pointer items-center gap-1.5">
-              <Gauge className="size-3.5" />
-              <span>{asyncEnabled ? "并行模式" : "顺序模式"}</span>
-              <Switch
-                checked={asyncEnabled}
-                onCheckedChange={onAsyncEnabledChange}
-                aria-label="切换异步并行"
-                className="scale-[0.8]"
-              />
-            </label>
           </div>
           <span>Enter 开始 · Shift + Enter 换行</span>
         </div>
@@ -1213,42 +1166,15 @@ function LandingState({
   );
 }
 
-function ChatPanel({ modelProfiles, modelKey, onModelChange }) {
-  const [messages, setMessages] = useState([]);
-  const [draft, setDraft] = useState("");
-  const [isSending, setIsSending] = useState(false);
-
+function ChatPanel({ modelProfiles, modelKey, onModelChange, onSubmit, onBack, isSubmitting }) {
   const activeProfile = modelProfiles.find((profile) => profile.key === modelKey);
+  const [draft, setDraft] = useState("");
 
-  async function submitMessage() {
+  function submitMessage() {
     const content = draft.trim();
-    if (!content || isSending || !modelKey) return;
-
-    const userMessage = { role: "user", content };
-    const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
+    if (!content || isSubmitting || !modelKey) return;
     setDraft("");
-    setIsSending(true);
-
-    try {
-      const response = await sendChat(nextMessages, modelKey);
-      const assistantMessage = response.message || { role: "assistant", content: "" };
-      setMessages((current) => [...current, assistantMessage]);
-    } catch (reason) {
-      setMessages((current) => [
-        ...current,
-        { role: "error", content: `模型请求失败：${reason.message}` },
-      ]);
-    } finally {
-      setIsSending(false);
-    }
-  }
-
-  function handleKeyDown(event) {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      submitMessage();
-    }
+    onSubmit(content);
   }
 
   return (
@@ -1257,18 +1183,18 @@ function ChatPanel({ modelProfiles, modelKey, onModelChange }) {
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold">
             <MessageCircle className="size-4 text-primary" />
-            本地模型聊天
+            检索对话
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
-            直接调用 WSL 内的 RWKV，不经过检索编排；适合先测试模型本身的对话能力。
+            每次发送都会创建真实研究任务，由 RWKV 自己决定是否联网、调用工具、抓取网页并生成报告。
           </p>
         </div>
         <div className="flex items-center gap-2">
           <select
             value={modelKey}
             onChange={(event) => onModelChange(event.target.value)}
-            disabled={!modelProfiles.length || isSending}
-            aria-label="选择聊天模型"
+            disabled={!modelProfiles.length || isSubmitting}
+            aria-label="选择检索模型"
             className="h-8 min-w-48 rounded-md border border-border bg-background px-2 text-xs text-foreground outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
           >
             {modelProfiles.length ? modelProfiles.map((profile) => (
@@ -1277,84 +1203,52 @@ function ChatPanel({ modelProfiles, modelKey, onModelChange }) {
               </option>
             )) : <option value="">正在读取模型配置…</option>}
           </select>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 rounded-md"
-            disabled={!messages.length || isSending}
-            onClick={() => setMessages([])}
-          >
-            清空
+          <Button variant="outline" size="sm" className="h-8 rounded-md" onClick={onBack}>
+            新建任务
           </Button>
         </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col py-5">
-        <div className="flex-1 space-y-3 overflow-y-auto pr-1">
-          {!messages.length ? (
-            <div className="flex min-h-64 flex-col items-center justify-center rounded-md border border-dashed border-border px-6 text-center">
-              <MessageCircle className="size-7 text-muted-foreground/50" />
-              <p className="mt-3 text-sm font-medium">开始一轮本地对话</p>
-              <p className="mt-1 max-w-md text-xs leading-5 text-muted-foreground">
-                例如：解释一下 RWKV 和 Transformer 的主要区别，或直接输入你想测试的提示词。
-              </p>
-              <span className="mt-3 font-mono text-[10px] text-muted-foreground/70">
-                {activeProfile?.model || "等待模型配置"}
-              </span>
-            </div>
-          ) : messages.map((message, index) => (
-            <div
-              key={`${message.role}-${index}`}
-              className={cn(
-                "flex",
-                message.role === "user" ? "justify-end" : "justify-start",
-              )}
-            >
-              <div
-                className={cn(
-                  "max-w-[85%] whitespace-pre-wrap rounded-md px-3 py-2.5 text-sm leading-6",
-                  message.role === "user"
-                    ? "bg-primary text-primary-foreground"
-                    : message.role === "error"
-                      ? "border border-rose-200 bg-rose-50 text-rose-700"
-                      : "border border-border bg-muted/45 text-foreground",
-                )}
-              >
-                {message.content}
-              </div>
-            </div>
-          ))}
-          {isSending ? (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Loader2 className="size-3.5 animate-spin" />
-              {activeProfile?.label || "本地模型"} 正在生成…
-            </div>
-          ) : null}
+        <div className="flex flex-1 flex-col items-center justify-center rounded-md border border-dashed border-border px-6 py-12 text-center">
+          <Search className="size-7 text-muted-foreground/50" />
+          <p className="mt-3 text-sm font-medium">从一个可验证的问题开始</p>
+          <p className="mt-1 max-w-lg text-xs leading-5 text-muted-foreground">
+            例如“深圳地铁一号线有哪些站点？”发送后会进入任务执行页，你可以看到搜索、网页正文、chunk 和最终总结。
+          </p>
+          <span className="mt-3 font-mono text-[10px] text-muted-foreground/70">
+            {activeProfile?.model || "等待模型配置"}
+          </span>
         </div>
 
         <div className="mt-5 rounded-md border border-border bg-card p-3">
           <Textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="输入消息，Enter 发送，Shift + Enter 换行"
-            aria-label="输入聊天消息"
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                submitMessage();
+              }
+            }}
+            placeholder="输入需要检索的问题，Enter 创建研究任务，Shift + Enter 换行"
+            aria-label="输入检索问题"
             rows={3}
-            disabled={isSending || !modelProfiles.length}
+            disabled={isSubmitting || !modelProfiles.length}
             className="min-h-20 resize-none border-0 px-0 py-0 text-sm shadow-none focus-visible:ring-0"
           />
           <div className="mt-3 flex items-center justify-between border-t border-border pt-3">
             <span className="text-[11px] text-muted-foreground">
-              不会触发联网检索，也不会写入研究任务历史
+              会触发联网检索，并写入研究任务历史
             </span>
             <Button
               size="sm"
               className="h-8 rounded-md"
-              disabled={isSending || !draft.trim() || !modelProfiles.length}
+              disabled={isSubmitting || !draft.trim() || !modelProfiles.length}
               onClick={submitMessage}
             >
-              {isSending ? <Loader2 className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />}
-              发送
+              {isSubmitting ? <Loader2 className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />}
+              创建检索任务
             </Button>
           </div>
         </div>
@@ -1363,9 +1257,61 @@ function ChatPanel({ modelProfiles, modelKey, onModelChange }) {
   );
 }
 
+function ConversationTaskView({ task, finalAnswer, events, onStop }) {
+  const isRunning = task?.status === "running" || task?.status === "queued";
+  const hasAnswer = Boolean(String(finalAnswer || "").trim());
+
+  return (
+    <section className="chat-thread" aria-label="RWKV 检索对话">
+      <div className="chat-message chat-message-user">
+        <div className="chat-message-label">你</div>
+        <div className="chat-message-content">{task?.query || "（没有任务内容）"}</div>
+      </div>
+
+      {isRunning ? (
+        <ExecutionFeed
+          progress={task?.progress}
+          onStop={() => onStop(task?.id)}
+          task={task}
+        />
+      ) : null}
+
+      {hasAnswer ? (
+        <section className="trace-final-answer chat-message-assistant" aria-label="RWKV 最终回答">
+          <div className="trace-final-answer-header">
+            <div>
+              <div className="trace-final-answer-kicker">FINAL ANSWER</div>
+              <h2>RWKV 最终回答</h2>
+            </div>
+            <span className="trace-final-answer-status">联网检索 · 原样续写</span>
+          </div>
+          <div
+            className="trace-model-markdown trace-final-answer-body"
+            dangerouslySetInnerHTML={{ __html: renderModelMarkdown(finalAnswer) }}
+          />
+        </section>
+      ) : !isRunning && task ? (
+        <section className="chat-empty-answer" aria-live="polite">
+          <div className="chat-empty-answer-title">本次没有返回最终回答</div>
+          <p>检索过程已结束，但没有可展示的模型续写。请展开执行上下文查看具体失败阶段。</p>
+        </section>
+      ) : null}
+
+      {events.length ? (
+        <details className="chat-context-disclosure" open={isRunning}>
+          <summary>
+            <span>查看详细执行上下文</span>
+            <span className="trace-event-count">{events.length} 个事件</span>
+          </summary>
+          <ExecutionEventFeed events={events} finalAnswer="" showFinalAnswer={false} />
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
 export function App() {
   const [history, setHistory] = useState([]);
-  const [tokenUsage, setTokenUsage] = useState({ tasks: {} });
   const [keyword, setKeyword] = useState("");
   const [activeId, setActiveId] = useState(null);
   const [report, setReport] = useState(null);
@@ -1374,17 +1320,10 @@ export function App() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isQueueOpen, setIsQueueOpen] = useState(false);
   const [executionEvents, setExecutionEvents] = useState([]);
-  const [acceptanceLinks, setAcceptanceLinks] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem("rwkv_acceptance_links") || "{}");
-    } catch {
-      return {};
-    }
-  });
-  const [acceptanceMetrics, setAcceptanceMetrics] = useState(null);
   const [modelProfiles, setModelProfiles] = useState([]);
   const [modelKey, setModelKey] = useState(() => localStorage.getItem("rwkv_model_key") || "local_7b");
   const [chatOpen, setChatOpen] = useState(false);
+  const [newTaskKey, setNewTaskKey] = useState(0);
   const mainScrollRef = useRef(null);
   const reportSurfaceRef = useRef(null);
   const asyncPreferenceLoadedRef = useRef(false);
@@ -1418,6 +1357,14 @@ export function App() {
   });
 
   const markdown = useMemo(() => reportToMarkdown(report), [report]);
+  const eventFinalAnswer = useMemo(
+    () => [...executionEvents]
+      .reverse()
+      .find((event) => ["final", "synthesis"].includes(event.type) && String(event.content || "").trim())
+      ?.content || "",
+    [executionEvents],
+  );
+  const visibleFinalAnswer = String(markdown || eventFinalAnswer || "").trim();
   const isAnyRunning = history.some((task) => task.status === "running");
   const activeTaskItem = history.find((task) => task.id === activeId) || null;
   const reportScrollAffordance = useReportScrollAffordance(
@@ -1450,8 +1397,6 @@ export function App() {
       setError("");
       const items = await getHistory();
       setHistory(items);
-      setTokenUsage(await getTokenUsage());
-        setAcceptanceMetrics(await getAcceptanceMetrics());
 
       const nextId = (selectFirst || !activeId) ? items[0]?.id : activeId;
 
@@ -1469,8 +1414,6 @@ export function App() {
   const pollHistory = useCallback(async () => {
     try {
       setHistory(await getHistory());
-      setTokenUsage(await getTokenUsage());
-        setAcceptanceMetrics(await getAcceptanceMetrics());
     } catch {}
   }, []);
 
@@ -1491,10 +1434,6 @@ export function App() {
       setIsQueueOpen(false);
     }
   }, [taskQueue]);
-
-  useEffect(() => {
-    localStorage.setItem("rwkv_acceptance_links", JSON.stringify(acceptanceLinks));
-  }, [acceptanceLinks]);
 
   useEffect(() => {
     if (asyncPreferenceLoadedRef.current) {
@@ -1637,6 +1576,9 @@ export function App() {
     setActiveId(null);
     setReport(null);
     setError("");
+    setExecutionEvents([]);
+    eventCursorRef.current = 0;
+    setNewTaskKey((value) => value + 1);
   }
 
   function handleOpenChat() {
@@ -1644,6 +1586,11 @@ export function App() {
     setActiveId(null);
     setReport(null);
     setError("");
+  }
+
+  async function handleChatSubmit(query) {
+    setChatOpen(false);
+    await handleQuerySubmit(query);
   }
 
   async function handleNewTaskSubmitted(taskId) {
@@ -1670,13 +1617,6 @@ export function App() {
         slm_async_enabled: asyncEnabled,
         acceptance_case_id: taskObj.caseId || null,
       });
-
-      if (taskObj.caseId && response.task_id) {
-        setAcceptanceLinks((current) => ({
-          ...current,
-          [taskObj.caseId]: { taskId: response.task_id, query: taskObj.query, submittedAt: new Date().toISOString() },
-        }));
-      }
 
       toast.success("任务已提交");
       await handleNewTaskSubmitted(response.task_id);
@@ -1740,12 +1680,7 @@ export function App() {
     }
   }
 
-  function handleAsyncEnabledChange(value) {
-    asyncPreferenceLoadedRef.current = true;
-    setAsyncEnabled(value);
-  }
-
-  const currentTitle = chatOpen ? "本地模型聊天" : activeId
+  const currentTitle = chatOpen ? "检索对话" : activeId
     ? getTaskLabel(activeTaskItem)
     : "准备新的研究任务";
 
@@ -1815,6 +1750,9 @@ export function App() {
                   modelProfiles={modelProfiles}
                   modelKey={modelKey}
                   onModelChange={setModelKey}
+                  onSubmit={handleChatSubmit}
+                  onBack={handleNewRun}
+                  isSubmitting={isSubmitting}
                 />
               ) : (
                 <>
@@ -1824,74 +1762,59 @@ export function App() {
                 </Card>
               ) : null}
 
-              {taskQueue.length ? (
-                <QueuePanel
-                  taskQueue={taskQueue}
-                  isQueueOpen={isQueueOpen}
-                  onToggle={() => setIsQueueOpen((value) => !value)}
-                  onClear={() => setTaskQueue([])}
-                  onRemove={(index) => setTaskQueue((current) => current.filter((_, itemIndex) => itemIndex !== index))}
-                />
-              ) : null}
-
-              {activeId && executionEvents.length ? (
-                <ExecutionEventFeed events={executionEvents} />
-              ) : activeId && activeTaskItem?.status === "running" ? (
-                <ExecutionFeed
-                  progress={activeTaskItem.progress}
-                  onStop={() => handleStopTask(activeTaskItem.id)}
-                  task={activeTaskItem}
-                />
-              ) : null}
-
-                <AcceptanceMetrics data={acceptanceMetrics} />
-
-              <AcceptancePanel
-                history={history}
-                links={acceptanceLinks}
-                onRun={(test) => handleQuerySubmit(test.prompt, test.id)}
-                onOpen={(taskId) => selectReport(taskId)}
-              />
-
-              {!activeId ? (
-                <LandingState
-                  onSubmit={handleQuerySubmit}
-                  isAnyRunning={isAnyRunning}
-                  isSubmitting={isSubmitting}
-                  asyncEnabled={asyncEnabled}
-                  modelProfiles={modelProfiles}
-                  modelKey={modelKey}
-                  onModelChange={setModelKey}
-                  onAsyncEnabledChange={handleAsyncEnabledChange}
-                  onOpenFiles={() => setFileManagerOpen(true)}
-                />
-              ) : null}
-
-              {report ? (
-                <div className="space-y-4">
-                  <MetricsStrip report={report} task={activeTaskItem} />
-
-                  <div className="report-workspace">
-                    <OutlinePanel report={report} markdown={markdown} />
-
-                    <ReportSurface
-                      report={report}
-                      surfaceRef={reportSurfaceRef}
-                      scrollAffordance={reportScrollAffordance}
+              {activeId ? (
+                <>
+                  {(executionEvents.length || activeTaskItem?.status !== "running") ? (
+                    <ConversationTaskView
+                      task={activeTaskItem}
+                      finalAnswer={visibleFinalAnswer}
+                      events={executionEvents}
+                      onStop={handleStopTask}
                     />
+                  ) : activeTaskItem?.status === "running" ? (
+                    <ExecutionFeed
+                      progress={activeTaskItem.progress}
+                      onStop={() => handleStopTask(activeTaskItem.id)}
+                      task={activeTaskItem}
+                    />
+                  ) : report ? (
+                    <section className="trace-final-answer" aria-label="RWKV 最终输出">
+                      <div className="trace-final-answer-header">
+                        <div>
+                          <div className="trace-final-answer-kicker">FINAL ANSWER</div>
+                          <h2>RWKV 最终输出</h2>
+                        </div>
+                        <span className="trace-final-answer-status">原样 Markdown 渲染</span>
+                      </div>
+                      <div className="trace-model-markdown trace-final-answer-body" dangerouslySetInnerHTML={{ __html: renderModelMarkdown(markdown) }} />
+                    </section>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  {taskQueue.length ? (
+                    <QueuePanel
+                      taskQueue={taskQueue}
+                      isQueueOpen={isQueueOpen}
+                      onToggle={() => setIsQueueOpen((value) => !value)}
+                      onClear={() => setTaskQueue([])}
+                      onRemove={(index) => setTaskQueue((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                    />
+                  ) : null}
 
-                    <aside className="report-side-rail">
-                      <TaskTimingCard task={activeTaskItem} />
-                      <SourcesPanel sources={report?.sources || []} />
-                    </aside>
-                  </div>
-
-                  <div className="report-secondary-panels">
-                    <TaskTimingCard task={activeTaskItem} />
-                    <SourcesPanel sources={report?.sources || []} />
-                  </div>
-                </div>
-              ) : null}
+                  <LandingState
+                    onSubmit={handleQuerySubmit}
+                    isAnyRunning={isAnyRunning}
+                    isSubmitting={isSubmitting}
+                    asyncEnabled={asyncEnabled}
+                    modelProfiles={modelProfiles}
+                    modelKey={modelKey}
+                    onModelChange={setModelKey}
+                    onOpenFiles={() => setFileManagerOpen(true)}
+                    resetKey={newTaskKey}
+                  />
+                </>
+              )}
                 </>
               )}
             </div>
@@ -1909,13 +1832,6 @@ export function App() {
                   modelKey={modelKey}
                   onModelChange={setModelKey}
                 />
-              </div>
-            </div>
-          ) : null}
-          {activeId && tokenUsage?.tasks?.[activeId] ? (
-            <div className="fixed bottom-6 left-6 md:left-[17.5rem] z-40 w-[240px] hidden sm:block pointer-events-none">
-              <div className="pointer-events-auto">
-                <TokenUsageCard data={tokenUsage.tasks[activeId]} />
               </div>
             </div>
           ) : null}

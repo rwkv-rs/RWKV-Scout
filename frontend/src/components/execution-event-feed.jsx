@@ -23,8 +23,11 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { renderModelMarkdown } from "@/markdown";
 
 const EVENT_DEFS = {
+  evidence_verification: { label: "证据验证模型", group: "判断", icon: ScanSearch, tone: "judge" },
+  evidence_validation: { label: "证据交叉校验", group: "聚合", icon: ScanSearch, tone: "aggregate" },
   user_input: { label: "用户输入", group: "输入", icon: MessageSquare, tone: "neutral" },
   run_started: { label: "任务启动", group: "输入", icon: Activity, tone: "neutral" },
   task_plan: { label: "任务计划", group: "规划", icon: Route, tone: "plan" },
@@ -354,6 +357,61 @@ function EventDetail({ event }) {
     );
   }
 
+  if (type === "evidence_verification") {
+    const verification = data || {};
+    return (
+      <div className="trace-detail-stack">
+        <div className="trace-fields">
+          <Field label="Status" value={<StatusPill value={event.status || verification.status} />} />
+          <Field label="Completion ready" value={String(event.completion_ready ?? verification.completion_ready)} mono />
+          <Field label="Requires replan" value={String(event.requires_replan ?? verification.requires_replan)} mono />
+          <Field label="Missing points" value={event.missing_point_ids || verification.missing_point_ids} mono />
+          <Field label="Conflict points" value={event.conflict_point_ids || verification.conflict_point_ids} mono />
+          <Field label="Next queries" value={event.next_queries || verification.next_queries} wide />
+        </div>
+        {jsonBlock("Verifier prompt", event.prompt)}
+        {jsonBlock("Verifier raw output", event.model_output, { open: true })}
+        {jsonBlock("Normalized verification", verification, { open: true })}
+      </div>
+    );
+  }
+
+  if (type === "evidence_validation") {
+    const validation = data.validation || {};
+    const cross = validation.cross_source || {};
+    const coverage = Array.isArray(validation.subquestion_coverage)
+      ? validation.subquestion_coverage
+      : [];
+    const alignment = data.answer_alignment || {};
+    return (
+      <div className="trace-detail-stack">
+        <div className="trace-fields">
+          <Field label="Coverage points" value={coverage.length} mono />
+          <Field label="Multi-source overlap" value={cross.multi_source_points} mono />
+          <Field label="Single-source points" value={cross.single_source_points} mono />
+          <Field label="Missing points" value={cross.missing_points} mono />
+          <Field label="Candidate conflicts" value={cross.candidate_conflicts?.length || 0} mono />
+          <Field label="Unaligned answer lines" value={alignment.unsupported_line_count} mono />
+        </div>
+        {coverage.length ? (
+          <div className="trace-result-list">
+            {coverage.map((row, index) => (
+              <div className="trace-result-row" key={`${row.point_id || "point"}-${index}`}>
+                <span className="trace-result-index">{row.point_id || `P${index + 1}`}</span>
+                <div className="min-w-0">
+                  <strong>{row.status} · {row.agreement}</strong>
+                  <p>{(row.sources || []).map((source) => source.ref_id).join(", ") || "no evidence source"}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {jsonBlock("Evidence validation report", validation, { open: true })}
+        {jsonBlock("Answer-to-evidence alignment", alignment)}
+      </div>
+    );
+  }
+
   if (type === "context_build") {
     return (
       <div className="trace-detail-stack">
@@ -380,10 +438,16 @@ function EventDetail({ event }) {
           <Field label="证据数" value={event.evidence_count} mono />
           <Field label="耗时" value={event.duration_ms ? `${event.duration_ms} ms` : undefined} mono />
         </div>
-        {event.content ? <div className="trace-answer-box"><div className="trace-subtitle">RWKV 当前总结</div><p>{event.content}</p></div> : null}
+        {event.content ? (
+          <div className="trace-answer-box">
+            <div className="trace-subtitle">RWKV 当前总结</div>
+            <div className="trace-model-markdown" dangerouslySetInnerHTML={{ __html: renderModelMarkdown(event.content) }} />
+          </div>
+        ) : null}
         {jsonBlock("总结模型 Prompt", event.prompt)}
         {jsonBlock("RWKV 总结原始输出", event.model_output, { open: true })}
         {jsonBlock("修复输出", event.repair_output)}
+        {jsonBlock("独立证据验证结果", event.evidence_verification)}
         {jsonBlock("总结使用的证据", event.selected_evidence)}
         {jsonBlock("总结上下文", event.context_text)}
       </div>
@@ -428,7 +492,12 @@ function EventDetail({ event }) {
           <Field label="模式" value={event.mode} mono />
           <Field label="动作" value={event.action} mono />
         </div>
-        <div className="trace-answer-box"><div className="trace-subtitle">最终答案</div><p>{event.content || "没有最终答案"}</p></div>
+        <div className="trace-answer-box">
+          <div className="trace-subtitle">最终答案</div>
+          {event.content ? (
+            <div className="trace-model-markdown" dangerouslySetInnerHTML={{ __html: renderModelMarkdown(event.content) }} />
+          ) : <p>没有最终答案</p>}
+        </div>
         {jsonBlock("最终事件完整 JSON", event)}
       </div>
     );
@@ -439,6 +508,14 @@ function EventDetail({ event }) {
 
 function summaryFor(event) {
   const result = parseMaybeJson(event.result);
+  if (event.type === "evidence_verification") {
+    return `${event.status || "unknown"} · ${event.completion_ready ? "ready" : "incomplete"} · missing ${(event.missing_point_ids || []).join(", ") || "none"} · replans ${event.requires_replan ? "yes" : "no"}`;
+  }
+  if (event.type === "evidence_validation") {
+    const cross = event.data?.validation?.cross_source || {};
+    const alignment = event.data?.answer_alignment || {};
+    return `${cross.multi_source_points || 0} multi-source · ${cross.missing_points || 0} missing · ${cross.candidate_conflicts?.length || 0} conflicts · ${alignment.unsupported_line_count || 0} unaligned`;
+  }
   if (event.type === "model_tool_decision") return `${event.action || "未选择工具"}${event.task_point_id ? ` · ${event.task_point_id}` : ""}`;
   if (event.type === "tool_call") return `${event.action || "工具"} · ${compact(event.args, 140)}`;
   if (event.type === "tool_result") return `${result?.provider || event.action || "工具"} · ${result?.status || event.execution_status || "返回"} · ${result?.count ?? result?.results?.length ?? 0} 条`;
@@ -454,7 +531,7 @@ function summaryFor(event) {
 }
 
 function isImportant(event) {
-  return ["task_plan", "task_replan", "model_tool_decision", "page_candidate_merge", "context_build", "synthesis", "completion_judgement", "final"].includes(event.type);
+  return ["task_plan", "task_replan", "model_tool_decision", "page_candidate_merge", "context_build", "evidence_validation", "evidence_verification", "synthesis", "completion_judgement", "final"].includes(event.type);
 }
 
 function Metric({ label, value, tone = "neutral" }) {
@@ -466,7 +543,7 @@ function Metric({ label, value, tone = "neutral" }) {
   );
 }
 
-export default function ExecutionEventFeed({ events = [] }) {
+export default function ExecutionEventFeed({ events = [], finalAnswer = "", showFinalAnswer = true }) {
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("全部");
   const [expanded, setExpanded] = useState(() => new Set(events.filter(isImportant).map((event) => event.seq)));
@@ -494,6 +571,12 @@ export default function ExecutionEventFeed({ events = [] }) {
     return result;
   }, [events]);
 
+  const eventAnswer = [...events]
+    .reverse()
+    .find((event) => ["final", "synthesis"].includes(event.type) && String(event.content || "").trim())
+    ?.content || "";
+  const visibleFinalAnswer = String(finalAnswer || eventAnswer || "").trim();
+
   function toggle(seq) {
     setExpanded((current) => {
       const next = new Set(current);
@@ -512,6 +595,21 @@ export default function ExecutionEventFeed({ events = [] }) {
 
   return (
     <section className="trace-inspector" aria-label="详细可审计执行上下文">
+      {showFinalAnswer && visibleFinalAnswer ? (
+        <section className="trace-final-answer" aria-label="RWKV 最终输出">
+          <div className="trace-final-answer-header">
+            <div>
+              <div className="trace-final-answer-kicker">FINAL ANSWER</div>
+              <h2>RWKV 最终输出</h2>
+            </div>
+            <span className="trace-final-answer-status">原样 Markdown 渲染</span>
+          </div>
+          <div
+            className="trace-model-markdown trace-final-answer-body"
+            dangerouslySetInnerHTML={{ __html: renderModelMarkdown(visibleFinalAnswer) }}
+          />
+        </section>
+      ) : null}
       <header className="trace-inspector-header">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">

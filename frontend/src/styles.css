@@ -490,6 +490,153 @@
     @apply overflow-hidden rounded-lg border border-border bg-card;
   }
 
+  .chat-thread {
+    @apply mx-auto flex w-full max-w-4xl flex-col gap-5;
+  }
+
+  .chat-message {
+    @apply rounded-xl border px-4 py-3 text-sm leading-6 md:px-5;
+  }
+
+  .chat-message-user {
+    @apply self-end max-w-[min(92%,48rem)] border-primary/15 bg-primary/[0.06];
+  }
+
+  .chat-message-label {
+    @apply mb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-primary;
+  }
+
+  .chat-message-content {
+    @apply whitespace-pre-wrap break-words text-foreground;
+  }
+
+  .chat-message-assistant {
+    @apply w-full;
+  }
+
+  .chat-empty-answer {
+    @apply rounded-xl border border-dashed border-border bg-muted/20 px-5 py-6 text-sm text-muted-foreground;
+  }
+
+  .chat-empty-answer-title {
+    @apply font-medium text-foreground;
+  }
+
+  .chat-empty-answer p {
+    @apply mt-1 text-xs leading-5;
+  }
+
+  .chat-context-disclosure {
+    @apply overflow-hidden rounded-xl border border-border bg-muted/10;
+  }
+
+  .chat-context-disclosure > summary {
+    @apply flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground md:px-5;
+  }
+
+  .chat-context-disclosure > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .chat-context-disclosure[open] > summary {
+    @apply border-b border-border bg-muted/20 text-foreground;
+  }
+
+  .chat-context-disclosure .trace-inspector {
+    @apply rounded-none border-0;
+  }
+
+  .trace-final-answer {
+    @apply overflow-hidden rounded-lg border border-primary/20 bg-card;
+  }
+
+  .trace-final-answer-header {
+    @apply flex items-start justify-between gap-4 border-b border-primary/15 bg-primary/[0.04] px-4 py-4 md:px-5;
+  }
+
+  .trace-final-answer-kicker {
+    @apply font-mono text-[10px] font-semibold tracking-[0.12em] text-primary;
+  }
+
+  .trace-final-answer-header h2 {
+    @apply mt-1 text-base font-semibold tracking-[-0.01em] text-foreground;
+  }
+
+  .trace-final-answer-status {
+    @apply shrink-0 rounded bg-background px-2 py-1 font-mono text-[10px] text-muted-foreground;
+  }
+
+  .trace-final-answer-body {
+    @apply px-4 py-5 md:px-5 md:py-6;
+  }
+
+  .trace-model-markdown {
+    @apply min-w-0 text-sm leading-6 text-foreground/90;
+    text-wrap: pretty;
+  }
+
+  .trace-model-markdown > :first-child {
+    @apply mt-0;
+  }
+
+  .trace-model-markdown h1,
+  .trace-model-markdown h2,
+  .trace-model-markdown h3 {
+    @apply mt-6 mb-3 font-semibold tracking-[-0.015em] text-foreground;
+    text-wrap: balance;
+  }
+
+  .trace-model-markdown h1 { @apply text-xl; }
+  .trace-model-markdown h2 { @apply text-lg; }
+  .trace-model-markdown h3 { @apply text-base; }
+
+  .trace-model-markdown p,
+  .trace-model-markdown ul,
+  .trace-model-markdown ol,
+  .trace-model-markdown blockquote,
+  .trace-model-markdown table,
+  .trace-model-markdown pre {
+    @apply mb-4;
+  }
+
+  .trace-model-markdown ul,
+  .trace-model-markdown ol {
+    @apply pl-5;
+  }
+
+  .trace-model-markdown li {
+    @apply mb-1;
+  }
+
+  .trace-model-markdown table {
+    @apply w-full border-collapse overflow-hidden border border-border text-xs;
+  }
+
+  .trace-model-markdown th,
+  .trace-model-markdown td {
+    @apply border border-border px-2.5 py-2 text-left align-top;
+  }
+
+  .trace-model-markdown th {
+    @apply bg-muted/55 font-medium;
+  }
+
+  .trace-model-markdown a {
+    @apply break-words text-primary underline underline-offset-2;
+  }
+
+  .trace-model-markdown pre {
+    @apply overflow-x-auto rounded-md bg-stone-950 px-3 py-3 text-xs leading-5 text-stone-100;
+  }
+
+  .trace-model-markdown code {
+    @apply rounded bg-muted px-1 py-0.5 text-[0.9em];
+  }
+
+  .trace-model-markdown pre code {
+    @apply bg-transparent p-0 text-inherit;
+  }
+
   .trace-inspector-header {
     @apply flex flex-col gap-4 border-b border-border px-4 py-4 md:flex-row md:items-start md:justify-between md:px-5;
   }
@@ -761,6 +908,16 @@
 
   .trace-answer-box p {
     @apply whitespace-pre-wrap text-sm leading-6 text-foreground;
+  }
+
+  @media (max-width: 640px) {
+    .trace-final-answer-header {
+      @apply flex-col;
+    }
+
+    .trace-final-answer-status {
+      @apply self-start;
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {

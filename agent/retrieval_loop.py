@@ -15,6 +15,7 @@ from typing import Any, Mapping, Sequence
 from tools.registry import ToolRegistry
 from utils.model_events import visible_model_text
 from utils.experiment_strategies import normalize_strategy
+from utils.evidence_quality import date_mentions, evidence_text, has_substantive_evidence, substantive_evidence_items
 
 
 def _without_think(text: str) -> str:
@@ -312,21 +313,29 @@ def _quality_terms(query: str, candidate_queries: Sequence[str]) -> set[str]:
             token = token.casefold()
             if token not in stopwords:
                 terms.add(token)
+        for run in re.findall(r"[\u3400-\u9fff]+", str(value or "")):
+            if len(run) >= 2:
+                terms.add(run.casefold())
+                for size in (2, 3, 4):
+                    terms.update(run[index : index + size].casefold() for index in range(len(run) - size + 1))
     return terms
 
 
 def _evidence_quality_score(item: Mapping[str, Any], terms: set[str], candidate_count: int) -> float:
+    body = evidence_text(dict(item))
     haystack = " ".join(
-        str(item.get(key) or "")
-        for key in ("title", "url", "snippet", "abstract", "page_excerpt", "content")
+        [str(item.get("title") or ""), body, " ".join(str(value) for value in (item.get("authors") or []))]
     ).casefold()
     hits = sum(term in haystack for term in terms)
     lexical = min(1.0, hits / max(1, min(len(terms), 8)))
     support = min(1.0, len(set(item.get("candidate_queries") or [])) / max(1, candidate_count))
     best_rank = min(item.get("candidate_ranks") or [999])
     rank_score = 1 / max(1, best_rank)
-    body = bool(str(item.get("page_excerpt") or item.get("content") or item.get("abstract") or "").strip())
-    return round(0.45 * lexical + 0.25 * float(body) + 0.20 * support + 0.10 * rank_score, 4)
+    substantive = has_substantive_evidence(dict(item))
+    body_score = min(1.0, len(body) / 1200) if substantive else 0.0
+    date_requested = bool(terms.intersection({"\u65e5\u671f", "\u65f6\u95f4", "\u53d1\u5e03", "\u5468\u5e74", "\u7248\u672c", "date", "year", "release"}))
+    date_score = min(1.0, len(date_mentions(body)) / 3) if date_requested else 0.0
+    return round(0.35 * lexical + 0.25 * body_score + 0.20 * support + 0.10 * rank_score + 0.10 * date_score, 4)
 
 
 def merge_retrieval_results(
@@ -335,29 +344,35 @@ def merge_retrieval_results(
     rounds: Sequence[tuple[str, Mapping[str, Any]]],
     *,
     scope: str = "",
-    ranking_strategy: str = "candidate_support_then_rank.v1",
+    ranking_strategy: str = "evidence_quality.v1",
 ) -> dict[str, Any]:
     """Merge candidate/round results without inventing fields."""
     strategy = normalize_strategy({"ranking_strategy": ranking_strategy})["ranking_strategy"]
     merged: dict[str, dict[str, Any]] = {}
     sources: list[str] = []
+    discovery_sources: list[str] = []
     citation_refs: list[dict[str, Any]] = []
     citation_by_key: dict[str, int] = {}
     errors: list[str] = []
     real_network_values: list[bool] = []
     candidate_queries: list[str] = []
+    evidence_missing_count = 0
     for candidate_query, data in rounds:
         candidate_queries.append(candidate_query)
         real_network_values.append(bool(data.get("real_network", True)))
         errors.extend(str(value) for value in data.get("provider_errors") or [])
+        raw_items = [item for item in data.get("results") or [] if isinstance(item, dict)]
+        valid_items = substantive_evidence_items(raw_items)
+        evidence_missing_count += len(raw_items) - len(valid_items)
+        valid_keys = {_record_key(item) for item in valid_items if _record_key(item)}
         for source in data.get("sources") or []:
-            if source and source not in sources:
-                sources.append(source)
+            if source and source not in discovery_sources:
+                discovery_sources.append(source)
         for ref in data.get("citation_refs") or []:
             if not isinstance(ref, dict):
                 continue
             key = _record_key(ref) or str(ref.get("ref_id") or "").strip().casefold()
-            if not key:
+            if not key or key not in valid_keys:
                 continue
             existing_index = citation_by_key.get(key)
             if existing_index is None:
@@ -369,7 +384,9 @@ def merge_retrieval_results(
                 new_evidence = str(ref.get("evidence_text") or ref.get("content") or "")
                 if len(new_evidence) > len(current_evidence):
                     citation_refs[existing_index] = {**current, **ref}
-        for rank, item in enumerate(data.get("results") or [], start=1):
+        for rank, item in enumerate(valid_items, start=1):
+            if item.get("url") and item.get("url") not in sources:
+                sources.append(str(item.get("url")))
             key = _record_key(item)
             if not key:
                 continue
@@ -418,12 +435,8 @@ def merge_retrieval_results(
             4,
         )
         item["retrieval_rank"] = rank
-    evidence_missing_count = sum(
-        not bool(str(item.get("page_excerpt") or item.get("content") or item.get("abstract") or "").strip())
-        for item in results
-    )
     return {
-        "status": "ok" if results else "no_results",
+        "status": "ok" if results else ("no_evidence" if evidence_missing_count else "no_results"),
         "real_network": all(real_network_values) if real_network_values else True,
         "scope": scope,
         "query": query,
@@ -433,6 +446,7 @@ def merge_retrieval_results(
         "count": len(results),
         "results": results,
         "sources": sources,
+        "discovery_sources": discovery_sources,
         "citation_refs": citation_refs,
         "evidence_missing_count": evidence_missing_count,
         "provider_errors": errors,

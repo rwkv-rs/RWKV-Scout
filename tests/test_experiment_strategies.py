@@ -59,7 +59,7 @@ class ExperimentStrategyTests(unittest.TestCase):
         self.assertIn("consult a qualified professional", answer)
 
     def test_strategy_defaults_and_bounds_are_validated(self):
-        self.assertEqual(normalize_strategy()["ranking_strategy"], "candidate_support_then_rank.v1")
+        self.assertEqual(normalize_strategy()["ranking_strategy"], "evidence_quality.v1")
         self.assertEqual(normalize_strategy({"context_source_count": 3})["context_source_count"], 3)
         with self.assertRaises(ValueError):
             normalize_strategy({"context_source_count": 5})
@@ -72,8 +72,8 @@ class ExperimentStrategyTests(unittest.TestCase):
                 "query-a",
                 {
                     "results": [
-                        {"title": "A", "url": "https://example.com/a", "snippet": "a"},
-                        {"title": "B", "url": "https://example.com/b", "snippet": "b"},
+                        {"title": "A", "url": "https://example.com/a", "page_excerpt": "A supported evidence body with enough text for the source boundary."},
+                        {"title": "B", "url": "https://example.com/b", "page_excerpt": "B supported evidence body with enough text for the source boundary."},
                     ],
                 },
             ),
@@ -81,13 +81,13 @@ class ExperimentStrategyTests(unittest.TestCase):
                 "query-b",
                 {
                     "results": [
-                        {"title": "C", "url": "https://example.com/c", "snippet": "c"},
-                        {"title": "B", "url": "https://example.com/b", "snippet": "b"},
+                        {"title": "C", "url": "https://example.com/c", "page_excerpt": "C supported evidence body with enough text for the source boundary."},
+                        {"title": "B", "url": "https://example.com/b", "page_excerpt": "B supported evidence body with enough text for the source boundary."},
                     ],
                 },
             ),
         ]
-        support = merge_retrieval_results("query", "search_web_keyless", rounds)
+        support = merge_retrieval_results("query", "search_web_keyless", rounds, ranking_strategy="candidate_support_then_rank.v1")
         best_rank = merge_retrieval_results("query", "search_web_keyless", rounds, ranking_strategy="best_rank.v1")
         self.assertEqual(support["ranking_strategy"], "candidate_support_then_rank.v1")
         self.assertEqual(best_rank["ranking_strategy"], "best_rank.v1")
@@ -100,12 +100,12 @@ class ExperimentStrategyTests(unittest.TestCase):
                 "Python official documentation",
                 {
                     "results": [
-                        {"title": "Unrelated welcome page", "url": "https://example.com/welcome", "snippet": "welcome"},
+                {"title": "Unrelated welcome page", "url": "https://example.com/welcome", "page_excerpt": "A generic welcome page body with no requested documentation facts."},
                         {
                             "title": "Python documentation",
                             "url": "https://docs.python.org/",
                             "snippet": "Python documentation",
-                            "page_excerpt": "Python documentation and library reference",
+                            "page_excerpt": "Python documentation and library reference with the requested official API details.",
                         },
                     ],
                 },
@@ -124,9 +124,9 @@ class ExperimentStrategyTests(unittest.TestCase):
         data = {
             "query": "evidence",
             "results": [
-                {"title": "A", "url": "https://example.com/a", "page_excerpt": "fact a"},
-                {"title": "B", "url": "https://example.com/b", "page_excerpt": "fact b"},
-                {"title": "C", "url": "https://example.com/c", "page_excerpt": "fact c"},
+                {"title": "A", "url": "https://example.com/a", "page_excerpt": "This is a supported evidence fact from source A with sufficient body text."},
+                {"title": "B", "url": "https://example.com/b", "page_excerpt": "This is a supported evidence fact from source B with sufficient body text."},
+                {"title": "C", "url": "https://example.com/c", "page_excerpt": "This is a supported evidence fact from source C with sufficient body text."},
             ],
             "citation_refs": [],
         }
@@ -146,9 +146,9 @@ class ExperimentStrategyTests(unittest.TestCase):
         data = {
             "query": "RWKV创始人、论文和GitHub项目链接是什么？",
             "results": [
-                {"title": "Founder", "url": "https://example.com/founder", "page_excerpt": "founder"},
-                {"title": "Papers", "url": "https://example.com/papers", "page_excerpt": "papers"},
-                {"title": "Projects", "url": "https://example.com/projects", "page_excerpt": "projects"},
+                {"title": "Founder", "url": "https://example.com/founder", "page_excerpt": "The founder evidence is directly stated in this source body."},
+                {"title": "Papers", "url": "https://example.com/papers", "page_excerpt": "The paper evidence is directly stated in this source body."},
+                {"title": "Projects", "url": "https://example.com/projects", "page_excerpt": "The project evidence is directly stated in this source body."},
             ],
             "citation_refs": [],
         }
@@ -159,8 +159,8 @@ class ExperimentStrategyTests(unittest.TestCase):
         data = {
             "query": "evidence",
             "results": [
-                {"title": "Selected", "url": "https://example.com/selected", "page_excerpt": "fact"},
-                {"title": "Noise", "url": "https://example.com/noise", "page_excerpt": "noise"},
+                {"title": "Selected", "url": "https://example.com/selected", "page_excerpt": "The selected source contains a directly supported evidence fact."},
+                {"title": "Noise", "url": "https://example.com/noise", "page_excerpt": "The noise source contains an unrelated evidence paragraph."},
             ],
             "citation_refs": [
                 {"ref_id": "S1", "title": "Selected", "url": "https://example.com/selected"},

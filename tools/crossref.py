@@ -253,6 +253,10 @@ def fetch_crossref_record(
                     "content": page_text,
                     "source": "Crossref REST API",
                     "untrusted_content": True,
+                    "evidence_origin": "structured_api_record",
+                    "evidence_kind": "structured_record",
+                    "evidence_boundary": "structured_api_record_only",
+                    "body_verified": True,
                 }
             ],
             "sources": [human_url],
@@ -262,6 +266,8 @@ def fetch_crossref_record(
                     "title": record.get("title") or doi,
                     "url": human_url,
                     "source": "Crossref REST API",
+                    "evidence_origin": "structured_api_record",
+                    "evidence_boundary": "structured_api_record_only",
                 }
             ],
             "provider_errors": [],

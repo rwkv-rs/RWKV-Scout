@@ -307,6 +307,10 @@ def fetch_github_rest(
                     "source": "GitHub REST API",
                     "content_type": content_type,
                     "untrusted_content": True,
+                    "evidence_origin": "structured_api_record",
+                    "evidence_kind": "structured_record",
+                    "evidence_boundary": "structured_api_record_only",
+                    "body_verified": True,
                 }
             ],
             "sources": [human_url],
@@ -316,6 +320,8 @@ def fetch_github_rest(
                     "title": title,
                     "url": human_url,
                     "source": "GitHub REST API",
+                    "evidence_origin": "structured_api_record",
+                    "evidence_boundary": "structured_api_record_only",
                 }
             ],
             "provider_errors": [],

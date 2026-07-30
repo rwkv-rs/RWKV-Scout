@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+from agent.orchestrator import Orchestrator
 from agent.planner import Planner
 from retrieval_plugins import PluginRegistry, normalize_result
 from tools.builtin import load_builtin_tools
@@ -116,6 +118,71 @@ class RetrievalRuntimeTests(unittest.TestCase):
         self.assertIn("fetch_web_url", all_rows)
         self.assertTrue(ToolRegistry.can_execute("search_web_keyless", "ALL"))
         self.assertTrue(ToolRegistry.can_execute("fetch_web_url", "ALL"))
+
+    def test_model_catalog_matches_single_public_web_capability(self):
+        catalog = json.loads(
+            ToolRegistry.get_json_catalog("ALL", model_visible_only=True)
+        )
+        rows = {row["name"]: row for row in catalog}
+        self.assertEqual(set(rows), {"web_search", "finish_task"})
+        self.assertEqual(ToolRegistry.model_visible_names("ALL"), ["finish_task", "web_search"])
+        self.assertEqual(rows["web_search"]["category"], "retrieval")
+        self.assertEqual(rows["finish_task"]["category"], "control")
+        self.assertNotIn("search_web_tavily", rows)
+        self.assertNotIn("fetch_web_url", rows)
+
+    def test_planner_prompt_does_not_leak_provider_routing_matrix(self):
+        prompt = Planner._system_prompt("ALL")
+        self.assertIn('"name": "web_search"', prompt)
+        self.assertNotIn('"name": "search_web_tavily"', prompt)
+        self.assertNotIn('"name": "search_web_keyless"', prompt)
+        self.assertNotIn('"name": "fetch_web_url"', prompt)
+        self.assertNotIn("provider-specific search API", prompt)
+
+    def test_global_loop_blocks_successful_duplicate_web_search_before_execution(self):
+        orchestrator = Orchestrator()
+        orchestrator.state.task_id = "DUPLICATE_SEARCH_TEST"
+        orchestrator.planner.plan_next_action = Mock(
+            side_effect=[
+                {"action": "web_search", "args": {"query": "same query"}},
+                {"action": "web_search", "args": {"query": "same query"}},
+                {"action": "finish_task", "args": {}},
+            ]
+        )
+        orchestrator.planner.observe_tool_result = Mock()
+        orchestrator._complete_model_tool_loop = Mock(return_value="done")
+        task_plan = {"atomic_points": []}
+        tool_result = json.dumps(
+            {
+                "status": "ok",
+                "results": [{"url": "https://example.com/fact"}],
+                "evidence_ready": True,
+            }
+        )
+
+        with patch("agent.orchestrator.ToolRegistry.execute", return_value=tool_result) as execute:
+            with patch("agent.orchestrator.append_task_event") as append_event:
+                result = orchestrator._run_single_loop("goal", {}, task_plan, max_steps=3)
+
+        self.assertEqual(result, "done")
+        self.assertEqual(execute.call_count, 1)
+        rounds = orchestrator._complete_model_tool_loop.call_args.args[2]
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0][0], "same query")
+        self.assertTrue(rounds[0][1]["evidence_ready"])
+        duplicate_events = [
+            call
+            for call in append_event.call_args_list
+            if call.args[1] == "retrieval_duplicate_blocked"
+        ]
+        self.assertEqual(len(duplicate_events), 1)
+        blocked_results = [
+            call
+            for call in append_event.call_args_list
+            if call.args[1] == "tool_result"
+            and call.kwargs.get("execution_status") == "blocked_duplicate"
+        ]
+        self.assertEqual(len(blocked_results), 1)
 
     def test_discovery_and_evidence_roles_are_phase_gated(self):
         self.assertTrue(ToolRegistry.can_execute("search_web_tavily", "DISCOVERY"))

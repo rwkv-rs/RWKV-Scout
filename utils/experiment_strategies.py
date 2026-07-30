@@ -6,7 +6,7 @@ from typing import Any
 
 
 DEFAULT_STRATEGY = {
-    "ranking_strategy": "candidate_support_then_rank.v1",
+    "ranking_strategy": "evidence_quality.v1",
     "context_source_count": None,
     "prompt_variant": "default.v1",
 }

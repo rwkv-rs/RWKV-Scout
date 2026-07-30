@@ -33,11 +33,24 @@ def _safe_id(value: str) -> str:
 
 
 def _load_cases(path: Path) -> list[dict[str, Any]]:
-    with path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    cases = payload.get("cases") if isinstance(payload, dict) else payload
+    if path.suffix.lower() == ".jsonl":
+        cases = []
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"invalid JSONL at line {line_number}: {exc}") from exc
+                cases.append(record)
+    else:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        cases = payload.get("cases") if isinstance(payload, dict) else payload
     if not isinstance(cases, list) or not cases:
-        raise ValueError("input JSON must contain a non-empty 'cases' list")
+        raise ValueError("input must contain a non-empty cases list")
     normalized = []
     for index, case in enumerate(cases, start=1):
         if not isinstance(case, dict) or not str(case.get("query") or "").strip():
@@ -83,6 +96,8 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
     strategy_selections = []
     judgements = []
     contexts = []
+    validations = []
+    verifications = []
     finals = []
     model_calls = []
     step_limits = []
@@ -338,6 +353,29 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
         elif event_type == "context_build":
             data = event.get("data") or {}
             contexts.append(data.get("context_stats") or {})
+        elif event_type == "evidence_validation":
+            data = event.get("data") or {}
+            validations.append(
+                {
+                    "step": event.get("step"),
+                    "validation": data.get("validation") or {},
+                    "answer_alignment": data.get("answer_alignment") or {},
+                }
+            )
+        elif event_type == "evidence_verification":
+            data = event.get("data") or {}
+            verifications.append(
+                {
+                    "step": event.get("step"),
+                    "status": event.get("status") or data.get("status", ""),
+                    "completion_ready": event.get("completion_ready", data.get("completion_ready")),
+                    "requires_replan": event.get("requires_replan", data.get("requires_replan")),
+                    "missing_point_ids": event.get("missing_point_ids") or data.get("missing_point_ids") or [],
+                    "conflict_point_ids": event.get("conflict_point_ids") or data.get("conflict_point_ids") or [],
+                    "next_queries": event.get("next_queries") or data.get("next_queries") or [],
+                    "error": event.get("error") or data.get("error", ""),
+                }
+            )
         elif event_type == "completion_judgement":
             data = event.get("data") or {}
             judgements.append(
@@ -359,6 +397,9 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "model_output_available": event.get("model_output_available"),
                     "round_count": event.get("round_count"),
                     "citation_refs": event.get("citation_refs") or [],
+                    "validation": event.get("validation") or {},
+                    "answer_alignment": event.get("answer_alignment") or {},
+                    "evidence_verification": event.get("evidence_verification") or {},
                 }
             )
 
@@ -381,6 +422,8 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
         "page_evidence": evidence,
         "completion_judgements": judgements,
         "contexts": contexts,
+        "evidence_validations": validations,
+        "evidence_verifications": verifications,
         "finals": finals,
         "model_calls": model_calls,
         "step_limits": step_limits,
@@ -407,6 +450,8 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             "web_search_chunk_events": len(web_search_chunks),
             "model_call_count": len(model_calls),
             "step_limit_count": len(step_limits),
+            "validation_event_count": len(validations),
+            "verification_event_count": len(verifications),
             "ledger_event_count": len(ledger_events),
             "ledger_total_searches": int(ledger_snapshot.get("total_searches") or 0),
             "ledger_unique_queries": int(ledger_snapshot.get("unique_queries") or 0),
@@ -428,8 +473,20 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                 "retry_calls": candidate_retry_calls,
             },
             "context_tokens": _numeric_summary(context_token_values),
+            "evidence_source_truncated_count": sum(
+                int(context.get("source_truncated_count", context.get("truncated_count", 0)) or 0)
+                for context in contexts
+                if isinstance(context, dict)
+            ),
+            "final_context_truncated_count": sum(
+                bool(context.get("final_context_truncated", context.get("context_truncated", False)))
+                for context in contexts
+                if isinstance(context, dict)
+            ),
+            # Backward-compatible alias; it now means final aggregate prompt
+            # truncation rather than per-source truncation.
             "context_truncated_count": sum(
-                int(context.get("truncated_count") or 0)
+                bool(context.get("final_context_truncated", context.get("context_truncated", False)))
                 for context in contexts
                 if isinstance(context, dict)
             ),
@@ -446,7 +503,15 @@ def _aggregate_trace_summaries(rows: list[dict[str, Any]]) -> dict[str, Any]:
     aggregate: collections.Counter[str] = collections.Counter()
     for row in rows:
         stats = (row.get("trace") or {}).get("stats") or {}
-        for key in ("page_fetches", "chunk_count", "context_truncated_count"):
+        for key in (
+            "page_fetches",
+            "chunk_count",
+            "evidence_source_truncated_count",
+            "final_context_truncated_count",
+            "context_truncated_count",
+            "validation_event_count",
+            "verification_event_count",
+        ):
             aggregate[key] += int(stats.get(key) or 0)
         for namespace in ("tool_result_statuses", "error_class_counts", "page_evidence_statuses", "completion_statuses", "final_statuses"):
             for key, value in (stats.get(namespace) or {}).items():
@@ -463,6 +528,25 @@ def run(input_path: Path, output_path: Path) -> dict[str, Any]:
     cases = _load_cases(input_path)
     started_at = datetime.now().isoformat(timespec="seconds")
     rows = []
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_checkpoint(*, finished: bool = False) -> dict[str, Any]:
+        report = {
+            "suite": "manual-real-web",
+            "status": "completed" if finished else "running",
+            "input": str(input_path),
+            "started_at": started_at,
+            "finished_at": datetime.now().isoformat(timespec="seconds") if finished else None,
+            "completed_cases": len(rows),
+            "total_cases": len(cases),
+            "cases": rows,
+            "aggregate_trace_summary": _aggregate_trace_summaries(rows),
+        }
+        with output_path.open("w", encoding="utf-8") as handle:
+            json.dump(report, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        return report
+
     for case in cases:
         case_id = _safe_id(case.get("case_id") or f"case_{len(rows) + 1}")
         task_id = f"JSON_ACCEPTANCE_{case_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -513,20 +597,9 @@ def run(input_path: Path, output_path: Path) -> dict[str, Any]:
                 "trace": trace,
             }
         )
+        write_checkpoint()
 
-    report = {
-        "suite": "manual-real-web",
-        "input": str(input_path),
-        "started_at": started_at,
-        "finished_at": datetime.now().isoformat(timespec="seconds"),
-        "cases": rows,
-        "aggregate_trace_summary": _aggregate_trace_summaries(rows),
-    }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as handle:
-        json.dump(report, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-    return report
+    return write_checkpoint(finished=True)
 
 
 def main() -> None:

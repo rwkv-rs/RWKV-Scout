@@ -166,7 +166,7 @@ export function AppSidebar({
             onClick={onOpenChat}
           >
             <MessageCircle className="size-3.5" />
-            聊天
+            检索对话
           </Button>
           </div>
           <div className="relative">

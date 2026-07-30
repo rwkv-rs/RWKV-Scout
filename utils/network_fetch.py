@@ -37,6 +37,20 @@ _DEFAULT_HTTP_HEADERS = {
 }
 
 
+def _is_pdf_url(value: str) -> bool:
+    """Return whether a URL explicitly points at a PDF document."""
+
+    path = urlparse(str(value or "")).path.casefold()
+    return path.endswith(".pdf") or path.endswith(".pdf/")
+
+
+def _reject_binary_document(payload: bytes, url: str) -> None:
+    """Keep binary documents out of the HTML/Markdown text pipeline."""
+
+    if _is_pdf_url(url) or bytes(payload or b"").lstrip().startswith(b"%PDF-"):
+        raise NetworkFetchError(f"PDF document is not supported by the HTML text pipeline: {url}")
+
+
 def _encoding_candidates(
     payload: bytes,
     *,
@@ -299,13 +313,17 @@ def fetch_text(
     headers: dict[str, str] | None = None,
 ) -> str:
     """Fetch a public URL without requiring a paid API key."""
+    if _is_pdf_url(url):
+        raise NetworkFetchError(f"PDF document is not supported by the HTML text pipeline: {url}")
     effective_timeout = bounded_timeout(min(float(timeout), get_network_timeout_seconds()))
     effective_headers = dict(_DEFAULT_HTTP_HEADERS)
     if headers:
         effective_headers.update({str(key): str(value) for key, value in headers.items()})
     if os.name == "nt" and shutil.which("wsl.exe"):
         try:
-            return decode_http_body(_fetch_via_wsl_curl(url, params, effective_timeout, effective_headers))
+            payload = _fetch_via_wsl_curl(url, params, effective_timeout, effective_headers)
+            _reject_binary_document(payload, url)
+            return decode_http_body(payload)
         except NetworkFetchError as wsl_error:
             # WSL networking can be unavailable even while the Windows
             # process has a working direct route. Keep fetching provider
@@ -314,6 +332,9 @@ def fetch_text(
                 session = create_network_session(effective_headers)
                 response = session.get(url, params=params, timeout=effective_timeout)
                 response.raise_for_status()
+                if "application/pdf" in str(response.headers.get("content-type") or "").casefold():
+                    raise NetworkFetchError(f"PDF document is not supported by the HTML text pipeline: {url}")
+                _reject_binary_document(response.content, url)
                 return decode_http_body(
                     response.content,
                     declared_encoding=response.headers.get("content-type", "") or response.encoding or "",
@@ -328,6 +349,9 @@ def fetch_text(
         session = create_network_session(effective_headers)
         response = session.get(url, params=params, timeout=effective_timeout)
         response.raise_for_status()
+        if "application/pdf" in str(response.headers.get("content-type") or "").casefold():
+            raise NetworkFetchError(f"PDF document is not supported by the HTML text pipeline: {url}")
+        _reject_binary_document(response.content, url)
         return decode_http_body(
             response.content,
             declared_encoding=response.headers.get("content-type", "") or response.encoding or "",

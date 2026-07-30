@@ -83,6 +83,19 @@ export function renderMarkdown(markdown) {
   // DOMPurify 默认允许 <a> 和 <strong> 等安全标签属性
   return DOMPurify.sanitize(html);
 }
+
+function stripModelProtocol(text) {
+  return String(text || "")
+    .replace(/^\s*User:\s*[\s\S]*?\n\s*Assistant:\s*/i, "")
+    .replace(/^\s*(?:Assistant:\s*)+/i, "")
+    .replace(/^\s*<think>[\s\S]*?<\/think>\s*/i, "")
+    .trim();
+}
+
+export function renderModelMarkdown(markdown) {
+  return renderMarkdown(stripModelProtocol(markdown));
+}
+
 export function reportToMarkdown(report) {
   if (!report) return "";
   if (report.nodes?.length) {

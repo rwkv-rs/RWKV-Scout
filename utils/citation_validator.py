@@ -13,6 +13,7 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from utils.network_fetch import NetworkFetchError, fetch_text
+from utils.evidence_quality import evidence_text as substantive_text
 
 
 _SEARCH_HOSTS = {
@@ -43,18 +44,23 @@ def _tokens(value: str) -> set[str]:
 
 
 def _evidence_text(ref: dict[str, Any]) -> str:
-    span = ref.get("source_span")
-    if isinstance(span, str):
-        return span
+    # Inline citation text is accepted only when the producer declares that it
+    # came from a fetched page body or an explicit structured record.  A bare
+    # ``evidence_text`` field is too easy to populate with a provider snippet
+    # or model extraction and therefore cannot establish citation support.
+    origin = str(ref.get("evidence_origin") or "").strip().casefold()
+    boundary = str(ref.get("evidence_boundary") or "").strip().casefold()
+    if not origin and boundary != "page_body_only":
+        return ""
+    if origin in {"discovery", "search_result", "snippet"}:
+        return ""
     parts = [
         ref.get("evidence_text"),
-        ref.get("content"),
+        ref.get("source_excerpt"),
         ref.get("page_excerpt"),
-        ref.get("snippet"),
+        ref.get("content"),
         ref.get("abstract"),
     ]
-    if isinstance(span, dict):
-        parts.extend(str(value) for value in span.values() if isinstance(value, str))
     return " ".join(str(value) for value in parts if value)
 
 
@@ -90,10 +96,7 @@ def _retrieved_evidence(evidence: Iterable[dict[str, Any]] | None) -> dict[str, 
         url = _normalized_url(item.get("url"))
         if not url:
             continue
-        text = " ".join(
-            str(item.get(key) or "")
-            for key in ("page_excerpt", "content", "abstract", "snippet")
-        ).strip()
+        text = substantive_text(item).strip()
         if text and len(text) > len(indexed.get(url, "")):
             indexed[url] = text
     return indexed

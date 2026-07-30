@@ -16,9 +16,11 @@ import re
 import time
 from typing import Any, Mapping
 
-from config import DATA_PIPELINE, get_llm_concurrency
+from config import DATA_PIPELINE, get_llm_concurrency, get_llm_context_length
 from utils.chunker import get_token_count, semantic_chunk_text
+from utils.evidence_quality import MIN_PAGE_BODY_CHARS
 from utils.model_events import visible_model_text
+from utils.rwkv_prompt import JSON_CALL_STOP_SUFFIXES
 
 
 def _clean_text(value: Any) -> str:
@@ -53,9 +55,39 @@ def _as_facts(value: Any) -> list[str]:
     return [_clean_text(item) for item in values if _clean_text(item)]
 
 
+def _config_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(DATA_PIPELINE.get(name, default) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _single_pass_threshold() -> int:
+    """Return the cleaned-page size below which extraction stays single-pass."""
+
+    return _config_int("web_chunk_single_pass_tokens", 7000, minimum=512)
+
+
 def _configured_chunk_window(max_tokens: int | None = None) -> int:
-    configured = int(max_tokens or DATA_PIPELINE.get("web_chunk_tokens", 2048))
-    return max(128, min(configured, 2048))
+    """Resolve a chunk window against the selected model context length."""
+
+    requested = int(max_tokens) if max_tokens is not None else _config_int("web_chunk_tokens", 4096)
+    hard_max = _config_int("web_chunk_max_tokens", max(requested, 4096), minimum=128)
+    minimum = _config_int("web_chunk_min_tokens", 1024, minimum=128)
+    prompt_reserve = _config_int("web_chunk_prompt_reserve_tokens", 1024, minimum=128)
+    output_reserve = _config_int("web_chunk_output_reserve_tokens", 4096, minimum=384)
+    safety_margin = _config_int("web_chunk_safety_margin_tokens", 512, minimum=128)
+    context_budget = get_llm_context_length() - prompt_reserve - output_reserve - safety_margin
+    context_budget = max(minimum, context_budget)
+    return max(128, min(requested, hard_max, context_budget))
+
+
+def _candidate_completion_budget(prompt: str, configured_max_tokens: int) -> int:
+    """Keep prompt plus completion within the selected model context."""
+
+    safety_margin = _config_int("web_chunk_safety_margin_tokens", 512, minimum=128)
+    available = get_llm_context_length() - get_token_count(prompt) - safety_margin
+    return max(384, min(int(configured_max_tokens), available))
 
 
 def build_page_chunks(
@@ -69,15 +101,35 @@ def build_page_chunks(
     clean_page = str(page_text or "").strip()
     if not clean_page:
         return []
+
+    page_tokens = get_token_count(clean_page)
+    # An explicit max_tokens is a caller-requested test/override.  Production
+    # uses the adaptive path: cleaned pages up to the configured threshold get
+    # one complete prompt, preserving long lists/tables and avoiding needless
+    # parallel calls.
+    if (
+        max_tokens is None
+        and str(DATA_PIPELINE.get("web_chunk_mode", "adaptive")).casefold() == "adaptive"
+        and page_tokens <= _single_pass_threshold()
+    ):
+        return [
+            {
+                "chunk_id": "chunk-1",
+                "index": 0,
+                "text": clean_page,
+                "token_count": page_tokens,
+            }
+        ]
+
     configured_max = _configured_chunk_window(max_tokens)
     configured_overlap = float(
         overlap_ratio if overlap_ratio is not None else DATA_PIPELINE.get("web_chunk_overlap_ratio", 0.1)
     )
     chunks = semantic_chunk_text(
         clean_page,
-        # Keep one page chunk within the requested 2k-token evidence window.
-        # The cap is intentional: a stale or experimental config must not
-        # silently push a chunk beyond the model's page-evidence budget.
+        # Keep chunked pages within the model-aware evidence window.  The
+        # single-pass path above intentionally allows a complete cleaned page
+        # up to the configured threshold.
         max_tokens=configured_max,
         overlap_ratio=max(0.0, min(configured_overlap, 0.25)),
     )
@@ -146,7 +198,9 @@ def parse_chunk_candidate(raw_output: str, chunk: Mapping[str, Any]) -> dict[str
         if (
             candidate_line
             and candidate_line not in {"}", "]", "```"}
-            and not candidate_line.startswith(("{", "[", "Assistant:", "User:"))
+            and not candidate_line.startswith(("{", "[", "Assistant:", "User:", "System:", "Function output:", "Tool result:"))
+            and "supported" not in candidate_line.casefold()
+            and "arguments" not in candidate_line.casefold()
             and any(char.isalnum() for char in candidate_line)
         ):
             facts = [candidate_line[:800]]
@@ -227,6 +281,18 @@ def extract_single_page_evidence(
     url = str(page.get("url") or "")
     title = str(page.get("title") or url)
     page_text = str(page.get("page_excerpt") or page.get("content") or "").strip()
+    if len(page_text) < MIN_PAGE_BODY_CHARS:
+        return {
+            "status": "no_evidence",
+            "url": url,
+            "title": title,
+            "page_chars": len(page_text),
+            "chunk_count": 0,
+            "chunk_window_tokens": 0,
+            "chunks": [],
+            "candidates": [],
+            "errors": ["cleaned page body is below the substantive evidence threshold"],
+        }
     chunks = build_page_chunks(page_text, max_tokens=max_chunk_tokens)
     if not chunks:
         return {
@@ -253,21 +319,33 @@ def extract_single_page_evidence(
         min(int(configured_candidate_tokens or 8192), 8192),
     )
 
-    def ask(prompt: str) -> tuple[str, float, str]:
+    def ask(prompt: str) -> tuple[str, float, str, int]:
         # A complete JSON candidate may contain a long station/entity list.
         # Keep this bounded, but leave enough room for the closing JSON and
         # the facts instead of truncating valid evidence at 160 tokens.
+        request_max_tokens = _candidate_completion_budget(prompt, candidate_max_tokens)
         started = time.perf_counter()
-        response = llm.text_completion(prompt, max_tokens=candidate_max_tokens)
+        try:
+            response = llm.text_completion(
+                prompt,
+                max_tokens=request_max_tokens,
+                stop=JSON_CALL_STOP_SUFFIXES,
+            )
+        except TypeError as exc:
+            if "stop" not in str(exc):
+                raise
+            response = llm.text_completion(prompt, max_tokens=request_max_tokens)
         return (
             str(response.content or ""),
             round((time.perf_counter() - started) * 1000, 1),
             str(getattr(response, "finish_reason", "") or ""),
+            request_max_tokens,
         )
 
     raw_outputs = [""] * len(prompts)
     candidate_durations_ms = [0.0] * len(prompts)
     candidate_finish_reasons = [""] * len(prompts)
+    candidate_budgets = [0] * len(prompts)
     errors: list[str] = []
     worker_count = min(max(1, get_llm_concurrency()), len(prompts))
     parallel_started = time.perf_counter()
@@ -278,7 +356,12 @@ def extract_single_page_evidence(
             for future in concurrent.futures.as_completed(futures):
                 index = futures[future]
                 try:
-                    raw_outputs[index], candidate_durations_ms[index], candidate_finish_reasons[index] = future.result()
+                    (
+                        raw_outputs[index],
+                        candidate_durations_ms[index],
+                        candidate_finish_reasons[index],
+                        candidate_budgets[index],
+                    ) = future.result()
                 except Exception as exc:
                     errors.append(f"{type(exc).__name__}: {exc}")
 
@@ -338,7 +421,15 @@ def extract_single_page_evidence(
         "title": title,
         "page_chars": len(page_text),
         "chunk_count": len(chunks),
-        "chunk_window_tokens": _configured_chunk_window(max_chunk_tokens),
+        "chunk_window_tokens": max((int(item["token_count"]) for item in chunks), default=0),
+        "chunk_mode": (
+            "single_pass"
+            if max_chunk_tokens is None
+            and len(chunks) == 1
+            and int(chunks[0]["token_count"]) <= _single_pass_threshold()
+            else "semantic_parallel"
+        ),
+        "single_pass_threshold_tokens": _single_pass_threshold(),
         "chunks": [
             {
                 "chunk_id": chunk["chunk_id"],
@@ -352,6 +443,9 @@ def extract_single_page_evidence(
         # It is the same page chunk sent to the parallel worker, not a new
         # controller-generated answer or a second retrieval path.
         "first_chunk_text": chunks[0]["text"] if chunks else "",
+        # Keep a bounded copy of cleaned source text.  Model-extracted facts
+        # below are routing aids; final synthesis uses this source body.
+        "source_excerpt": page_text[:14000],
         "chunk_candidates": parsed,
         "candidates": merged,
         # This is still bounded evidence, not the raw page.  Do not use the
@@ -367,7 +461,8 @@ def extract_single_page_evidence(
             "completed_calls": sum(bool(value) for value in raw_outputs),
             "attempted_calls": len(prompts) + len(retry_indexes),
             "retry_calls": len(retry_indexes),
-            "max_tokens_per_call": candidate_max_tokens,
+            "max_tokens_per_call": max(candidate_budgets or [candidate_max_tokens]),
+            "min_tokens_per_call": min((value for value in candidate_budgets if value), default=candidate_max_tokens),
             "wall_time_ms": round((time.perf_counter() - parallel_started) * 1000, 1),
             "candidate_durations_ms": candidate_durations_ms,
             "finish_reasons": candidate_finish_reasons,

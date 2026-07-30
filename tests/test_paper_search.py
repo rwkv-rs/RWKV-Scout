@@ -71,15 +71,15 @@ class PaperSearchTests(unittest.TestCase):
 
     def test_merge_deduplicates_citations_by_url_across_rounds(self):
         first = {
-            "results": [{"title": "Source", "url": "https://example.com/source", "content": "fact"}],
+            "results": [{"title": "Source", "url": "https://example.com/source", "content": "This source contains the evidence body required for citation deduplication."}],
             "sources": ["https://example.com/source"],
-            "citation_refs": [{"ref_id": "S1", "url": "https://example.com/source", "evidence_text": "fact"}],
+            "citation_refs": [{"ref_id": "S1", "url": "https://example.com/source", "evidence_text": "This source contains the evidence body required for citation deduplication."}],
             "real_network": False,
         }
         second = {
-            "results": [{"title": "Source", "url": "https://example.com/source", "content": "fact"}],
+            "results": [{"title": "Source", "url": "https://example.com/source", "content": "This source contains the evidence body required for citation deduplication."}],
             "sources": ["https://example.com/source"],
-            "citation_refs": [{"ref_id": "S2", "url": "https://example.com/source", "evidence_text": "fact"}],
+            "citation_refs": [{"ref_id": "S2", "url": "https://example.com/source", "evidence_text": "This source contains the evidence body required for citation deduplication."}],
             "real_network": False,
         }
         merged = merge_retrieval_results("source", "search_papers", [("source", first), ("source", second)])
@@ -88,12 +88,12 @@ class PaperSearchTests(unittest.TestCase):
 
     def test_merge_canonicalizes_doi_and_landing_page_variants(self):
         first = {
-            "results": [{"title": "Source", "doi": "10.1000/example", "url": "https://doi.org/10.1000/example"}],
+            "results": [{"title": "Source", "doi": "10.1000/example", "url": "https://doi.org/10.1000/example", "abstract": "This paper abstract provides the structured evidence required for the DOI merge test."}],
             "citation_refs": [{"ref_id": "S1", "doi": "10.1000/example", "url": "https://doi.org/10.1000/example"}],
             "real_network": True,
         }
         second = {
-            "results": [{"title": "Source", "doi": "10.1000/example", "url": "https://publisher.example/paper?id=1"}],
+            "results": [{"title": "Source", "doi": "10.1000/example", "url": "https://publisher.example/paper?id=1", "abstract": "This paper abstract provides the structured evidence required for the DOI merge test."}],
             "citation_refs": [{"ref_id": "S2", "doi": "10.1000/example", "url": "https://publisher.example/paper?id=1"}],
             "real_network": True,
         }
