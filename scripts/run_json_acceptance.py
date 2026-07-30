@@ -639,12 +639,23 @@ def run(
         finally:
             current_task_id.reset(task_token)
         trace = _trace_summary(task_id)
-        final_status = str((trace.get("final") or {}).get("status") or "")
+        final_record = trace.get("final") if isinstance(trace.get("final"), dict) else {}
+        final_status = str(final_record.get("status") or "")
         status = "completed" if final_status.startswith("completed") else "failed"
-        last_event_type = str((get_task_events(task_id) or [{}])[-1].get("type") or "")
+        task_events = get_task_events(task_id) or []
+        last_event = task_events[-1] if task_events else {}
+        last_event_type = str(last_event.get("type") or "")
         failure_reason = ""
         if status != "completed":
-            failure_reason = error or (
+            last_model_error = next(
+                (
+                    str(event.get("error"))
+                    for event in reversed(task_events)
+                    if event.get("type") == "model_call" and event.get("error")
+                ),
+                "",
+            )
+            failure_reason = error or str(final_record.get("content") or "") or last_model_error or (
                 f"orchestrator ended without a completed final event"
                 f" (final_status={final_status or 'missing'}, last_event_type={last_event_type or 'missing'})"
             )

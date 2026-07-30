@@ -43,8 +43,16 @@ def _enrich_case(case: Any) -> Any:
     final = trace.get("final") if isinstance(trace.get("final"), dict) else {}
     final_status = str(case.get("final_status") or final.get("status") or "missing")
     last_event_type = str(events[-1].get("type") or "missing") if events else "missing"
+    last_model_error = next(
+        (
+            str(event.get("error"))
+            for event in reversed(events)
+            if event.get("type") == "model_call" and event.get("error")
+        ),
+        "",
+    )
     enriched = dict(case)
-    enriched["failure_reason"] = str(case.get("error") or (
+    enriched["failure_reason"] = str(case.get("error") or final.get("content") or last_model_error or (
         "orchestrator ended without a completed final event"
         f" (final_status={final_status}, last_event_type={last_event_type})"
     ))
