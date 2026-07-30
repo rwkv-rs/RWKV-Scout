@@ -641,6 +641,13 @@ def run(
         trace = _trace_summary(task_id)
         final_status = str((trace.get("final") or {}).get("status") or "")
         status = "completed" if final_status.startswith("completed") else "failed"
+        last_event_type = str((get_task_events(task_id) or [{}])[-1].get("type") or "")
+        failure_reason = ""
+        if status != "completed":
+            failure_reason = error or (
+                f"orchestrator ended without a completed final event"
+                f" (final_status={final_status or 'missing'}, last_event_type={last_event_type or 'missing'})"
+            )
         rows.append(
             {
                 "case_id": case_id,
@@ -661,6 +668,8 @@ def run(
                 "final_output": answer,
                 "final_output_chars": len(answer),
                 "error": error,
+                "failure_reason": failure_reason,
+                "final_status": final_status,
                 "trace": trace,
             }
         )
