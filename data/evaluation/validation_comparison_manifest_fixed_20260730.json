@@ -1,0 +1,53 @@
+{
+  "schema_version": "validation_comparison_manifest.v2",
+  "run_id": "fixed_control_only_verifier_20260730",
+  "description": "Fair comparison of the engineering validator and the RWKV control-only verifier. Both architectures use the same fixed 100, 50, and date inputs; verifier outputs are produced after the terminal-path verification fix.",
+  "accuracy_policy": {
+    "automatic_factual_scoring": false,
+    "reason": "The suites do not contain authoritative gold answers. Use source-backed human review for factual accuracy."
+  },
+  "batches": [
+    {
+      "batch_id": "fixed_engineering_validator_100",
+      "architecture": "engineering_validator",
+      "suite": "100",
+      "input": "data/evaluation/rwkv_search_100_fixed_20260729.json",
+      "output": "data/evaluation/parallel_engineering_validator_100_20260730.json"
+    },
+    {
+      "batch_id": "fixed_engineering_validator_50",
+      "architecture": "engineering_validator",
+      "suite": "50",
+      "input": "data/evaluation/rwkv_search_50_fixed_20260729.json",
+      "output": "data/evaluation/parallel_engineering_validator_50_20260730.json"
+    },
+    {
+      "batch_id": "fixed_engineering_validator_date",
+      "architecture": "engineering_validator",
+      "suite": "date",
+      "input": "data/evaluation/date_retrieval_fixed_20260729.json",
+      "output": "data/evaluation/parallel_engineering_validator_date_20260730.json"
+    },
+    {
+      "batch_id": "fixed_rwkv_verifier_100",
+      "architecture": "rwkv_verifier",
+      "suite": "100",
+      "input": "data/evaluation/rwkv_search_100_fixed_20260729.json",
+      "output": "data/evaluation/fixed_rwkv_verifier_100_20260730.json"
+    },
+    {
+      "batch_id": "fixed_rwkv_verifier_50",
+      "architecture": "rwkv_verifier",
+      "suite": "50",
+      "input": "data/evaluation/rwkv_search_50_fixed_20260729.json",
+      "output": "data/evaluation/fixed_rwkv_verifier_50_20260730.json"
+    },
+    {
+      "batch_id": "fixed_rwkv_verifier_date",
+      "architecture": "rwkv_verifier",
+      "suite": "date",
+      "input": "data/evaluation/date_retrieval_fixed_20260729.json",
+      "output": "data/evaluation/fixed_rwkv_verifier_date_20260730.json"
+    }
+  ]
+}
