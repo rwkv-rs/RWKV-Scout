@@ -187,11 +187,38 @@ def _compare_pair(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def build_report(output_dir: Path) -> dict[str, Any]:
+def _batches_from_manifest(manifest_path: Path) -> list[dict[str, Any]]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    repo_root = manifest_path.resolve().parents[2]
     batches = []
-    for architecture, suite in DEFAULT_BATCHES:
-        path = output_dir / f"validation_{architecture}_{suite}_20260730.json"
-        batches.append(_batch_measurement(path, architecture, suite))
+    for spec in manifest.get("batches") or []:
+        if not isinstance(spec, dict):
+            continue
+        raw_output = Path(str(spec.get("output") or ""))
+        output = raw_output if raw_output.is_absolute() else repo_root / raw_output
+        batches.append(
+            _batch_measurement(
+                output,
+                str(spec.get("architecture") or "unknown"),
+                str(spec.get("suite") or "unknown"),
+            )
+        )
+    return batches
+
+
+def build_report(output_dir: Path, manifest_path: Path | None = None) -> dict[str, Any]:
+    batches = (
+        _batches_from_manifest(manifest_path.resolve())
+        if manifest_path is not None
+        else [
+            _batch_measurement(
+                output_dir / f"validation_{architecture}_{suite}_20260730.json",
+                architecture,
+                suite,
+            )
+            for architecture, suite in DEFAULT_BATCHES
+        ]
+    )
     engineering = {row["suite"]: row for row in batches if row["architecture"] == "engineering_validator"}
     verifier = {row["suite"]: row for row in batches if row["architecture"] == "rwkv_verifier"}
     comparisons = [
@@ -201,6 +228,7 @@ def build_report(output_dir: Path) -> dict[str, Any]:
     return {
         "schema_version": "validation_benchmark_comparison.v1",
         "generated_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+        "manifest": str(manifest_path.resolve()) if manifest_path is not None else None,
         "architectures": {
             "engineering_validator": {
                 "contract": "mechanical evidence boundary and existing controller rules",
@@ -233,9 +261,17 @@ def build_report(output_dir: Path) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", default="data/evaluation")
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help="Read architecture/suite output paths from a comparison manifest.",
+    )
     parser.add_argument("--output", default="data/evaluation/validation_benchmark_comparison_20260730.json")
     args = parser.parse_args()
-    report = build_report(Path(args.output_dir))
+    report = build_report(
+        Path(args.output_dir),
+        Path(args.manifest) if args.manifest else None,
+    )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
