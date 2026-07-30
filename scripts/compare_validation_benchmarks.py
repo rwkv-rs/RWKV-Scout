@@ -40,6 +40,10 @@ def _number(value: Any) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
+def _count(value: Any) -> int:
+    return int(value) if isinstance(value, (int, float)) else 0
+
+
 def _stats(values: list[Any]) -> dict[str, Any]:
     numbers = [_number(value) for value in values if isinstance(value, (int, float))]
     if not numbers:
@@ -82,6 +86,12 @@ def _case_measurement(case: dict[str, Any]) -> dict[str, Any]:
         or event.get("action") in {"fetch_web_url", "fetch_url"}
     ]
     trace_stats = trace.get("stats") if isinstance(trace.get("stats"), dict) else {}
+    action_counts = trace_stats.get("action_counts") if isinstance(trace_stats.get("action_counts"), dict) else {}
+    page_evidence_statuses = (
+        trace_stats.get("page_evidence_statuses")
+        if isinstance(trace_stats.get("page_evidence_statuses"), dict)
+        else {}
+    )
     verifier_statuses = Counter(
         str(event.get("status") or "unknown") for event in verification_events
     )
@@ -95,10 +105,13 @@ def _case_measurement(case: dict[str, Any]) -> dict[str, Any]:
         "architecture": case.get("architecture"),
         "validation_architecture": case.get("validation_architecture"),
         "model_calls": len(model_events),
-        "tool_calls": counts.get("tool_call", 0) + counts.get("model_tool_decision", 0),
-        "search_events": len(search_events),
-        "fetch_events": len(fetch_events),
-        "chunk_events": counts.get("page_chunk", 0) + counts.get("chunk", 0),
+        "tool_calls": counts.get("tool_call", 0),
+        "tool_decision_events": counts.get("model_tool_decision", 0),
+        "search_events": _count(action_counts.get("web_search")) or len(search_events),
+        "search_stage_events": counts.get("web_search_stage", 0),
+        "fetch_events": _count(trace_stats.get("page_fetches")) or len(fetch_events),
+        "page_extract_events": counts.get("page_extract", 0),
+        "chunk_events": _count(trace_stats.get("chunk_count")) or counts.get("web_search_chunk", 0),
         "context_builds": counts.get("context_build", 0),
         "evidence_validation_events": counts.get("evidence_validation", 0),
         "evidence_verification_events": len(verification_events),
@@ -112,7 +125,10 @@ def _case_measurement(case: dict[str, Any]) -> dict[str, Any]:
         "synthesis_events": counts.get("synthesis", 0),
         "evidence_rounds": trace_stats.get("evidence_rounds", trace.get("evidence_rounds", 0)),
         "context_tokens": trace_stats.get("context_tokens", trace.get("context_tokens", 0)),
-        "usable_evidence_count": trace_stats.get("usable_evidence_count", 0),
+        "usable_evidence_count": _count(page_evidence_statuses.get("ok")),
+        "page_evidence_statuses": page_evidence_statuses,
+        "evidence_source_truncated_count": _count(trace_stats.get("evidence_source_truncated_count")),
+        "final_context_truncated_count": _count(trace_stats.get("final_context_truncated_count")),
         "event_count": len(events),
         "event_type_counts": dict(counts),
         "verifier_decisions": [
