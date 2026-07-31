@@ -11,7 +11,6 @@ from agent.planner import Planner
 from agent.state import AgentState
 from agent.slm_scheduler import GLOBAL_SLM_INPUT_SCHEDULER
 from agent.retrieval_synthesis import build_evidence_context, synthesize_retrieval_answer
-from agent.evidence_verifier import verify_evidence
 from agent.page_evidence import extract_single_page_evidence
 from agent.retrieval_loop import (
     merge_retrieval_results,
@@ -58,7 +57,6 @@ class Orchestrator(ControlledRetrievalMixin):
         self._task_plan: dict = {}
         self._fork_transcripts: list[dict] = []
         self._retrieval_ledger = RetrievalLedger()
-        self._last_evidence_verification: dict = {}
 
     def _retrieval_context(self) -> dict:
         return {
@@ -78,18 +76,6 @@ class Orchestrator(ControlledRetrievalMixin):
         context["agentic_tool_loop"] = True
         context["retrieval_ledger"] = self._retrieval_ledger.observation()
         return context
-
-    def _validation_architecture(self) -> str:
-        """Return the explicitly selected evidence-validation architecture."""
-        # The production default is deterministic engineering validation.  The
-        # model verifier remains an explicit experiment-only opt-in; it adds a
-        # model round trip and its control decision is not trusted as fact.
-        value = str(self.state.run_metadata.get("validation_architecture") or "engineering_validator").strip().casefold()
-        if value in {"engineering", "engineering_validator", "rules", "deterministic"}:
-            return "engineering_validator"
-        if value in {"rwkv", "rwkv_verifier", "model", "model_verifier"}:
-            return "rwkv_verifier"
-        return "engineering_validator"
 
     def _model_execution_context(self) -> str:
         """Return a safe execution summary for the final RWKV call.
@@ -297,7 +283,9 @@ class Orchestrator(ControlledRetrievalMixin):
                 "char_end": len(source_excerpt),
             },
             "chunk_count": evidence.get("chunk_count", 0),
+            "chunk_window_tokens": evidence.get("chunk_window_tokens", 0),
             "chunk_candidates": chunk_candidates,
+            "source_chunks": evidence.get("source_chunks") or [],
             "evidence_status": "ok" if body_verified else "no_evidence",
             "model_extraction_status": "ok" if model_extracted_facts else "no_evidence",
         }
@@ -379,34 +367,21 @@ class Orchestrator(ControlledRetrievalMixin):
         *,
         attempt: int = 0,
         max_attempts: int = 0,
-        validation: dict | None = None,
     ) -> bool:
         """Ask RWKV to split the remaining work after retrieval is insufficient.
 
-        The controller reports execution facts and, when available, the
-        independent verifier's missing-point report. It never creates a
-        replacement query or URL itself.
+        The controller reports execution facts. It never creates a replacement
+        query or URL itself; the planner remains responsible for deciding how
+        to recover.
         """
         if not self._task_plan:
             return False
-        if validation:
-            retrieval_observation = {
-                "schema_version": "evidence_verification.v1",
-                "status": "error",
-                "error_class": "evidence_verification_incomplete",
-                "message": "The independent evidence verifier found missing or conflicting task-point evidence.",
-                "missing_point_ids": validation.get("missing_point_ids") or [],
-                "conflict_point_ids": validation.get("conflict_point_ids") or [],
-                "next_queries": validation.get("next_queries") or [],
-                "verification_points": validation.get("points") or [],
-            }
-        else:
-            retrieval_observation = {
-                "schema_version": "retrieval.v1",
-                "status": "error",
-                "error_class": str(observation.get("error_class") or "no_usable_evidence"),
-                "message": "The selected retrieval observation did not yield usable evidence.",
-            }
+        retrieval_observation = {
+            "schema_version": "retrieval.v1",
+            "status": "error",
+            "error_class": str(observation.get("error_class") or "no_usable_evidence"),
+            "message": "The selected retrieval observation did not yield usable evidence.",
+        }
         followup_plan = self.planner.replan_task(
             user_query,
             self._task_plan,
@@ -423,7 +398,7 @@ class Orchestrator(ControlledRetrievalMixin):
                 "status": observation.get("status"),
                 "error_class": observation.get("error_class"),
                 "page_evidence": observation.get("page_evidence"),
-                "evidence_validation": retrieval_observation if validation else {},
+                "evidence_validation": retrieval_observation,
             },
             replan_attempt=attempt,
             max_replan_attempts=max_attempts,
@@ -436,64 +411,6 @@ class Orchestrator(ControlledRetrievalMixin):
         self.state.run_metadata["task_plan"] = followup_plan
         self.planner.update_task_plan(followup_plan)
         return True
-
-    def _verify_retrieval_completion(
-        self,
-        user_query: str,
-        action: str,
-        rounds: list[tuple[str, dict]],
-        step: int,
-    ) -> tuple[dict, dict]:
-        """Audit merged evidence with a fresh RWKV call before synthesis."""
-        merged = merge_retrieval_results(
-            user_query,
-            action,
-            rounds,
-            ranking_strategy=self._strategy()["ranking_strategy"],
-        )
-        context = build_evidence_context(
-            merged,
-            constraints=self.state.run_metadata,
-            query=user_query,
-        )
-        verification = verify_evidence(
-            self.analyzer.llm,
-            query=user_query,
-            task_plan=self._task_plan,
-            evidence_context=context,
-        )
-        self._last_evidence_verification = {
-            key: verification.get(key)
-            for key in (
-                "schema_version",
-                "status",
-                "completion_ready",
-                "requires_replan",
-                "points",
-                "missing_point_ids",
-                "conflict_point_ids",
-                "next_queries",
-                "is_truth_judgement",
-            )
-        }
-        append_task_event(
-            self.state.task_id,
-            "evidence_verification",
-            step=step,
-            phase="VALIDATION",
-            action="evidence_verifier",
-            status=verification.get("status"),
-            completion_ready=verification.get("completion_ready"),
-            requires_replan=verification.get("requires_replan"),
-            missing_point_ids=verification.get("missing_point_ids") or [],
-            conflict_point_ids=verification.get("conflict_point_ids") or [],
-            next_queries=verification.get("next_queries") or [],
-            prompt=verification.get("prompt", ""),
-            model_output=verification.get("model_output", ""),
-            error=verification.get("error", ""),
-            data=verification,
-        )
-        return merged, verification
 
     def _evidence_query_for_point(self, task_point_id: str, fallback: str) -> str:
         """Project the model-selected atomic point into the evidence prompt."""
@@ -571,7 +488,6 @@ class Orchestrator(ControlledRetrievalMixin):
                 citation_refs=synthesis.get("citation_refs") or [],
                 validation=synthesis.get("validation") or {},
                 answer_alignment=synthesis.get("answer_alignment") or {},
-                evidence_verification=synthesis.get("evidence_verification") or {},
                 prompt=synthesis.get("prompt", ""),
             model_output=synthesis.get("model_output", ""),
             context_text=synthesis.get("context_text", ""),
@@ -634,22 +550,6 @@ class Orchestrator(ControlledRetrievalMixin):
                 step,
                 termination_reason=termination_reason,
             )
-        # Every terminal path must pass through the selected evidence
-        # architecture before synthesis.  The ordinary ``finish_task`` path
-        # performs verification earlier so it can replan; duplicate-query,
-        # parse-error, and max-step paths can arrive here without that earlier
-        # hook.  Keep this as a one-call fallback rather than allowing those
-        # paths to silently skip the model verifier.
-        if (
-            self._validation_architecture() == "rwkv_verifier"
-            and not self._last_evidence_verification
-        ):
-            self._verify_retrieval_completion(
-                user_query,
-                action,
-                rounds,
-                step,
-            )
         execution_context = self._model_execution_context()
         if rounds:
             merged = merge_retrieval_results(
@@ -666,7 +566,6 @@ class Orchestrator(ControlledRetrievalMixin):
                 constraints=self.state.run_metadata,
                 execution_context=execution_context,
                 termination_reason=termination_reason,
-                verification=self._last_evidence_verification,
             )
             answer = synthesis.get("content") or ""
             citation_validation = validate_citations(
@@ -725,7 +624,6 @@ class Orchestrator(ControlledRetrievalMixin):
                 risk_validation=risk_validation,
                 validation=synthesis.get("validation") or {},
                 answer_alignment=synthesis.get("answer_alignment") or {},
-                evidence_verification=synthesis.get("evidence_verification") or {},
                 prompt=synthesis.get("prompt", ""),
                 model_output=synthesis.get("model_output", ""),
                 repair_prompt=synthesis.get("repair_prompt", ""),
@@ -1348,61 +1246,6 @@ class Orchestrator(ControlledRetrievalMixin):
                     phase = "GENERIC_WEB" if generic_web_mode else "ALL"
                     continue
                 if rounds:
-                    if self._validation_architecture() == "rwkv_verifier":
-                        merged, verification = self._verify_retrieval_completion(
-                            user_query,
-                            last_action,
-                            rounds,
-                            step,
-                        )
-                        if verification.get("requires_replan") and replan_attempts < max_replan_attempts:
-                            replan_attempts += 1
-                            append_task_event(
-                                self.state.task_id,
-                                "task_replan_attempt",
-                                step=step,
-                                phase="RECOVERY",
-                                attempt=replan_attempts,
-                                max_attempts=max_replan_attempts,
-                                reason="evidence_verifier_found_missing_or_conflicting_points",
-                                missing_point_ids=verification.get("missing_point_ids") or [],
-                                conflict_point_ids=verification.get("conflict_point_ids") or [],
-                                next_queries=verification.get("next_queries") or [],
-                                counts_toward_global_steps=False,
-                            )
-                            replanned = self._replan_after_retrieval_failure(
-                                user_query,
-                                merged,
-                                step,
-                                attempt=replan_attempts,
-                                max_attempts=max_replan_attempts,
-                                validation=verification,
-                            )
-                            if replanned:
-                                retrieval_attempted = True
-                                phase = "GENERIC_WEB" if generic_web_mode else "ALL"
-                                continue
-                        elif verification.get("requires_replan"):
-                            append_task_event(
-                                self.state.task_id,
-                                "task_replan_limit_reached",
-                                step=step,
-                                phase="RECOVERY",
-                                attempts=replan_attempts,
-                                max_attempts=max_replan_attempts,
-                                reason="evidence_verifier_still_found_missing_or_conflicting_points",
-                                missing_point_ids=verification.get("missing_point_ids") or [],
-                                conflict_point_ids=verification.get("conflict_point_ids") or [],
-                                transition="final_synthesis",
-                            )
-                    else:
-                        merged = merge_retrieval_results(
-                            user_query,
-                            last_action,
-                            rounds,
-                            ranking_strategy=self._strategy()["ranking_strategy"],
-                        )
-                        self._last_evidence_verification = {}
                     answer = self._complete_model_tool_loop(
                         user_query,
                         last_action,
@@ -1531,57 +1374,9 @@ class Orchestrator(ControlledRetrievalMixin):
                     termination_reason="duplicate_query_blocked",
                     evidence_rounds=len(rounds),
                 )
-                if rounds and self._validation_architecture() == "rwkv_verifier":
-                    merged, verification = self._verify_retrieval_completion(
-                        user_query,
-                        action,
-                        rounds,
-                        step,
-                    )
-                    if verification.get("requires_replan") and replan_attempts < max_replan_attempts:
-                        replan_attempts += 1
-                        append_task_event(
-                            self.state.task_id,
-                            "task_replan_attempt",
-                            step=step,
-                            phase="RECOVERY",
-                            attempt=replan_attempts,
-                            max_attempts=max_replan_attempts,
-                            reason="evidence_verifier_found_missing_or_conflicting_points",
-                            missing_point_ids=verification.get("missing_point_ids") or [],
-                            conflict_point_ids=verification.get("conflict_point_ids") or [],
-                            next_queries=verification.get("next_queries") or [],
-                            counts_toward_global_steps=False,
-                        )
-                        replanned = self._replan_after_retrieval_failure(
-                            user_query,
-                            merged,
-                            step,
-                            attempt=replan_attempts,
-                            max_attempts=max_replan_attempts,
-                            validation=verification,
-                        )
-                        if replanned:
-                            retrieval_attempted = True
-                            phase = "GENERIC_WEB" if generic_web_mode else "ALL"
-                            continue
-                    elif verification.get("requires_replan"):
-                        append_task_event(
-                            self.state.task_id,
-                            "task_replan_limit_reached",
-                            step=step,
-                            phase="RECOVERY",
-                            attempts=replan_attempts,
-                            max_attempts=max_replan_attempts,
-                            reason="evidence_verifier_still_found_missing_or_conflicting_points",
-                            missing_point_ids=verification.get("missing_point_ids") or [],
-                            conflict_point_ids=verification.get("conflict_point_ids") or [],
-                            transition="final_synthesis",
-                        )
                 # A duplicate is an execution error, not a new observation
                 # that should re-enter the same model loop. Greedy RWKV can
-                # reproduce the same JSON forever.  Verification may grant a
-                # bounded replan first; after that, transition to synthesis
+                # reproduce the same JSON forever; transition to synthesis
                 # and let the final model answer from existing evidence or
                 # state that evidence is insufficient.
                 return self._complete_model_tool_loop(
@@ -1922,7 +1717,6 @@ class Orchestrator(ControlledRetrievalMixin):
         self.state.run_metadata = dict(run_metadata or {})
         self._retrieval_ledger = RetrievalLedger()
         self._fork_transcripts = []
-        self._last_evidence_verification = {}
         self.state.task_output_dir = os.path.join(DATA_PIPELINE.get("output_directory", "./data/output"), self.state.task_id)
         os.makedirs(self.state.task_output_dir, exist_ok=True)
         
@@ -1951,17 +1745,6 @@ class Orchestrator(ControlledRetrievalMixin):
             prompt_version=(run_metadata or {}).get("prompt_version", "unversioned"),
             run_metadata=run_metadata or {},
         )
-        append_task_event(
-            self.state.task_id,
-            "validation_architecture_selected",
-            phase="ROUTING",
-            architecture=self._validation_architecture(),
-            verifier_message_contract=(
-                "control-only: task-point status, evidence refs, missing fields, conflicts, and next queries; "
-                "never an answer or new factual claim"
-            ),
-        )
-        
         debug_dir = DATA_PIPELINE.get("debug_directory", "./data/debug_slm")
         os.makedirs(debug_dir, exist_ok=True)
         session_id = self.state.task_id

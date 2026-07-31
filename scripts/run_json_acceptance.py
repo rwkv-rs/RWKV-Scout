@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from agent.orchestrator import Orchestrator
 from config import get_analysis_timeout_seconds
+from utils.runtime_gate import analysis_slot
 from utils.token_tracker import current_task_id
 from utils.task_events import append_task_event, get_task_events
 
@@ -36,9 +37,9 @@ def _safe_id(value: str) -> str:
 
 
 @contextmanager
-def _case_timeout(seconds: float):
+def _case_timeout(seconds: float | None):
     """Bound one case while retaining any partial task events."""
-    if seconds <= 0 or not hasattr(signal, "setitimer"):
+    if seconds is None or seconds <= 0 or not hasattr(signal, "setitimer"):
         yield
         return
     previous_handler = signal.getsignal(signal.SIGALRM)
@@ -120,11 +121,9 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
     evidence = []
     plans = []
     strategy_selections = []
-    validation_architectures = []
     judgements = []
     contexts = []
     validations = []
-    verifications = []
     finals = []
     model_calls = []
     step_limits = []
@@ -283,13 +282,6 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "override": bool(event.get("override")),
                 }
             )
-        elif event_type == "validation_architecture_selected":
-            validation_architectures.append(
-                {
-                    "architecture": event.get("architecture") or "",
-                    "verifier_message_contract": event.get("verifier_message_contract") or "",
-                }
-            )
         elif event_type == "model_tool_decision":
             action = str(event.get("action") or "")
             phase = str(event.get("phase") or "")
@@ -396,20 +388,6 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "answer_alignment": data.get("answer_alignment") or {},
                 }
             )
-        elif event_type == "evidence_verification":
-            data = event.get("data") or {}
-            verifications.append(
-                {
-                    "step": event.get("step"),
-                    "status": event.get("status") or data.get("status", ""),
-                    "completion_ready": event.get("completion_ready", data.get("completion_ready")),
-                    "requires_replan": event.get("requires_replan", data.get("requires_replan")),
-                    "missing_point_ids": event.get("missing_point_ids") or data.get("missing_point_ids") or [],
-                    "conflict_point_ids": event.get("conflict_point_ids") or data.get("conflict_point_ids") or [],
-                    "next_queries": event.get("next_queries") or data.get("next_queries") or [],
-                    "error": event.get("error") or data.get("error", ""),
-                }
-            )
         elif event_type == "completion_judgement":
             data = event.get("data") or {}
             judgements.append(
@@ -433,7 +411,6 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "citation_refs": event.get("citation_refs") or [],
                     "validation": event.get("validation") or {},
                     "answer_alignment": event.get("answer_alignment") or {},
-                    "evidence_verification": event.get("evidence_verification") or {},
                 }
             )
 
@@ -449,7 +426,6 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
         "event_count": len(events),
         "plans": plans,
         "strategy_selections": strategy_selections,
-        "validation_architectures": validation_architectures,
         "decisions": decisions,
         "tool_calls": tool_calls,
         "tool_results": tool_results,
@@ -458,7 +434,6 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
         "completion_judgements": judgements,
         "contexts": contexts,
         "evidence_validations": validations,
-        "evidence_verifications": verifications,
         "finals": finals,
         "model_calls": model_calls,
         "step_limits": step_limits,
@@ -487,7 +462,6 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             "model_call_count": len(model_calls),
             "step_limit_count": len(step_limits),
             "validation_event_count": len(validations),
-            "verification_event_count": len(verifications),
             "event_type_counts": dict(collections.Counter(str(event.get("type") or "unknown") for event in events)),
             "ledger_event_count": len(ledger_events),
             "ledger_total_searches": int(ledger_snapshot.get("total_searches") or 0),
@@ -547,7 +521,6 @@ def _aggregate_trace_summaries(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "final_context_truncated_count",
             "context_truncated_count",
             "validation_event_count",
-            "verification_event_count",
         ):
             aggregate[key] += int(stats.get(key) or 0)
         for namespace in ("tool_result_statuses", "error_class_counts", "page_evidence_statuses", "completion_statuses", "final_statuses"):
@@ -564,7 +537,6 @@ def _aggregate_trace_summaries(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def run(
     input_path: Path,
     output_path: Path,
-    default_validation_architecture: str | None = None,
     case_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     cases = _load_cases(input_path)
@@ -605,7 +577,6 @@ def run(
             "generic_web_search_only",
             "retrieval_fork",
             "retrieval_strategy",
-            "validation_architecture",
             "retrieval_branch_width",
             "architecture",
         ):
@@ -615,13 +586,12 @@ def run(
                     if key in {"generic_web_search_only", "retrieval_fork"}
                     else case[key]
                 )
-        if default_validation_architecture:
-            metadata["validation_architecture"] = default_validation_architecture
         query = str(case["query"])
         task_token = current_task_id.set(task_id)
         try:
             with _case_timeout(case_timeout):
-                answer = Orchestrator().run(query, task_id=task_id, run_metadata=metadata)
+                with analysis_slot(task_id):
+                    answer = Orchestrator().run(query, task_id=task_id, run_metadata=metadata)
             error = ""
         except TimeoutError as exc:
             append_task_event(
@@ -669,11 +639,7 @@ def run(
                     or case.get("architecture")
                     or "single_loop"
                 ),
-                "validation_architecture": (
-                    (trace.get("validation_architectures") or [{}])[-1].get("architecture")
-                    or case.get("validation_architecture")
-                    or "engineering_validator"
-                ),
+                "validation_mode": "mechanical_evidence_validation",
                 "status": status,
                 "answer": answer,
                 "final_output": answer,
@@ -702,22 +668,15 @@ def main() -> None:
         help="UTF-8 JSON output file",
     )
     parser.add_argument(
-        "--validation-architecture",
-        choices=("engineering_validator", "rwkv_verifier"),
-        default=None,
-        help="Override the evidence-validation architecture for every case.",
-    )
-    parser.add_argument(
         "--case-timeout-seconds",
         type=float,
         default=None,
-        help="Hard wall-clock limit per case; defaults to RUNTIME.analysis_timeout_seconds.",
+        help="Optional hard wall-clock limit per case; omitted means no single-case timeout.",
     )
     args = parser.parse_args()
     report = run(
         Path(args.input),
         Path(args.output),
-        default_validation_architecture=args.validation_architecture,
         case_timeout_seconds=args.case_timeout_seconds,
     )
     # Keep stdout ASCII-safe on Windows; the full UTF-8 report is the file.

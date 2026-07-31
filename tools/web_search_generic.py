@@ -15,6 +15,7 @@ import json
 import re
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 from agent.page_evidence import extract_single_page_evidence
 from clients.llm_client import LLMClient
 from config import DATA_PIPELINE, get_llm_context_length
@@ -41,6 +42,42 @@ def _parse_result(value: Any) -> dict[str, Any]:
 def _host(url: str) -> str:
     match = re.match(r"https?://([^/]+)", str(url or "").strip(), re.I)
     return (match.group(1) if match else "").casefold().removeprefix("www.")
+
+
+def _extract_direct_url(query: str) -> str:
+    """Return a complete URL query as a direct-fetch target.
+
+    A URL supplied as the whole model-selected query is an instruction to
+    retrieve that page, not a search phrase. Natural-language queries that
+    merely mention a URL continue through provider discovery.
+    """
+    value = str(query or "").strip().strip("<>[]()")
+    if any(char.isspace() for char in value):
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return normalize_url(value.rstrip(".,;:!?"))
+
+
+def _extract_single_goal_url(goal: str) -> str:
+    """Recover one URL explicitly supplied in the original user goal."""
+    candidates = re.findall(r"https?://[^\s<>\[\]()\"']+", str(goal or ""), flags=re.I)
+    normalized = [_extract_direct_url(item) for item in candidates]
+    normalized = [item for item in normalized if item]
+    return normalized[0] if len(normalized) == 1 else ""
+
+
+def _direct_candidate(url: str) -> dict[str, Any]:
+    return {
+        "url": url,
+        "title": url,
+        "snippet": "direct URL requested by the model",
+        "source": "direct_url",
+        "candidate_score": 100.0,
+        "candidate_rank": 1,
+        "discovery_providers": ["direct_url"],
+    }
 
 
 def _merge_candidates(query: str, provider_results: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
@@ -231,6 +268,7 @@ def _compact_page(
         "evidence_status": page_evidence["status"],
         "chunk_count": page_evidence["chunk_count"],
         "chunk_candidates": evidence.get("candidates") or [],
+        "source_chunks": evidence.get("source_chunks") or [],
         "candidate_rank": candidate.get("candidate_rank"),
         "discovery_providers": candidate.get("discovery_providers") or [],
     }
@@ -251,7 +289,7 @@ def _compact_page(
     category="retrieval",
     signature="""[Tool] web_search
 - Function: perform one bounded general-web retrieval transaction.
-- Parameters: query (one concise search query).
+- Parameters: query (one concise search query or one complete http/https URL).
 - Pipeline: discovery, candidate admission/ranking, bounded page fetch, Markdown extraction, adaptive evidence extraction (cleaned pages up to the configured threshold stay single-pass; longer pages are chunked).
 - Provider selection, URL fetching, page cleaning and chunk aggregation are internal backend steps; do not invent a provider-specific tool name.
 - The result is evidence only. It is not a final answer and does not decide whether the user's task is complete.""",
@@ -304,20 +342,28 @@ def web_search(query: str, **kwargs: Any) -> str:
             )
         )
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(run_keyless), pool.submit(run_tavily)]
-        provider_results = [future.result() for future in futures]
+    direct_url = _extract_direct_url(query) or _extract_single_goal_url(kwargs.get("original_goal"))
+    if direct_url:
+        provider_results: list[dict[str, Any]] = []
+        provider_statuses = [
+            {"provider": "direct_url", "status": "ok", "count": 1, "errors": []}
+        ]
+        candidates = [_direct_candidate(direct_url)]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(run_keyless), pool.submit(run_tavily)]
+            provider_results = [future.result() for future in futures]
 
-    provider_statuses = [
-        {
-            "provider": result.get("provider") or "unknown",
-            "status": result.get("status") or "error",
-            "count": int(result.get("count") or len(result.get("results") or [])),
-            "errors": result.get("provider_errors") or [],
-        }
-        for result in provider_results
-    ]
-    candidates = _merge_candidates(query, provider_results, limit=max_candidates)
+        provider_statuses = [
+            {
+                "provider": result.get("provider") or "unknown",
+                "status": result.get("status") or "error",
+                "count": int(result.get("count") or len(result.get("results") or [])),
+                "errors": result.get("provider_errors") or [],
+            }
+            for result in provider_results
+        ]
+        candidates = _merge_candidates(query, provider_results, limit=max_candidates)
     append_task_event(
         task_id,
         "web_search_stage",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from config import get_llm_context_length
+from config import DATA_PIPELINE, get_llm_context_length
 from utils.chunker import get_token_count, semantic_chunk_text
 from utils.model_budget import bounded_completion_budget
 from utils.evidence_quality import (
@@ -46,6 +46,14 @@ def _clean_answer(text: str) -> str:
     # through the public ``answer`` field.
     if re.match(
         r"(?is)^\s*(?:BEGIN\s+EVIDENCE(?:\s+(?:DATA|SOURCE))?|RETRIEVAL\s+EXECUTION\s+SUMMARY|BEGIN\s+EXECUTION\s+RECORD)\b",
+        text,
+    ):
+        return ""
+    # A continuation may prepend a citation or heading before replaying an
+    # internal evidence block. Treat any such block as protocol leakage so
+    # the bounded repair call can regenerate a user-facing answer.
+    if re.search(
+        r"(?im)^\s*(?:BEGIN\s+EVIDENCE(?:\s+(?:DATA|SOURCE))?|EVIDENCE\s+BODY|BEGIN\s+EXECUTION\s+RECORD)\b",
         text,
     ):
         return ""
@@ -151,6 +159,11 @@ def _enforce_citation_contract(answer: str, data: dict[str, Any], context: dict[
         if ref_id and _normalized_url(url) in allowed_urls:
             citation_links[ref_id] = url
         citation_links.setdefault(f"s{index}", url)
+        for chunk in item.get("chunks") or []:
+            if not isinstance(chunk, dict):
+                continue
+            chunk_index = int(chunk.get("index", 0) or 0) + 1
+            citation_links.setdefault(f"s{index}:c{chunk_index}", url)
 
     def replace_url(match: re.Match[str]) -> str:
         url = match.group(0)
@@ -166,7 +179,7 @@ def _enforce_citation_contract(answer: str, data: dict[str, Any], context: dict[
         url = citation_links.get(label.casefold(), "")
         return f"[{label}]({url})" if url else ""
 
-    answer = re.sub(r"\[(S\d+)\](?!\()", expand_citation, answer, flags=re.IGNORECASE)
+    answer = re.sub(r"\[(S\d+(?::C\d+)?)\](?!\()", expand_citation, answer, flags=re.IGNORECASE)
     answer = re.sub(r"[ \t]{2,}", " ", answer).strip()
     has_source_marker = bool(
         re.search(
@@ -224,6 +237,78 @@ def _truncate_markdown_by_tokens(value: str, max_tokens: int) -> str:
         return text
     chunks = semantic_chunk_text(text, max_tokens=max_tokens, overlap_ratio=0.0)
     return str(chunks[0] if chunks else text).strip()
+
+
+def _source_chunks_for_context(item: dict[str, Any], body: str) -> list[dict[str, Any]]:
+    """Return cleaned source chunks while keeping the raw-body boundary."""
+
+    stored = [chunk for chunk in item.get("source_chunks") or [] if isinstance(chunk, dict)]
+    if stored:
+        return [
+            {
+                "chunk_id": str(chunk.get("chunk_id") or f"chunk-{index + 1}"),
+                "index": int(chunk.get("index", index) or index),
+                "text": str(chunk.get("text") or "").strip(),
+                "token_count": int(chunk.get("token_count") or get_token_count(str(chunk.get("text") or ""))),
+            }
+            for index, chunk in enumerate(stored)
+            if str(chunk.get("text") or "").strip()
+        ]
+
+    if not body:
+        return []
+    single_pass_limit = max(512, int(DATA_PIPELINE.get("web_chunk_single_pass_tokens", 7000) or 7000))
+    requested = max(512, int(item.get("chunk_window_tokens") or DATA_PIPELINE.get("web_chunk_tokens", 2048) or 2048))
+    if int(item.get("chunk_count") or 0) <= 1 and get_token_count(body) <= single_pass_limit:
+        return [{"chunk_id": "chunk-1", "index": 0, "text": body, "token_count": get_token_count(body)}]
+    chunks = semantic_chunk_text(
+        body,
+        max_tokens=requested,
+        overlap_ratio=float(DATA_PIPELINE.get("web_chunk_overlap_ratio", 0.1) or 0.1),
+    )
+    return [
+        {
+            "chunk_id": f"chunk-{index + 1}",
+            "index": index,
+            "text": str(chunk or "").strip(),
+            "token_count": get_token_count(str(chunk or "")),
+        }
+        for index, chunk in enumerate(chunks)
+        if str(chunk or "").strip()
+    ]
+
+
+def _select_source_chunks(item: dict[str, Any], chunks: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    """Use model candidates as locators, but return only original page text."""
+
+    if not chunks:
+        return []
+    max_chunks = max(1, int(DATA_PIPELINE.get("web_context_max_chunks_per_source", 3) or 3))
+    if len(chunks) <= max_chunks:
+        return chunks
+
+    candidate_indexes: list[int] = []
+    for candidate in item.get("chunk_candidates") or []:
+        if not isinstance(candidate, dict) or candidate.get("supported") is not True:
+            continue
+        if not (candidate.get("facts") or candidate.get("quote")):
+            continue
+        try:
+            index = int(candidate.get("chunk_index", -1))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < len(chunks) and index not in candidate_indexes:
+            candidate_indexes.append(index)
+    if candidate_indexes:
+        return [chunks[index] for index in candidate_indexes[:max_chunks]]
+
+    query_terms = _query_terms({"query": query})
+    ranked = sorted(
+        chunks,
+        key=lambda chunk: sum(term in str(chunk.get("text") or "").casefold() for term in query_terms),
+        reverse=True,
+    )
+    return sorted(ranked[:max_chunks], key=lambda chunk: int(chunk.get("index", 0)))
 
 
 def _plan_acceptance_context(constraints: dict[str, Any] | None) -> str:
@@ -347,18 +432,11 @@ def build_evidence_context(
         normalized_facts = _evidence_text_value(item)
         normalized_facts = re.sub(r"[ \t]+", " ", normalized_facts)
         normalized_facts = re.sub(r"\n{3,}", "\n\n", normalized_facts).strip()
-        chunks = (
-            semantic_chunk_text(normalized_facts, max_tokens=256, overlap_ratio=0.1)
-            if normalized_facts
-            else []
-        )
-        # Preserve all bounded chunks for list/table evidence. The final
-        # context budget below is token-aware and is the only global cut.
-        facts = "\n".join(chunks).strip() if chunks else normalized_facts
-        source_char_limit = 12000 if ("|" in facts or item.get("content_type") == "mediawiki-wikitext") else 8000
-        if len(facts) > source_char_limit:
-            cut = facts.rfind("\n", 0, source_char_limit)
-            facts = facts[: cut if cut > 0 else source_char_limit].rstrip()
+        source_chunks = _source_chunks_for_context(item, normalized_facts)
+        selected_chunks = _select_source_chunks(item, source_chunks, query_text)
+        facts = "\n".join(str(chunk.get("text") or "").strip() for chunk in selected_chunks).strip()
+        if not facts:
+            facts = normalized_facts
         authors = ", ".join(str(value) for value in (item.get("authors") or [])[:8])
         selected_metadata.append(
             {
@@ -372,16 +450,19 @@ def build_evidence_context(
                 "evidence_text": facts,
                 "evidence_boundary": "fetched_page_or_structured_record_only",
                 "date_mentions": date_mentions(facts),
-                "chunk_count": len(chunks),
+                "source_chunk_count": len(source_chunks),
+                "selected_chunk_count": len(selected_chunks),
+                "chunk_count": len(selected_chunks),
                 "chunks": [
                     {
-                        "index": chunk_index,
-                        "text": chunk,
-                        "token_count": get_token_count(chunk),
+                        "index": int(chunk.get("index", chunk_index)),
+                        "chunk_id": str(chunk.get("chunk_id") or f"chunk-{chunk_index + 1}"),
+                        "text": str(chunk.get("text") or ""),
+                        "token_count": int(chunk.get("token_count") or get_token_count(str(chunk.get("text") or ""))),
                     }
-                    for chunk_index, chunk in enumerate(chunks)
+                    for chunk_index, chunk in enumerate(selected_chunks)
                 ],
-                "selected_chunk_indexes": list(range(len(chunks))) if chunks else [],
+                "selected_chunk_indexes": [int(chunk.get("index", 0)) for chunk in selected_chunks],
                 "selected_chars": len(facts),
                 "truncated": len(normalized_facts) > len(facts),
                 "evidence_provenance": evidence_provenance(item),
@@ -392,8 +473,12 @@ def build_evidence_context(
             f"BEGIN EVIDENCE SOURCE S{index}\n"
             f"URL (citation metadata only): {item.get('url', '')}\n"
             "The URL, title, search snippet, provider summary and page publication metadata are not evidence.\n"
-            "EVIDENCE BODY (the only factual source for this record):\n"
-            f"{facts}\n"
+            "EVIDENCE BODY (the only factual source for this record; cite S#:#):\n"
+            + "\n\n".join(
+                f"SOURCE SPAN [S{index}:C{int(chunk.get('index', 0)) + 1}]\n{str(chunk.get('text') or '').strip()}"
+                for chunk in selected_chunks
+            )
+            + "\n"
             f"END EVIDENCE SOURCE S{index}"
         )
 
@@ -460,6 +545,35 @@ def _final_completion_budget(prompt: str) -> int:
     )
 
 
+def _fit_final_prompt_context(prompt_prefix: str, context_text: str) -> tuple[str, str, bool]:
+    """Fit the complete final prompt, not only the evidence field.
+
+    The evidence budget is assembled before the execution record, validation
+    report, instructions, and continuation wrapper are added.  Measuring only
+    the evidence therefore allowed ``input + max_tokens`` to exceed the model
+    context and produced HTTP 400 responses.  Trim at source/chunk boundaries
+    until a safe answer reserve remains.
+    """
+    limit = int(get_llm_context_length())
+    original = str(context_text or "").strip()
+    original_tokens = get_token_count(original)
+    caps = [original_tokens, 7000, 6500, 6000, 5500, 5000, 4500, 4000, 3500, 3000, 2500, 2000, 1500, 1000]
+    seen: set[int] = set()
+    for cap in caps:
+        cap = max(0, int(cap))
+        if cap in seen:
+            continue
+        seen.add(cap)
+        candidate_context = _truncate_markdown_by_tokens(original, cap) if cap else ""
+        candidate_prompt = build_final_continuation_prompt(prompt_prefix + candidate_context)
+        # Keep enough room for a meaningful answer and the endpoint's safety
+        # margin.  The actual max_tokens remains dynamic after this fit.
+        if get_token_count(candidate_prompt) + 512 <= limit:
+            return candidate_context, candidate_prompt, candidate_context != original
+    candidate_prompt = build_final_continuation_prompt(prompt_prefix)
+    return "", candidate_prompt, True
+
+
 def _context_fields(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "context_text": context["text"],
@@ -501,40 +615,16 @@ def _validation_prompt(report: dict[str, Any]) -> str:
         f"Subquestion coverage: {' | '.join(rows) or 'none'}\n"
         f"Candidate conflicts requiring explicit uncertainty: {conflict_text or 'none'}\n"
         "If a point is missing or conflicting, say so and do not fill it from memory. "
-        "Every factual sentence must map to a matching EVIDENCE BODY source such as [S1].\n"
+        "Every factual sentence must map to a matching EVIDENCE BODY source such as [S1:C2].\n"
         "END VALIDATION REPORT\n"
     )
 
 
-def _verification_prompt(verification: dict[str, Any] | None) -> str:
-    """Render the independent verifier's control result for final RWKV."""
-    if not isinstance(verification, dict) or not verification:
-        return ""
-    rows = []
-    for item in verification.get("points") or []:
-        if not isinstance(item, dict):
-            continue
-        rows.append(
-            f"{item.get('id')}: status={item.get('status')}; "
-            f"evidence={','.join(item.get('evidence') or []) or 'none'}"
-        )
-    return (
-        "BEGIN INDEPENDENT VERIFIER RESULT (strict control metadata only; never factual evidence)\n"
-        f"status={verification.get('status')}; completion_ready={verification.get('completion_ready')}; "
-        f"requires_replan={verification.get('requires_replan')}\n"
-        f"Task-point decisions: {' | '.join(rows) or 'none'}\n"
-        f"Missing points: {','.join(verification.get('missing_point_ids') or []) or 'none'}\n"
-        f"Conflicting points: {','.join(verification.get('conflict_point_ids') or []) or 'none'}\n"
-        "Only status, task-point IDs and S# references are exposed here. The verifier's explanations, "
-        "missing-field prose and next-query text are intentionally withheld. Re-check every claim "
-        "against EVIDENCE BODY and do not copy this control signal as a fact.\n"
-        "END INDEPENDENT VERIFIER RESULT\n"
-    )
 def _build_answer_repair_prompt(query: str, evidence: str, draft: str) -> str:
     return build_final_continuation_prompt(
         "Rewrite the draft as one concise user-facing answer. Use only the EVIDENCE BODY "
         "records below. Preserve every requested fact that is directly supported, remove "
-        "unsupported claims and invented URLs, and attach [S#] to factual claims. If a "
+        "unsupported claims and invented URLs, and attach [S#:C#] to factual claims. If a "
         "requested fact is missing, say so explicitly. Do not output JSON, role labels, a "
         "tool call, reasoning, or a repeated paragraph.\n\n"
         f"Question: {query}\n"
@@ -550,13 +640,11 @@ def synthesize_retrieval_answer(
     constraints: dict[str, Any] | None = None,
     execution_context: str = "",
     termination_reason: str = "model_requested_finish",
-    verification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Ask local RWKV for the final answer and expose the exact prompt context."""
     strategy = normalize_strategy((constraints or {}).get("strategy_config") or data.get("strategy_config"))
     context = build_evidence_context(data, constraints=constraints, query=query)
     context_fields = _context_fields(context)
-    context_fields["evidence_verification"] = verification or {}
     evidence_context_text = context["text"]
     context_stats = context_fields["context_stats"]
     # Keep the evidence-only projection separate from the actual final prompt.
@@ -597,7 +685,6 @@ def synthesize_retrieval_answer(
     context_stats["context_truncated"] = context_stats["final_context_truncated"]
     context_citation_refs = _citation_refs_for_context(data, context)
     validation_prompt = _validation_prompt(context.get("validation") or {})
-    verification_prompt = _verification_prompt(verification)
     acceptance_context = _plan_acceptance_context(constraints)
     policy = risk_context(constraints)
     if llm is None:
@@ -651,7 +738,7 @@ def synthesize_retrieval_answer(
             "facts from them. The only valid answer is an explicit refusal to confirm the "
             "requested facts and a statement of what information could not be confirmed."
         )
-    prompt_body = (
+    prompt_prefix = (
         "You are the final answer RWKV. Retrieval is over. Return only a user-facing answer. "
         "Do not call tools, output JSON, reproduce User/System/Assistant labels, emit a code "
         "fence, copy Function output, copy the execution record, or describe hidden reasoning. "
@@ -659,6 +746,8 @@ def synthesize_retrieval_answer(
         "summary and page publication metadata are not evidence. Only EVIDENCE BODY sections "
         "may support factual claims. If a requested fact is not supported, say what is missing "
         "instead of guessing. Answer each requested sub-question separately. Do not add "
+        "a generic source list as a substitute for claim citations. Attach the exact source "
+        "span reference [S#:C#] to every factual sentence. "
         "unrequested claims merely because they appear somewhere in a source body; a source "
         "body is not permission to infer a relationship, ownership, authorship or date that it "
         "does not state directly. Preserve every requested item and row/column relationship. "
@@ -667,10 +756,18 @@ def synthesize_retrieval_answer(
         f"Evidence status: {evidence_state}\n"
         f"Retrieval termination: {termination_reason}. Always return a user-facing continuation.\n"
         f"{validation_prompt}"
-        f"{verification_prompt}"
-        f"{context_text}"
     )
-    prompt = build_final_continuation_prompt(prompt_body)
+    context_text, prompt, final_prompt_trimmed = _fit_final_prompt_context(prompt_prefix, context_text)
+    context_fields["context_text"] = context_text
+    context_stats["final_context_chars"] = len(context_text)
+    context_stats["final_context_tokens"] = get_token_count(context_text)
+    context_stats["final_context_truncated"] = bool(
+        context_stats.get("final_context_truncated", False) or final_prompt_trimmed
+    )
+    context_stats["context_chars"] = context_stats["final_context_chars"]
+    context_stats["context_tokens"] = context_stats["final_context_tokens"]
+    context_stats["context_truncated"] = context_stats["final_context_truncated"]
+    prompt_body = prompt_prefix + context_text
     repair_prompt = ""
     raw = ""
     try:

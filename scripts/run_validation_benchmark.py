@@ -1,4 +1,4 @@
-"""Run the two validation architectures over the fixed evaluation suites.
+"""Run the evidence-validation pipeline over the fixed evaluation suites.
 
 Each acceptance output contains the full event trace.  This queue only adds
 batch-level lifecycle metadata so a long run can be resumed and audited.
@@ -22,7 +22,6 @@ SUITES = (
     # for fresh runs so old answers/traces cannot become accidental input.
     ("date", "data/evaluation/date_retrieval_tasks_20260729.jsonl"),
 )
-ARCHITECTURES = ("engineering_validator", "rwkv_verifier")
 
 
 def _now() -> str:
@@ -44,25 +43,24 @@ def run(output_dir: Path, manifest_path: Path, *, resume: bool = True) -> dict[s
             "status": "queued",
             "started_at": None,
             "finished_at": None,
-            "architectures": list(ARCHITECTURES),
+            "validation_mode": "mechanical_evidence_validation",
             "suites": [name for name, _ in SUITES],
             "batches": [],
         }
     existing = {row.get("batch_id"): row for row in manifest.get("batches") or [] if isinstance(row, dict)}
     batches = []
-    for architecture in ARCHITECTURES:
-        for suite_name, input_path in SUITES:
-            batch_id = f"{architecture}_{suite_name}"
-            row = existing.get(batch_id) or {
-                "batch_id": batch_id,
-                "architecture": architecture,
-                "suite": suite_name,
-                "input": input_path,
-                "output": str(output_dir / f"validation_{architecture}_{suite_name}_20260730.json"),
-                "log": str(output_dir / f"validation_{architecture}_{suite_name}_20260730.log"),
-                "status": "queued",
-            }
-            batches.append(row)
+    for suite_name, input_path in SUITES:
+        batch_id = f"mechanical_{suite_name}"
+        row = existing.get(batch_id) or {
+            "batch_id": batch_id,
+            "validation_mode": "mechanical_evidence_validation",
+            "suite": suite_name,
+            "input": input_path,
+            "output": str(output_dir / f"validation_mechanical_{suite_name}_20260730.json"),
+            "log": str(output_dir / f"validation_mechanical_{suite_name}_20260730.log"),
+            "status": "queued",
+        }
+        batches.append(row)
     manifest["batches"] = batches
     manifest["status"] = "running"
     manifest["started_at"] = manifest.get("started_at") or _now()
@@ -82,8 +80,6 @@ def run(output_dir: Path, manifest_path: Path, *, resume: bool = True) -> dict[s
             row["input"],
             "--output",
             row["output"],
-            "--validation-architecture",
-            row["architecture"],
         ]
         with Path(row["log"]).open("w", encoding="utf-8") as log:
             log.write(f"started_at={row['started_at']}\ncommand={json.dumps(command, ensure_ascii=False)}\n")

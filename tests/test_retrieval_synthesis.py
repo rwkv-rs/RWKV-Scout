@@ -27,6 +27,14 @@ class RetrievalSynthesisTests(unittest.TestCase):
             ),
             "",
         )
+        self.assertEqual(
+            _clean_answer(
+                "[S1](https://example.com)\n\n"
+                "EVIDENCE BODY (the only factual source)\n"
+                "Copied page text"
+            ),
+            "",
+        )
 
     def test_final_budget_never_requests_more_than_remaining_context(self):
         prompt = "token " * 11265

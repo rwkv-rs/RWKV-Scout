@@ -13,7 +13,8 @@ from config import (
 )
 from runtime import get_model_backend
 from utils.chunker import get_token_count
-from utils.token_tracker import global_token_tracker
+from utils.runtime_gate import model_request_slot
+from utils.token_tracker import current_task_id, global_token_tracker
 
 class SLMClient:
     def __init__(self, endpoint_override=None, password_override=None):
@@ -168,7 +169,8 @@ class SLMClient:
                 "temperature": 0.2,
                 "stream": False,
             }
-            response = requests.post(self.endpoint, json=payload, headers=request_headers, timeout=180)
+            with model_request_slot(current_task_id.get() or "slm-request"):
+                response = requests.post(self.endpoint, json=payload, headers=request_headers, timeout=180)
             if response.status_code != 200:
                 raise RuntimeError(f"HTTP {response.status_code} - {response.text[:1000]}")
             data = response.json()

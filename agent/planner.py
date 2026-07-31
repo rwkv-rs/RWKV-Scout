@@ -33,27 +33,75 @@ from utils.rwkv_prompt import (
 )
 
 
+def _repair_unescaped_json_quotes(text: str) -> str:
+    """Repair quotes inside a JSON string without changing its content.
+
+    RWKV occasionally emits a valid-looking plan containing a shell example
+    such as ``python -c "..."``.  Those inner quotes are not escaped, so the
+    standard decoder rejects the entire outer plan.  A quote inside a string
+    followed by ordinary text is unambiguously content in this protocol; a
+    quote followed by JSON punctuation remains the string terminator.
+    """
+    repaired: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and in_string:
+            repaired.append(char)
+            escaped = not escaped
+            index += 1
+            continue
+        if char == '"' and not escaped:
+            if not in_string:
+                in_string = True
+                repaired.append(char)
+            else:
+                lookahead = index + 1
+                while lookahead < len(text) and text[lookahead].isspace():
+                    lookahead += 1
+                next_char = text[lookahead] if lookahead < len(text) else ""
+                if next_char and next_char not in ",:]}" and next_char != "":
+                    repaired.extend(("\\", '"'))
+                else:
+                    in_string = False
+                    repaired.append(char)
+            index += 1
+            escaped = False
+            continue
+        repaired.append(char)
+        escaped = False
+        index += 1
+    return "".join(repaired)
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
-    """Extract the first complete JSON call after removing hidden thinking."""
+    """Extract the first complete JSON object after removing hidden thinking."""
 
     cleaned = visible_model_text(text).strip()
     decoder = json.JSONDecoder()
+    candidates = [cleaned]
+    repaired = _repair_unescaped_json_quotes(cleaned)
+    if repaired != cleaned:
+        candidates.append(repaired)
     fallback: dict[str, Any] | None = None
     tool_keys = {"name", "tool_name", "action", "tool", "function", "tool_calls"}
-    for index, char in enumerate(cleaned):
-        if char != "{":
-            continue
-        try:
-            value, _ = decoder.raw_decode(cleaned[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            if fallback is None:
-                fallback = value
-            # Retry prompts often mention an empty JSON object. Do not let
-            # that example shadow the actual tool call later in the output.
-            if any(str(value.get(key) or "").strip() for key in tool_keys):
-                return value
+    for candidate in candidates:
+        for index, char in enumerate(candidate):
+            if char != "{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(candidate[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                if fallback is None:
+                    fallback = value
+                # Prefer the outer plan/tool object. This prevents a nested
+                # atomic point from being mistaken for the complete plan.
+                if any(key in value for key in ("schema_version", "atomic_points", *tool_keys)):
+                    return value
     if fallback is not None:
         return fallback
     raise ValueError("model tool decision is not a JSON object")
@@ -118,6 +166,7 @@ class Planner:
         if len(points) > 32:
             raise ValueError("task plan contains too many atomic_points")
         normalized_points = []
+        seen_signatures: set[str] = set()
         for point in points:
             if not isinstance(point, dict):
                 raise ValueError("each atomic point must be an object")
@@ -137,6 +186,10 @@ class Planner:
                 raise ValueError(
                     "each atomic point requires id, task, objective, evidence_needed and acceptance_criteria"
                 )
+            signature = f"{task.casefold()}\n{objective.casefold()}"
+            if signature in seen_signatures:
+                raise ValueError("task plan contains duplicate atomic points")
+            seen_signatures.add(signature)
             normalized_points.append(
                 {
                     "id": point_id,
@@ -172,6 +225,10 @@ class Planner:
             "If the task requests a list or table, set output_format to list or table and explicitly require every row, "
             "column relationship, and original order to be preserved; never accept an '等/等等' summary as complete. "
             "Keep distinct roles distinct, and give each requested paper or project its own exact URL. "
+            "Inside JSON string values, escape every inner double quote as \\\"; prefer single quotes in shell examples "
+            "and keep the plan compact. For a normal request use 1-8 atomic points; for a complex request group "
+            "related facts and use no more than 16. Never create one point per URL, source, example, or repeated "
+            "wording. Never emit more than 32 points. Never put raw unescaped double quotes inside a JSON string. "
             "Return exactly one JSON object and no explanation. "
             "Use this fixed format: "
             '{"schema_version":"task_plan.v1","goal":"...",'
@@ -185,21 +242,32 @@ class Planner:
             f"{assistant_json_prefix(enable_think=True)}"
         )
         raw = ""
+        last_nonempty_raw = ""
         last_error = ""
         for attempt in range(2):
             request_prompt = prompt
             if attempt:
                 request_prompt += (
-                    "\nCorrection: the previous output was not a valid task_plan.v1 object. "
-                    "Return only one complete JSON object with the exact required keys."
+                    "\nCorrection: the previous output was truncated or invalid. Return one compact, complete "
+                    "task_plan.v1 JSON object only. Merge repeated or overlapping points; use no more than 8 "
+                    "distinct atomic_points for this retry. Do not enumerate URLs, sources, examples, or variants. "
+                    "Do not add explanation, markdown, or a second object."
                 )
             try:
+                completion_budget = self._completion_budget(request_prompt)
+                if attempt:
+                    # A repair must be short enough to finish after an overlong
+                    # first continuation; the initial budget remains dynamic up
+                    # to the configured 10K ceiling.
+                    completion_budget = min(completion_budget, 4096)
                 response = self.llm.text_completion(
                     request_prompt,
-                    max_tokens=min(2048, self._completion_budget(request_prompt)),
+                    max_tokens=completion_budget,
                     stop=JSON_CALL_STOP_SUFFIXES,
                 )
                 raw = str(response.content or "")
+                if raw.strip():
+                    last_nonempty_raw = raw
                 plan = self._validate_task_plan(_extract_json_object(raw))
                 return plan
             except Exception as exc:
@@ -209,7 +277,7 @@ class Planner:
             "status": "error",
             "error_class": "task_plan_invalid",
             "message": last_error or "task plan generation failed",
-            "raw_model_output": visible_model_text(raw),
+            "raw_model_output": visible_model_text(last_nonempty_raw or raw),
         }
 
     def begin_task(
@@ -323,7 +391,7 @@ class Planner:
             try:
                 response = self.llm.text_completion(
                     request_prompt,
-                    max_tokens=min(2048, self._completion_budget(request_prompt)),
+                    max_tokens=self._completion_budget(request_prompt),
                     stop=JSON_CALL_STOP_SUFFIXES,
                 )
                 raw = str(response.content or "")
@@ -595,18 +663,12 @@ class Planner:
 
     @staticmethod
     def _completion_budget(prompt: str) -> int:
-        """Keep the 8192 ceiling while respecting the model context window."""
+        """Use the remaining model context, capped at a 10K planner response."""
 
         context_length = max(1024, int(get_llm_context_length()))
-        # A conservative character estimate is sufficient for reserving room
-        # for the short JSON call; the service remains the final tokenizer.
-        # The serving tokenizer counts Chinese characters and JSON punctuation
-        # much more densely than ordinary English prose.  Use a conservative
-        # 1.1-character estimate so the request is accepted by the 12288-token
-        # context window instead of relying on a server-side 400 response.
-        estimated_prompt_tokens = max(1, int(len(prompt) / 1.1))
-        remaining = context_length - estimated_prompt_tokens - 1024
-        return max(256, min(8192, remaining))
+        prompt_tokens = get_token_count(prompt)
+        remaining = context_length - prompt_tokens - 1024
+        return max(256, min(10000, remaining))
 
     def plan_next_action(
         self,
@@ -647,7 +709,9 @@ class Planner:
                 else:
                     response = self.llm.chat_completion(
                         self._messages + [{"role": "assistant", "content": "```json\n"}],
-                        max_tokens=8192,
+                        max_tokens=self._completion_budget(
+                            self._render_transcript(self._messages) + request_prompt
+                        ),
                     )
                 raw = str(response.content or "")
                 payload = _canonicalize_tool_payload(_extract_json_object(raw))

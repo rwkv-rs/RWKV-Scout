@@ -439,6 +439,18 @@ def extract_single_page_evidence(
             }
             for chunk in chunks
         ],
+        # Keep the cleaned source spans alongside the locator candidates.
+        # Candidates decide which spans are worth showing; they never replace
+        # these original page-body strings as evidence.
+        "source_chunks": [
+            {
+                "chunk_id": chunk["chunk_id"],
+                "index": chunk["index"],
+                "text": chunk["text"],
+                "token_count": chunk["token_count"],
+            }
+            for chunk in chunks
+        ],
         # Preserve the first bounded source span for the final model context.
         # It is the same page chunk sent to the parallel worker, not a new
         # controller-generated answer or a second retrieval path.

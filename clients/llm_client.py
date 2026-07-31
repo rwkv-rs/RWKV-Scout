@@ -215,6 +215,7 @@ class LLMClient:
         )
         return msg
 
+    @retry_with_fallback(max_retries=3, delay=3)
     def text_completion(
         self,
         prompt: str,

@@ -47,7 +47,7 @@ MODEL_CONTRACTS = {
     "local_13b": {
         "label": "RWKV 13.3B",
         "model": "rwkv7-g1i_preview4922-13.3b-20260720-ctx12288",
-        "endpoint": "http://172.21.122.93:29613/v1",
+        "endpoint": "http://172.31.89.209:29613/v1",
         "api_key": "rwkv-skills",
         "context_length": 12288,
         "provider": "local_13b",
@@ -298,6 +298,11 @@ def get_experiment_max_parallel_cases() -> int:
     return max(1, int(EXPERIMENT_CONFIG.get("max_parallel_cases", 1)))
 
 
+def get_model_request_concurrency() -> int:
+    """Maximum concurrent requests sent to the model service workspace-wide."""
+    return max(1, int(MODEL_RUNTIME_CONFIG.get("max_inflight_requests", 8)))
+
+
 def _bounded_seconds(value: object, default: float, *, minimum: float = 0.1, maximum: float = 3600.0) -> float:
     try:
         return max(minimum, min(float(value), maximum))
@@ -305,9 +310,18 @@ def _bounded_seconds(value: object, default: float, *, minimum: float = 0.1, max
         return default
 
 
-def get_analysis_timeout_seconds() -> float:
-    """Maximum wall-clock budget for one long-running analysis task."""
-    return _bounded_seconds(RUNTIME_CONFIG.get("analysis_timeout_seconds", 600), 600.0, maximum=3600.0)
+def get_analysis_timeout_seconds() -> float | None:
+    """Maximum wall-clock budget, or ``None`` when single-task timeout is disabled."""
+    configured = RUNTIME_CONFIG.get("analysis_timeout_seconds", 600)
+    if configured is None:
+        return None
+    try:
+        value = float(configured)
+    except (TypeError, ValueError):
+        return 600.0
+    if value <= 0:
+        return None
+    return max(0.1, min(value, 3600.0))
 
 
 def get_model_connect_timeout_seconds() -> float:

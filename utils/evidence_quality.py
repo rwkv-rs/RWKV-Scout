@@ -81,6 +81,16 @@ def evidence_text(item: dict[str, Any]) -> str:
     ranking, but cannot satisfy the final-answer evidence gate.
     """
 
+    # ``build_evidence_context`` projects a fetched source into a compact
+    # metadata record.  That projection intentionally stores the canonical
+    # body under ``evidence_text`` instead of pretending it is a new page
+    # field.  Read it only when the projection carries our explicit boundary
+    # marker; arbitrary model facts must never pass this gate.
+    if item.get("evidence_boundary") == "fetched_page_or_structured_record_only":
+        projected = str(item.get("evidence_text") or "").replace("\x00", "").replace("\r\n", "\n").strip()
+        if projected:
+            return projected
+
     kind = evidence_kind(item)
     if kind in {"page_body", "page_body_legacy"}:
         for key in ("source_excerpt", "page_excerpt", "content"):

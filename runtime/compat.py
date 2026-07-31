@@ -17,7 +17,9 @@ from config import (
     get_slm_concurrency,
 )
 from runtime.backend import BackendResponse
+from utils.runtime_gate import model_request_slot
 from utils.text_encoding import repair_mojibake
+from utils.token_tracker import current_task_id
 from utils.time_budget import bounded_timeout
 
 
@@ -36,18 +38,20 @@ class OpenAICompatBackend:
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         endpoint = get_llm_base_url().rstrip("/") + path
-        response = self._session.post(
-            endpoint,
-            headers={
-                "Authorization": f"Bearer {get_llm_api_key() or 'local'}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=(
-                bounded_timeout(get_model_connect_timeout_seconds()),
-                bounded_timeout(get_model_read_timeout_seconds()),
-            ),
-        )
+        task_id = current_task_id.get() or "model-request"
+        with model_request_slot(task_id):
+            response = self._session.post(
+                endpoint,
+                headers={
+                    "Authorization": f"Bearer {get_llm_api_key() or 'local'}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=(
+                    bounded_timeout(get_model_connect_timeout_seconds()),
+                    bounded_timeout(get_model_read_timeout_seconds()),
+                ),
+            )
         if response.status_code >= 400:
             detail = response.text[:1000].replace("\n", " ")
             raise RuntimeError(f"HTTP {response.status_code}: {detail}")

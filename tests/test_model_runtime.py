@@ -106,6 +106,7 @@ class ModelRuntimeTests(unittest.TestCase):
 
     def test_direct_preflight_rejects_checkpoint_that_does_not_match_contract(self):
         backend = Mock()
+        backend.backend_name = "direct_rwkv"
         backend.model_name = "rwkv7-g1h-1.5b"
         backend.health.return_value = {
             "available": True,

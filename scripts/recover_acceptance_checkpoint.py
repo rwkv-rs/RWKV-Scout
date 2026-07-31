@@ -33,7 +33,6 @@ def recover(
     input_path: Path,
     partial_output: Path,
     *,
-    architecture: str,
     recovery_output: Path,
     backup_output: Path,
 ) -> dict[str, object]:
@@ -66,8 +65,6 @@ def recover(
         str(subset_path),
         "--output",
         str(recovery_output),
-        "--validation-architecture",
-        architecture,
     ]
     completed = subprocess.run(command, cwd=ROOT, check=False)
     if completed.returncode != 0:
@@ -112,14 +109,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True)
     parser.add_argument("--partial-output", required=True)
-    parser.add_argument("--architecture", default="rwkv_verifier")
     parser.add_argument("--recovery-output", required=True)
     parser.add_argument("--backup-output", required=True)
     args = parser.parse_args()
     result = recover(
         Path(args.input),
         Path(args.partial_output),
-        architecture=args.architecture,
         recovery_output=Path(args.recovery_output),
         backup_output=Path(args.backup_output),
     )

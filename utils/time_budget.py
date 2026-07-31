@@ -48,16 +48,18 @@ def task_time_budget(task_id: str, timeout_seconds: float | None = None) -> Iter
     """Install a task budget and persist its lifecycle in the replay trace."""
     from utils.task_events import append_task_event
 
-    budget = float(timeout_seconds or get_analysis_timeout_seconds())
+    configured = get_analysis_timeout_seconds() if timeout_seconds is None else timeout_seconds
+    budget = None if configured is None or float(configured) <= 0 else float(configured)
     started = time.monotonic()
     task_token = _task_id.set(str(task_id))
-    deadline_token = _deadline.set(started + budget)
+    deadline_token = _deadline.set(started + budget if budget is not None else None)
     append_task_event(
         str(task_id),
         "runtime_budget",
         phase="RUNTIME",
         status="started",
         timeout_seconds=budget,
+        disabled=budget is None,
     )
     try:
         yield

@@ -46,7 +46,7 @@ class ExperimentPipelineTests(unittest.TestCase):
     def test_experiment_model_contract_is_the_active_rwkv_13b_profile(self):
         profile = get_experiment_model_config()
         self.assertEqual(profile["model"], "rwkv7-g1i_preview4922-13.3b-20260720-ctx12288")
-        self.assertEqual(profile["endpoint"], "http://172.21.122.93:29613/v1")
+        self.assertEqual(profile["endpoint"], "http://172.31.89.209:29613/v1")
         self.assertEqual(profile["context_length"], 12288)
         self.assertEqual(validate_experiment_model_contract()["api_key"], "rwkv-skills")
 

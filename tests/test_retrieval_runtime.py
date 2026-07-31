@@ -131,16 +131,6 @@ class RetrievalRuntimeTests(unittest.TestCase):
         self.assertNotIn("search_web_tavily", rows)
         self.assertNotIn("fetch_web_url", rows)
 
-    def test_deterministic_validation_is_the_default_architecture(self):
-        orchestrator = Orchestrator()
-        self.assertEqual(orchestrator._validation_architecture(), "engineering_validator")
-
-        orchestrator.state.run_metadata["validation_architecture"] = "rwkv_verifier"
-        self.assertEqual(orchestrator._validation_architecture(), "rwkv_verifier")
-
-        orchestrator.state.run_metadata["validation_architecture"] = "unrecognised"
-        self.assertEqual(orchestrator._validation_architecture(), "engineering_validator")
-
     def test_planner_prompt_does_not_leak_provider_routing_matrix(self):
         prompt = Planner._system_prompt("ALL")
         self.assertIn('"name": "web_search"', prompt)

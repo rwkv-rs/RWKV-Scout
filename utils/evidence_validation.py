@@ -268,7 +268,7 @@ def assess_answer_alignment(answer: str, selected_evidence: Iterable[dict[str, A
             continue
         if any(marker in line for marker in ("无法确认", "证据不足", "缺少", "不能确定", "cannot confirm", "insufficient evidence")):
             continue
-        refs = [int(value) - 1 for value in re.findall(r"\[S(\d+)\]", line, flags=re.IGNORECASE)]
+        refs = [int(value) - 1 for value in re.findall(r"\[S(\d+)(?::C\d+)?\]", line, flags=re.IGNORECASE)]
         targets = [sources[index] for index in refs if 0 <= index < len(sources)] if refs else sources
         answer_terms = _terms(line)
         best = 0.0

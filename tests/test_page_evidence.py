@@ -9,7 +9,7 @@ from agent.page_evidence import (
     parse_chunk_candidate,
 )
 from tools.web_search_keyless import search_web_keyless
-from tools.web_search_generic import _merge_candidates
+from tools.web_search_generic import _extract_direct_url, _extract_single_goal_url, _merge_candidates
 from utils.network_fetch import NetworkFetchError, fetch_text
 
 
@@ -32,6 +32,17 @@ class _FakeLLM:
 
 
 class PageEvidenceTests(unittest.TestCase):
+    def test_complete_url_query_is_marked_for_direct_fetch(self):
+        self.assertEqual(
+            _extract_direct_url("https://docs.python.org/3/whatsnew/3.13.html"),
+            "https://docs.python.org/3/whatsnew/3.13.html",
+        )
+        self.assertEqual(_extract_direct_url("summarize https://example.com/page"), "")
+        self.assertEqual(
+            _extract_single_goal_url("Summarize this page: https://example.com/page"),
+            "https://example.com/page",
+        )
+
     def test_page_is_split_into_independent_chunks(self):
         page = "\n".join(f"第{i}段：深圳地铁一号线站点信息。" for i in range(80))
         chunks = build_page_chunks(page, max_tokens=120, overlap_ratio=0)
@@ -64,6 +75,7 @@ class PageEvidenceTests(unittest.TestCase):
         self.assertGreaterEqual(len(evidence["candidates"]), 1)
         self.assertEqual(evidence["parallel_candidate"]["strategy"], "one-RWKV-call-per-chunk")
         self.assertEqual(evidence["parallel_candidate"]["completed_calls"], evidence["chunk_count"])
+        self.assertEqual(len(evidence["source_chunks"]), evidence["chunk_count"])
         self.assertNotIn("第79段", evidence["compact_facts"])
 
     def test_short_cleaned_page_stays_single_pass(self):
@@ -82,7 +94,7 @@ class PageEvidenceTests(unittest.TestCase):
         self.assertGreater(get_token_count(page), 7000)
         chunks = build_page_chunks(page)
         self.assertGreater(len(chunks), 1)
-        self.assertTrue(all(item["token_count"] <= 4096 for item in chunks))
+        self.assertTrue(all(item["token_count"] <= 2048 for item in chunks))
 
     def test_plain_candidate_is_not_allowed_to_be_a_tool_call(self):
         candidate = parse_chunk_candidate(

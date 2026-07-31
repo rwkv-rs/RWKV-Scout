@@ -104,6 +104,7 @@ def readyz():
         "wigolo_mode": config.get_wigolo_mode(),
         "runtime": {
             "max_parallel_cases": config.get_experiment_max_parallel_cases(),
+            "max_model_inflight_requests": config.get_model_request_concurrency(),
             "analysis_timeout_seconds": config.get_analysis_timeout_seconds(),
         },
     }
@@ -219,6 +220,7 @@ def get_frontend_config():
             "slm_async_parallelism": config.get_slm_async_parallelism(),
             "llm_concurrency": config.get_llm_concurrency(),
             "max_parallel_cases": config.get_experiment_max_parallel_cases(),
+            "max_model_inflight_requests": config.get_model_request_concurrency(),
             "analysis_timeout_seconds": config.get_analysis_timeout_seconds(),
         }
     }

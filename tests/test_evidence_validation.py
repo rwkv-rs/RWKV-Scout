@@ -1,6 +1,5 @@
 from utils.evidence_validation import assess_answer_alignment, build_evidence_validation, source_quality
-from agent.retrieval_synthesis import build_evidence_context, _verification_prompt
-from agent.evidence_verifier import verify_evidence
+from agent.retrieval_synthesis import build_evidence_context
 
 
 def _page(url: str, body: str) -> dict:
@@ -74,92 +73,22 @@ def test_context_ranking_prefers_verified_structured_record_before_relevance_tie
     assert context["selected_evidence"][0]["source_quality"]["kind"] == "structured_record"
 
 
-class _VerifierResponse:
-    def __init__(self, content: str):
-        self.content = content
-
-
-class _VerifierModel:
-    def __init__(self, content: str):
-        self.content = content
-        self.prompts = []
-
-    def text_completion(self, prompt, max_tokens=0, stop=None):
-        self.prompts.append(prompt)
-        return _VerifierResponse(self.content)
-
-
-def test_independent_verifier_returns_structured_point_decisions():
-    model = _VerifierModel(
-        '{"schema_version":"evidence_verification.v1","status":"supported",'
-        '"completion_ready":true,"points":[{"id":"P1","status":"supported",'
-        '"evidence":["S1"],"reason":"direct body statement"}]}'
+def test_context_projection_keeps_evidence_available_to_alignment():
+    page = _page(
+        "https://official.example/release",
+        "release date: 2024-07-04. Official release notice with enough source text.",
     )
-    result = verify_evidence(
-        model,
-        query="release date",
-        task_plan={"atomic_points": [{"id": "P1", "task": "release date"}]},
-        evidence_context={
-            "text": "BEGIN EVIDENCE SOURCE S1\nEVIDENCE BODY\nrelease date: 2024-07-04\nEND EVIDENCE SOURCE S1",
-            "selected_evidence": [{"url": "https://example.org/release"}],
-            "validation": {
-                "subquestion_coverage": [{"point_id": "P1", "status": "covered"}],
-                "cross_source": {"missing_points": 0},
-            },
-        },
+    context = build_evidence_context(
+        {"query": "release date", "results": [page]},
+        constraints={"strategy_config": {"context_source_count": 1}},
     )
 
-    assert result["completion_ready"] is True
-    assert result["points"][0]["evidence"] == ["S1"]
-    assert "Do not answer the user" in model.prompts[0]
-
-
-def test_mechanical_missing_boundary_overrides_verifier_claim_of_completion():
-    model = _VerifierModel(
-        '{"status":"supported","completion_ready":true,"points":'
-        '[{"id":"P1","status":"supported","evidence":["S1"]}]}'
-    )
-    result = verify_evidence(
-        model,
-        query="anniversary date",
-        task_plan={"atomic_points": [{"id": "P1", "task": "anniversary date"}]},
-        evidence_context={
-            "text": "BEGIN EVIDENCE SOURCE S1\nEVIDENCE BODY\nUnrelated page body\nEND EVIDENCE SOURCE S1",
-            "selected_evidence": [{"url": "https://example.org/page"}],
-            "validation": {
-                "subquestion_coverage": [{"point_id": "P1", "status": "missing"}],
-                "cross_source": {"missing_points": 1},
-            },
-        },
+    alignment = assess_answer_alignment(
+        "Release date is 2024-07-04 [S1:C1].",
+        context["selected_evidence"],
     )
 
-    assert result["completion_ready"] is False
-    assert result["requires_replan"] is True
-    assert result["missing_point_ids"] == ["P1"]
-
-
-def test_final_model_receives_only_verifier_control_fields():
-    prompt = _verification_prompt(
-        {
-            "status": "needs_more_evidence",
-            "completion_ready": False,
-            "requires_replan": True,
-            "points": [
-                {
-                    "id": "P1",
-                    "status": "missing",
-                    "evidence": [],
-                    "missing": ["the verifier's free-form factual detail"],
-                    "next_queries": ["a verifier-generated routing query"],
-                }
-            ],
-            "missing_point_ids": ["P1"],
-            "conflict_point_ids": [],
-            "next_queries": ["another verifier-generated routing query"],
-        }
-    )
-
-    assert "P1" in prompt
-    assert "status=missing" in prompt
-    assert "the verifier's free-form factual detail" not in prompt
-    assert "verifier-generated routing query" not in prompt
+    assert context["selected_evidence"][0]["evidence_text"]
+    assert alignment["aligned_line_count"] == 1
+    assert alignment["unsupported_line_count"] == 0
+    assert "[S1:C1]" in context["text"]
