@@ -226,7 +226,7 @@ def audit(manifest_path: Path, output_path: Path) -> dict[str, Any]:
                 }
             )
         batch["ok"] = bool(
-            batch["source_exists"]
+            batch["input_exists"]
             and batch["status"] == "completed"
             and not batch["missing_case_ids"]
             and not batch["unexpected_case_ids"]
