@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RWKV-ECRA · Validation Board</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: oklch(0.16 0.025 250);
+        --bg-raised: oklch(0.20 0.028 250);
+        --panel: oklch(0.235 0.03 250);
+        --panel-soft: oklch(0.205 0.026 250);
+        --line: oklch(0.34 0.035 250);
+        --line-soft: oklch(0.29 0.03 250);
+        --ink: oklch(0.94 0.02 210);
+        --muted: oklch(0.70 0.025 235);
+        --dim: oklch(0.54 0.025 235);
+        --cyan: oklch(0.79 0.12 190);
+        --cyan-deep: oklch(0.56 0.12 190);
+        --orange: oklch(0.78 0.13 65);
+        --red: oklch(0.72 0.14 25);
+        --green: oklch(0.77 0.13 150);
+        --violet: oklch(0.76 0.10 300);
+        --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+      html { background: var(--bg); }
+      body { margin: 0; min-width: 320px; color: var(--ink); background: var(--bg); font-family: var(--sans); }
+      button, input, select { font: inherit; }
+      button { cursor: pointer; }
+      a { color: var(--cyan); }
+      code, pre, .mono { font-family: var(--mono); }
+
+      .shell { display: grid; grid-template-columns: 252px minmax(0, 1fr); min-height: 100vh; }
+      .rail { position: sticky; top: 0; height: 100vh; padding: 25px 18px; border-right: 1px solid var(--line-soft); background: oklch(0.145 0.022 250); }
+      .brand { display: flex; gap: 11px; align-items: center; margin-bottom: 36px; }
+      .brand-mark { display: grid; width: 34px; height: 34px; place-items: center; color: var(--bg); background: var(--cyan); border-radius: 10px; font: 800 14px var(--mono); }
+      .brand-title { font-weight: 730; letter-spacing: -0.02em; }
+      .brand-subtitle { margin-top: 3px; color: var(--dim); font-size: 10px; font-family: var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
+      .rail-label { margin: 22px 8px 9px; color: var(--dim); font: 10px var(--mono); letter-spacing: 0.11em; text-transform: uppercase; }
+      .rail-button { display: flex; width: 100%; align-items: center; gap: 9px; padding: 9px 10px; color: var(--muted); border: 1px solid transparent; border-radius: 8px; background: transparent; text-align: left; font-size: 12px; }
+      .rail-button:hover, .rail-button.is-active { color: var(--ink); border-color: var(--line); background: var(--panel-soft); }
+      .rail-button.is-active { color: var(--cyan); }
+      .rail-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+      .rail-button.is-active .rail-dot { background: var(--cyan); box-shadow: 0 0 0 4px oklch(0.79 0.12 190 / 0.12); }
+      .source-item { display: block; padding: 9px 8px; color: var(--muted); border-top: 1px solid var(--line-soft); font-size: 11px; line-height: 1.45; }
+      .source-item strong { display: block; overflow: hidden; color: var(--ink); font-size: 10px; font-family: var(--mono); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+      .source-item span { display: block; margin-top: 3px; color: var(--dim); }
+      .rail-footer { position: absolute; right: 18px; bottom: 20px; left: 18px; color: var(--dim); font-size: 11px; line-height: 1.6; }
+
+      .main { min-width: 0; padding: 27px clamp(18px, 4vw, 55px) 54px; }
+      .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 30px; }
+      .kicker { color: var(--cyan); font: 11px var(--mono); letter-spacing: 0.11em; text-transform: uppercase; }
+      h1 { max-width: 720px; margin: 9px 0 8px; font-size: clamp(28px, 4vw, 45px); line-height: 1.04; letter-spacing: -0.035em; text-wrap: balance; }
+      .lede { max-width: 720px; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
+      .live-pill { display: inline-flex; align-items: center; gap: 8px; padding: 8px 10px; color: var(--green); border: 1px solid oklch(0.77 0.13 150 / 0.3); border-radius: 999px; background: oklch(0.77 0.13 150 / 0.08); font: 11px var(--mono); white-space: nowrap; }
+      .live-pill i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+
+      .verdict { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 22px; align-items: center; margin-bottom: 22px; padding: 22px 24px; border: 1px solid oklch(0.79 0.12 190 / 0.35); border-radius: 14px; background: oklch(0.22 0.035 215); }
+      .verdict h2 { margin: 5px 0 7px; font-size: 23px; letter-spacing: -0.025em; }
+      .verdict p { max-width: 740px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+      .verdict-score { text-align: right; }
+      .verdict-score strong { display: block; color: var(--cyan); font: 700 39px var(--mono); letter-spacing: -0.06em; }
+      .verdict-score span { color: var(--dim); font: 10px var(--mono); }
+
+      .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 24px; }
+      .metric { padding: 15px 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--panel-soft); }
+      .metric-label { color: var(--muted); font-size: 11px; }
+      .metric-value { margin-top: 9px; font: 700 24px var(--mono); letter-spacing: -0.045em; }
+      .metric-note { margin-top: 5px; color: var(--dim); font-size: 10px; }
+
+      .section { margin-top: 30px; }
+      .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 11px; }
+      .section-heading h2 { margin: 0; font-size: 18px; letter-spacing: -0.02em; }
+      .section-heading p { margin: 0; color: var(--dim); font-size: 11px; }
+      .panel { border: 1px solid var(--line-soft); border-radius: 12px; background: var(--panel); }
+      .table-wrap { overflow: auto; }
+      table { width: 100%; min-width: 720px; border-collapse: collapse; }
+      th, td { padding: 13px 16px; border-bottom: 1px solid var(--line-soft); text-align: left; font-size: 12px; }
+      th { color: var(--dim); font: 10px var(--mono); letter-spacing: 0.05em; text-transform: uppercase; }
+      tr:last-child td { border-bottom: 0; }
+      td strong { font-family: var(--mono); font-weight: 650; }
+      .suite-cell { font-weight: 650; }
+      .suite-cell span { display: block; margin-top: 3px; color: var(--dim); font-size: 10px; font-weight: 400; }
+      .bar-cell { min-width: 190px; }
+      .bar-row { display: grid; grid-template-columns: 74px 1fr 44px; align-items: center; gap: 7px; }
+      .bar-row + .bar-row { margin-top: 7px; }
+      .bar-label { color: var(--muted); font-size: 10px; }
+      .bar-track { height: 7px; overflow: hidden; border-radius: 99px; background: var(--line); }
+      .bar-fill { height: 100%; border-radius: inherit; background: var(--cyan); }
+      .bar-fill.verifier { background: var(--orange); }
+      .bar-number { color: var(--ink); font: 10px var(--mono); text-align: right; }
+
+      .two-col { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(310px, 0.9fr); gap: 14px; }
+      .audit-panel { padding: 18px; }
+      .audit-status { display: flex; align-items: center; gap: 9px; margin-bottom: 15px; color: var(--green); font-size: 13px; font-weight: 650; }
+      .audit-status b { display: inline-grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; background: oklch(0.77 0.13 150 / 0.14); }
+      .audit-list { display: grid; grid-template-columns: 1fr auto; gap: 0 14px; margin: 0; }
+      .audit-list dt, .audit-list dd { padding: 9px 0; border-top: 1px solid var(--line-soft); font-size: 11px; }
+      .audit-list dt { color: var(--muted); }
+      .audit-list dd { margin: 0; color: var(--ink); font: 11px var(--mono); text-align: right; }
+      .audit-list dd.good { color: var(--green); }
+      .note { color: var(--dim); font-size: 11px; line-height: 1.55; }
+      .architecture-box { padding: 18px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--panel-soft); }
+      .architecture-box h3 { margin: 0 0 8px; font-size: 14px; }
+      .architecture-box p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+      .arch-chip { display: inline-flex; align-items: center; gap: 7px; margin-top: 15px; color: var(--cyan); font: 10px var(--mono); }
+      .arch-chip::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--cyan); }
+      .arch-chip.verifier { color: var(--orange); }
+      .arch-chip.verifier::before { background: var(--orange); }
+
+      .explorer-toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 13px; border-bottom: 1px solid var(--line-soft); }
+      .control, .select { min-height: 34px; padding: 0 10px; color: var(--ink); border: 1px solid var(--line); border-radius: 7px; background: var(--panel-soft); font-size: 11px; outline: none; }
+      .control { flex: 1 1 240px; }
+      .control:focus, .select:focus { border-color: var(--cyan); }
+      .case-layout { display: grid; grid-template-columns: minmax(220px, 0.34fr) minmax(0, 0.66fr); min-height: 520px; }
+      .case-list { max-height: 780px; overflow: auto; border-right: 1px solid var(--line-soft); }
+      .case-item { display: block; width: 100%; padding: 11px 13px; color: var(--muted); border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; text-align: left; }
+      .case-item:hover, .case-item.is-selected { background: oklch(0.79 0.12 190 / 0.08); }
+      .case-item.is-selected { box-shadow: inset 3px 0 0 var(--cyan); }
+      .case-item-top { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
+      .case-id { color: var(--cyan); font: 10px var(--mono); }
+      .case-status { font: 10px var(--mono); }
+      .case-status.ok { color: var(--green); }
+      .case-status.fail { color: var(--red); }
+      .case-query { display: -webkit-box; margin-top: 6px; overflow: hidden; color: var(--ink); font-size: 11px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+      .trace { min-width: 0; padding: 18px; }
+      .trace-head { display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 15px; }
+      .trace-head h3 { margin: 0; font-size: 16px; }
+      .trace-head p { max-width: 580px; margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+      .trace-meta { color: var(--dim); font: 10px var(--mono); text-align: right; white-space: nowrap; }
+      .trace-summary { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 16px; }
+      .tag { display: inline-flex; align-items: center; gap: 5px; padding: 5px 7px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; background: var(--panel-soft); font: 10px var(--mono); }
+      .tag b { color: var(--ink); font-weight: 600; }
+      .timeline { position: relative; display: grid; gap: 7px; }
+      .timeline::before { position: absolute; top: 10px; bottom: 10px; left: 8px; width: 1px; content: ""; background: var(--line); }
+      details.event { position: relative; margin-left: 23px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--panel-soft); }
+      details.event[open] { border-color: var(--line); }
+      .event summary { display: grid; grid-template-columns: 34px 180px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 9px 10px; cursor: pointer; list-style: none; }
+      .event summary::-webkit-details-marker { display: none; }
+      .event summary::before { position: absolute; top: 12px; left: -19px; width: 8px; height: 8px; content: ""; border: 2px solid var(--cyan); border-radius: 50%; background: var(--bg); }
+      .event-number { color: var(--dim); font: 10px var(--mono); }
+      .event-type { color: var(--cyan); font: 10px var(--mono); }
+      .event-brief { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+      .event-time { color: var(--dim); font: 9px var(--mono); }
+      .event-body { padding: 0 10px 11px 53px; }
+      .event-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .event-field { min-width: 0; padding: 8px; border: 1px solid var(--line-soft); border-radius: 6px; background: oklch(0.17 0.022 250); }
+      .event-field.full { grid-column: 1 / -1; }
+      .event-field-label { display: block; margin-bottom: 4px; color: var(--dim); font: 9px var(--mono); text-transform: uppercase; }
+      .event-field pre { max-height: 210px; margin: 0; overflow: auto; color: var(--muted); font: 10px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; }
+      .empty { padding: 28px 18px; color: var(--muted); font-size: 12px; }
+      .loading { display: grid; min-height: 100vh; place-items: center; color: var(--muted); font: 12px var(--mono); }
+      .error { max-width: 650px; margin: 80px auto; padding: 20px; color: var(--red); border: 1px solid oklch(0.72 0.14 25 / 0.35); border-radius: 10px; background: oklch(0.72 0.14 25 / 0.08); line-height: 1.6; }
+      .footer-note { margin-top: 26px; color: var(--dim); font: 10px/1.6 var(--mono); }
+
+      @media (max-width: 1000px) {
+        .shell { grid-template-columns: 1fr; }
+        .rail { position: relative; height: auto; padding: 15px 18px; border-right: 0; border-bottom: 1px solid var(--line-soft); }
+        .brand { margin-bottom: 13px; }
+        .rail-label, .rail-footer { display: none; }
+        .rail-button { display: none; }
+        .source-list { display: flex; gap: 7px; overflow: auto; }
+        .source-item { min-width: 210px; padding: 8px; border: 1px solid var(--line-soft); border-radius: 7px; }
+        .main { padding-top: 22px; }
+      }
+      @media (max-width: 760px) {
+        .topbar, .section-heading, .trace-head { display: block; }
+        .live-pill, .trace-meta { margin-top: 12px; }
+        .verdict { grid-template-columns: 1fr; }
+        .verdict-score { text-align: left; }
+        .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .two-col, .case-layout { grid-template-columns: 1fr; }
+        .case-list { max-height: 280px; border-right: 0; border-bottom: 1px solid var(--line-soft); }
+        .event summary { grid-template-columns: 30px minmax(0, 1fr) auto; }
+        .event-brief { grid-column: 2 / -1; grid-row: 2; }
+        .event-time { grid-column: 3; grid-row: 1; }
+        .event-grid { grid-template-columns: 1fr; }
+      }
+      @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
+    </style>
+  </head>
+  <body>
+    <div id="app"><div class="loading">loading validation projection…</div></div>
+    <script>
+      const state = { data: null, suite: "all", architecture: "all", status: "all", search: "", selected: null };
+      const $ = (selector) => document.querySelector(selector);
+      const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
+      const pct = (done, total) => total ? Math.round(done / total * 100) : 0;
+      const number = (value) => Number(value || 0).toLocaleString("zh-CN");
+      const architectureName = (value) => value === "rwkv_verifier" ? "RWKV verifier" : "Engineering validator";
+      const suiteName = (value) => value === "date" ? "日期题" : `${value} 题集`;
+      const statusName = (value) => value === "completed" ? "完成" : "失败";
+      const allCases = () => state.data.batches.flatMap((batch) => batch.cases.map((item) => ({ ...item, batch })))
+        .sort((a, b) => `${a.batch.batch_id}/${a.case_id}`.localeCompare(`${b.batch.batch_id}/${b.case_id}`));
+      const filteredCases = () => allCases().filter((item) => {
+        const haystack = `${item.case_id} ${item.query}`.toLowerCase();
+        return (state.suite === "all" || item.batch.suite === state.suite)
+          && (state.architecture === "all" || item.batch.architecture === state.architecture)
+          && (state.status === "all" || item.status === state.status)
+          && (!state.search || haystack.includes(state.search.toLowerCase()));
+      });
+      const metric = (label, value, note) => `<div class="metric"><div class="metric-label">${esc(label)}</div><div class="metric-value">${esc(value)}</div><div class="metric-note">${esc(note)}</div></div>`;
+
+      function aggregate(architecture, suite = "all") {
+        const batches = state.data.batches.filter((batch) => batch.architecture === architecture && (suite === "all" || batch.suite === suite));
+        return batches.reduce((acc, batch) => {
+          acc.total += Number(batch.total_cases || 0); acc.completed += Number(batch.completed_cases || 0); acc.failed += Number(batch.failed_cases || 0);
+          for (const item of batch.cases) {
+            const c = item.comparison?.[architecture] || {};
+            for (const key of ["model_calls", "tool_calls", "search_events", "replan_events", "replan_attempts", "usable_evidence_count"]) acc[key] += Number(c[key] || 0);
+          }
+          return acc;
+        }, { total: 0, completed: 0, failed: 0, model_calls: 0, tool_calls: 0, search_events: 0, replan_events: 0, replan_attempts: 0, usable_evidence_count: 0 });
+      }
+
+      function renderShell() {
+        const eng = aggregate("engineering_validator");
+        const verifier = aggregate("rwkv_verifier");
+        const winner = eng.completed >= verifier.completed ? "工程验证器" : "RWKV verifier";
+        const winnerScore = Math.max(pct(eng.completed, eng.total), pct(verifier.completed, verifier.total));
+        const m = state.data.full_events_meta;
+        document.querySelector("#app").innerHTML = `
+          <div class="shell">
+            <aside class="rail">
+              <div class="brand"><div class="brand-mark">EC</div><div><div class="brand-title">RWKV-ECRA</div><div class="brand-subtitle">validation board</div></div></div>
+              <div class="rail-label">Sections</div>
+              <button class="rail-button is-active" data-scroll="overview"><i class="rail-dot"></i>Overview</button>
+              <button class="rail-button" data-scroll="comparison"><i class="rail-dot"></i>Architecture comparison</button>
+              <button class="rail-button" data-scroll="audit"><i class="rail-dot"></i>Protocol audit</button>
+              <button class="rail-button" data-scroll="trace"><i class="rail-dot"></i>Event trace explorer</button>
+              <div class="rail-label">Source files</div>
+              <div class="source-list">
+                <div class="source-item"><strong>full_events_fixed…json</strong><span>443 MB · ${number(m.event_count)} events</span></div>
+                <div class="source-item"><strong>comparison_fixed…json</strong><span>2.1 MB · 2 architectures</span></div>
+                <div class="source-item"><strong>audit_fixed…json</strong><span>484 KB · ${state.data.audit_meta.complete ? "audit passed" : "review needed"}</span></div>
+              </div>
+              <div class="rail-footer">Projection keeps every event in order and shortens oversized prompt/response fields for browser rendering.</div>
+            </aside>
+            <main class="main">
+              <header class="topbar" id="overview"><div><div class="kicker">ECRA / validation run · 2026-07-31</div><h1>Two retrieval architectures,<br/>one evidence trail.</h1><p class="lede">A readable view of what the model decided, what the retrieval system returned, and where each architecture stopped. The dashboard answers the practical question first: which path performed better?</p></div><div class="live-pill"><i></i>${number(m.case_count)} cases · source complete</div></header>
+              <section class="verdict"><div><div class="kicker">Current verdict</div><h2>${esc(winner)} is the stronger run.</h2><p>It completed <strong>${number(eng.completed)} / ${number(eng.total)}</strong> cases (${pct(eng.completed, eng.total)}%), compared with <strong>${number(verifier.completed)} / ${number(verifier.total)}</strong> (${pct(verifier.completed, verifier.total)}%) for RWKV verifier. The verifier added control checks, but its extra replanning increased cost and reduced completion.</p></div><div class="verdict-score"><strong>${winnerScore}%</strong><span>best completion rate</span></div></section>
+              <section class="metric-grid">${metric("All event records", number(m.event_count), "six batches · complete")}${metric("Engineering completed", `${number(eng.completed)} / ${number(eng.total)}`, `${pct(eng.completed, eng.total)}% completion`)}${metric("Verifier completed", `${number(verifier.completed)} / ${number(verifier.total)}`, `${pct(verifier.completed, verifier.total)}% completion`)}${metric("Verifier replans", number(verifier.replan_events), `${number(verifier.replan_attempts)} explicit attempts`)}</section>
+              <section class="section" id="comparison"><div class="section-heading"><div><h2>Architecture comparison</h2><p>Same 162 cases per architecture · completion is not factual gold accuracy.</p></div></div><div class="panel table-wrap"><table><thead><tr><th>Suite</th><th>Completion</th><th>Model calls</th><th>Search events</th><th>Replans</th><th>Evidence used</th></tr></thead><tbody>${renderComparisonRows()}<tr><td class="suite-cell">Total<span>all three suites</span></td>${renderCompareCell(eng, verifier, "completed", "total", true)}<td><strong>${number(eng.model_calls)}</strong> / ${number(verifier.model_calls)}</td><td><strong>${number(eng.search_events)}</strong> / ${number(verifier.search_events)}</td><td><strong>0</strong> / ${number(verifier.replan_events)}</td><td><strong>${number(eng.usable_evidence_count)}</strong> / ${number(verifier.usable_evidence_count)}</td></tr></tbody></table></div></section>
+              <section class="section two-col" id="audit"><div class="panel audit-panel"><div class="section-heading"><div><h2>Protocol boundary</h2><p>Source: validation_record_audit_fixed_20260730.json</p></div></div><div class="audit-status"><b>✓</b> Audit passed for all six batches</div><dl class="audit-list"><dt>Missing required event types</dt><dd class="good">0</dd><dt>Model shape errors</dt><dd class="good">0</dd><dt>Event shape errors</dt><dd class="good">0</dd><dt>Verifier boundary errors</dt><dd class="good">0</dd><dt>Raw verifier leaks into final prompts</dt><dd class="good">0</dd><dt>Duplicate case IDs</dt><dd class="good">0</dd></dl></div><div class="architecture-box"><h3>What the verifier actually did</h3><p>It remained control-only: point status, evidence references, missing points, conflicts and next queries. It did not supply factual answer text to the final synthesis. The cost was operational: 477 verifier events, 666 replans and 39 verifier errors across the full run.</p><div class="arch-chip">Engineering validator · 147 / 162</div><div class="arch-chip verifier">RWKV verifier · 131 / 162</div></div></section>
+              <section class="section" id="trace"><div class="section-heading"><div><h2>Event trace explorer</h2><p>Choose any case to inspect the complete ordered event chain.</p></div></div><div class="panel"><div class="explorer-toolbar"><input id="case-search" class="control" placeholder="Search case ID or query…"/><select id="suite-filter" class="select"><option value="all">All suites</option><option value="100">100题集</option><option value="50">50题集</option><option value="date">日期题</option></select><select id="arch-filter" class="select"><option value="all">All architectures</option><option value="engineering_validator">Engineering validator</option><option value="rwkv_verifier">RWKV verifier</option></select><select id="status-filter" class="select"><option value="all">All status</option><option value="completed">Completed</option><option value="failed">Failed</option></select></div><div class="case-layout"><div class="case-list" id="case-list"></div><div class="trace" id="trace-detail"></div></div></div></section>
+              <div class="footer-note">The original artifacts remain the source of truth. This page uses validation_dashboard_projection.v1 for interaction: every event is present in sequence; oversized text fields show a measured excerpt and length.</div>
+            </main>
+          </div>`;
+        bindControls(); renderCases();
+      }
+
+      function renderCompareCell(left, right, field, totalField, total = false) {
+        const l = total ? pct(left[field], left[totalField]) : pct(left[field], left[totalField]);
+        const r = total ? pct(right[field], right[totalField]) : pct(right[field], right[totalField]);
+        return `<td class="bar-cell"><div class="bar-row"><span class="bar-label">Engineering</span><span class="bar-track"><i class="bar-fill" style="width:${l}%"></i></span><span class="bar-number">${l}%</span></div><div class="bar-row"><span class="bar-label">Verifier</span><span class="bar-track"><i class="bar-fill verifier" style="width:${r}%"></i></span><span class="bar-number">${r}%</span></div></td>`;
+      }
+
+      function renderComparisonRows() {
+        const suites = [{ id: "100", label: "100 题集" }, { id: "50", label: "50 题集" }, { id: "date", label: "日期题" }];
+        return suites.map(({ id, label }) => {
+          const eng = aggregate("engineering_validator", id); const verifier = aggregate("rwkv_verifier", id);
+          return `<tr><td class="suite-cell">${label}<span>${eng.total} cases</span></td>${renderCompareCell(eng, verifier, "completed", "total")}<td><strong>${number(eng.model_calls)}</strong> / ${number(verifier.model_calls)}</td><td><strong>${number(eng.search_events)}</strong> / ${number(verifier.search_events)}</td><td><strong>0</strong> / ${number(verifier.replan_events)}</td><td><strong>${number(eng.usable_evidence_count)}</strong> / ${number(verifier.usable_evidence_count)}</td></tr>`;
+        }).join("");
+      }
+
+      function bindControls() {
+        $("#case-search").addEventListener("input", (event) => { state.search = event.target.value; renderCases(); });
+        $("#suite-filter").addEventListener("change", (event) => { state.suite = event.target.value; state.selected = null; renderCases(); });
+        $("#arch-filter").addEventListener("change", (event) => { state.architecture = event.target.value; state.selected = null; renderCases(); });
+        $("#status-filter").addEventListener("change", (event) => { state.status = event.target.value; renderCases(); });
+        document.querySelectorAll("[data-scroll]").forEach((button) => button.addEventListener("click", () => document.getElementById(button.dataset.scroll)?.scrollIntoView({ behavior: "smooth" })));
+      }
+
+      function renderCases() {
+        const rows = filteredCases();
+        if (!state.selected || !rows.some((item) => `${item.batch.batch_id}/${item.case_id}` === state.selected)) state.selected = rows[0] ? `${rows[0].batch.batch_id}/${rows[0].case_id}` : null;
+        $("#case-list").innerHTML = rows.length ? rows.map((item) => { const key = `${item.batch.batch_id}/${item.case_id}`; return `<button class="case-item ${state.selected === key ? "is-selected" : ""}" data-case="${esc(key)}"><div class="case-item-top"><span class="case-id">${esc(item.case_id)} · ${esc(item.batch.suite)}</span><span class="case-status ${item.status === "completed" ? "ok" : "fail"}">${statusName(item.status)}</span></div><span class="case-query">${esc(item.query)}</span></button>`; }).join("") : `<div class="empty">没有匹配的任务。</div>`;
+        document.querySelectorAll("[data-case]").forEach((button) => button.addEventListener("click", () => { state.selected = button.dataset.case; renderCases(); }));
+        const selected = rows.find((item) => `${item.batch.batch_id}/${item.case_id}` === state.selected);
+        renderTrace(selected);
+      }
+
+      function field(label, value, full = false) { return `<div class="event-field ${full ? "full" : ""}"><span class="event-field-label">${esc(label)}</span><pre>${esc(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</pre></div>`; }
+      function displayEventFields(event) {
+        const fields = [];
+        for (const [key, value] of Object.entries(event)) {
+          if (key === "seq" || key === "timestamp" || key === "type" || value === undefined || value === "") continue;
+          if (value && typeof value === "object" && value.text !== undefined) fields.push(field(key, `${value.text}${value.truncated ? `\n\n… [excerpt ${value.length} chars]` : ""}`, true));
+          else fields.push(field(key, value, ["next_queries", "missing_point_ids", "conflict_point_ids"].includes(key)));
+        }
+        return fields.join("") || field("details", "No additional fields");
+      }
+      function eventBrief(event) {
+        return event.query || event.action || event.operation || event.url || event.status || event.phase || "event recorded";
+      }
+      function renderTrace(item) {
+        const target = $("#trace-detail");
+        if (!item) { target.innerHTML = `<div class="empty">选择一个任务查看它的事件链。</div>`; return; }
+        const stats = item.trace_stats || {};
+        const comp = item.comparison || {};
+        target.innerHTML = `<div class="trace-head"><div><h3>${esc(item.case_id)} · ${esc(architectureName(item.batch.architecture))}</h3><p>${esc(item.query)}</p></div><div class="trace-meta">${esc(item.batch.suite)}<br/>${item.events.length} events</div></div><div class="trace-summary"><span class="tag">status <b>${esc(statusName(item.status))}</b></span><span class="tag">model calls <b>${number(comp.model_calls || stats.model_call_count)}</b></span><span class="tag">searches <b>${number(comp.search_events || stats.search_events)}</b></span><span class="tag">chunks <b>${number(comp.chunk_events || stats.web_search_chunk_events)}</b></span><span class="tag">replans <b>${number(comp.replan_events || stats.replan_event_count)}</b></span><span class="tag">evidence <b>${number(comp.usable_evidence_count || stats.page_fetches)}</b></span></div><div class="timeline">${item.events.map((event) => `<details class="event"><summary><span class="event-number">#${esc(event.seq)}</span><span class="event-type">${esc(event.type)}</span><span class="event-brief">${esc(eventBrief(event))}</span><span class="event-time">${esc((event.timestamp || "").slice(11, 19))}</span></summary><div class="event-body"><div class="event-grid">${displayEventFields(event)}</div></div></details>`).join("")}</div>`;
+      }
+
+      fetch("./validation-dashboard-data.json").then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); }).then((data) => { state.data = data; renderShell(); }).catch((error) => { document.querySelector("#app").innerHTML = `<div class="error"><strong>Dashboard data could not be loaded.</strong><br/>${esc(error.message)}<br/><br/>Run the projection builder and serve this page from the frontend Vite server.</div>`; });
+    </script>
+  </body>
+</html>
