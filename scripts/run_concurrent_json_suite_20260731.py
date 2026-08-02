@@ -33,11 +33,20 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
         rows = payload.get("cases") if isinstance(payload, dict) else payload
     if not isinstance(rows, list) or not rows:
         raise ValueError(f"empty or invalid case file: {path}")
-    normalized = [row for row in rows if isinstance(row, dict) and str(row.get("query") or "").strip()]
-    for index, row in enumerate(normalized, start=1):
-        row = dict(row)
-        row.setdefault("case_id", f"case_{index:03d}")
-        normalized[index - 1] = row
+    normalized = []
+    for index, raw_row in enumerate(rows, start=1):
+        if not isinstance(raw_row, dict):
+            continue
+        row = dict(raw_row)
+        # The gold benchmark calls the user prompt ``question`` and its
+        # stable identifier ``id``.  Normalize those aliases without
+        # discarding the original reference fields.
+        if not str(row.get("query") or "").strip():
+            row["query"] = row.get("question") or row.get("prompt") or ""
+        if not str(row.get("query") or "").strip():
+            continue
+        row.setdefault("case_id", row.get("id") or f"case_{index:03d}")
+        normalized.append(row)
     return normalized
 
 
@@ -90,13 +99,14 @@ def merge_parts(label: str, parts: list[Path], output_path: Path, input_path: Pa
 
 def run_dataset(label: str, input_path: Path, out_dir: Path, workers: int) -> dict[str, Any]:
     cases = load_cases(input_path)
+    effective_workers = min(max(1, int(workers)), len(cases))
     dataset_dir = out_dir / label
     dataset_dir.mkdir(parents=True, exist_ok=True)
     part_paths: list[Path] = []
     output_paths: list[Path] = []
     log_paths: list[Path] = []
-    for part in range(workers):
-        subset = cases[part::workers]
+    for part in range(effective_workers):
+        subset = cases[part::effective_workers]
         part_input = dataset_dir / f"part_{part + 1:02d}.json"
         part_output = dataset_dir / f"part_{part + 1:02d}.json.result.json"
         part_log = dataset_dir / f"part_{part + 1:02d}.log"
@@ -104,8 +114,11 @@ def run_dataset(label: str, input_path: Path, out_dir: Path, workers: int) -> di
         part_paths.append(part_input)
         output_paths.append(part_output)
         log_paths.append(part_log)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(run_part, label, index + 1, part_paths[index], output_paths[index], log_paths[index]) for index in range(workers)]
+    with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+        futures = [
+            pool.submit(run_part, label, index + 1, part_paths[index], output_paths[index], log_paths[index])
+            for index in range(effective_workers)
+        ]
         return_codes = [future.result() for future in futures]
     if any(code != 0 for code in return_codes):
         raise RuntimeError(f"{label} part runner failed: {return_codes}")
@@ -121,17 +134,32 @@ def main() -> int:
         default=None,
         help="Optional benchmark override; omitted means config.json EXPERIMENT.max_parallel_cases.",
     )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=None,
+        help="Run one fixed input file instead of the complete queued benchmark suites.",
+    )
+    parser.add_argument(
+        "--label",
+        default="fixed_probe",
+        help="Label for --input output and queue records.",
+    )
     args = parser.parse_args()
     workers = get_experiment_max_parallel_cases() if args.workers is None else args.workers
     if workers < 1:
         raise SystemExit("--workers must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    datasets = [
-        ("rwkv_search_100", ROOT / "data/evaluation/rwkv_search_100_fixed_20260729.json"),
-        ("rwkv_search_50", ROOT / "data/evaluation/rwkv_search_50_fixed_20260729.json"),
-        ("date_retrieval", ROOT / "data/evaluation/date_retrieval_tasks_20260729.jsonl"),
-        ("url_summary_direct", ROOT / "data/evaluation/url_summary_tasks_20260731.json"),
-    ]
+    datasets = (
+        [(args.label, args.input)]
+        if args.input is not None
+        else [
+            ("rwkv_search_100", ROOT / "data/evaluation/rwkv_search_100_fixed_20260729.json"),
+            ("rwkv_search_50", ROOT / "data/evaluation/rwkv_search_50_fixed_20260729.json"),
+            ("date_retrieval", ROOT / "data/evaluation/date_retrieval_tasks_20260729.jsonl"),
+            ("url_summary_direct", ROOT / "data/evaluation/url_summary_tasks_20260731.json"),
+        ]
+    )
     queue_log = args.output_dir / "queue.log"
     with queue_log.open("w", encoding="utf-8") as log:
         source = "config.json" if args.workers is None else "--workers override"

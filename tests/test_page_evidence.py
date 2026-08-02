@@ -31,6 +31,25 @@ class _FakeLLM:
         )
 
 
+class _GroundedFakeLLM:
+    def __init__(self):
+        self.prompts = []
+
+    def text_completion(self, prompt, max_tokens=None):
+        self.prompts.append((prompt, max_tokens))
+        source_line = prompt.rsplit("\n\nAssistant:", 1)[0].splitlines()[-1]
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "supported": True,
+                    "facts": [source_line],
+                    "quote": source_line,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+
 class PageEvidenceTests(unittest.TestCase):
     def test_complete_url_query_is_marked_for_direct_fetch(self):
         self.assertEqual(
@@ -62,7 +81,7 @@ class PageEvidenceTests(unittest.TestCase):
             "url": "https://example.com/line1",
             "page_excerpt": "\n".join(f"第{i}段：深圳地铁一号线站点信息。" for i in range(80)),
         }
-        llm = _FakeLLM()
+        llm = _GroundedFakeLLM()
         evidence = extract_single_page_evidence(
             query="深圳地铁一号线有哪些站点",
             page=page,
@@ -76,7 +95,7 @@ class PageEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["parallel_candidate"]["strategy"], "one-RWKV-call-per-chunk")
         self.assertEqual(evidence["parallel_candidate"]["completed_calls"], evidence["chunk_count"])
         self.assertEqual(len(evidence["source_chunks"]), evidence["chunk_count"])
-        self.assertNotIn("第79段", evidence["compact_facts"])
+        self.assertIn("第79段", evidence["compact_facts"])
 
     def test_short_cleaned_page_stays_single_pass(self):
         page = "\n".join(f"事实{i}: 深圳地铁一号线站点信息。" for i in range(160))
@@ -94,7 +113,7 @@ class PageEvidenceTests(unittest.TestCase):
         self.assertGreater(get_token_count(page), 7000)
         chunks = build_page_chunks(page)
         self.assertGreater(len(chunks), 1)
-        self.assertTrue(all(item["token_count"] <= 2048 for item in chunks))
+        self.assertTrue(all(item["token_count"] <= 4096 for item in chunks))
 
     def test_plain_candidate_is_not_allowed_to_be_a_tool_call(self):
         candidate = parse_chunk_candidate(

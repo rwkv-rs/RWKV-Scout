@@ -26,11 +26,6 @@ class AnalyzeRequest(BaseModel):
     rejection_criteria: list[str] = Field(default_factory=list)
     risk_checks: list[str] = Field(default_factory=list)
     prompt_version: str | None = None
-    search_action: str | None = None
-    baseline_search_action: str | None = None
-    retrieval_only: bool = False
-    retrieval_strategy: str | None = None
-    retrieval_fork: bool | None = None
     strategy_config: dict[str, Any] = Field(default_factory=dict)
     model_key: str | None = None
     llm_api_key: str | None = None

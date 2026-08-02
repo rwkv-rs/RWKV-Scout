@@ -33,20 +33,226 @@ from utils.time_budget import TaskTimeoutError, task_time_budget
 from utils.model_events import record_model_event
 from utils.risk_policy import validate_risk_answer
 from utils.reference_validation import validate_dataset_references, validate_reference_case
-from agent.retrieval_synthesis import synthesize_retrieval_answer
+from agent.retrieval_synthesis import build_evidence_context, synthesize_retrieval_answer
+from agent.planner import Planner
 from utils.task_events import append_task_event
 from utils.token_tracker import current_task_id
 from utils.trace_validation import validate_replay_trace
-from config import get_experiment_model_config, validate_experiment_model_contract
+from config import LLM_ENDPOINTS, get_experiment_model_config, validate_experiment_model_contract
 from agent.orchestrator import Orchestrator
 from tools.registry import ToolRegistry
 
 
 class ExperimentPipelineTests(unittest.TestCase):
+    def test_task_plan_merges_duplicate_points_without_losing_requirements(self):
+        plan = Planner._validate_task_plan(
+            {
+                "goal": "verify one fact",
+                "atomic_points": [
+                    {
+                        "id": "P1",
+                        "task": "Find the fact",
+                        "objective": "Verify the fact",
+                        "evidence_needed": ["official page"],
+                        "acceptance_criteria": ["date is present"],
+                    },
+                    {
+                        "id": "P2",
+                        "task": "  find the fact ",
+                        "objective": "verify   the fact",
+                        "evidence_needed": ["archived page", "official page"],
+                        "acceptance_criteria": ["source URL is present"],
+                    },
+                ],
+            }
+        )
+        self.assertEqual(len(plan["atomic_points"]), 1)
+        point = plan["atomic_points"][0]
+        self.assertEqual(point["id"], "P1")
+        self.assertEqual(point["source_ids"], ["P1", "P2"])
+        self.assertEqual(point["evidence_needed"], ["official page", "archived page"])
+        self.assertEqual(
+            point["acceptance_criteria"],
+            ["date is present", "source URL is present"],
+        )
+
+    def test_routing_observation_keeps_candidate_urls_before_evidence_rows(self):
+        observation = Planner._compact_observation(
+            {
+                "status": "ok",
+                "retrieval_role": "discovery",
+                "candidate_urls": [
+                    {
+                        "candidate_rank": 1,
+                        "title": "Official documentation",
+                        "url": "https://example.org/docs/relevant-page",
+                        "source": "search",
+                        "candidate_score": 9.5,
+                    }
+                ],
+                "results": [
+                    {
+                        "title": "Large page",
+                        "url": "https://example.org/",
+                        "snippet": "x" * 260,
+                        "chunk_candidates": [{"facts": ["y" * 400], "quote": "z" * 400}],
+                    }
+                ],
+            }
+        )
+        self.assertIn("candidate_urls", observation)
+        self.assertIn("relevant-page", observation)
+        self.assertLess(observation.index("candidate_urls"), 100)
+
+    def test_evidence_context_packs_each_source_inside_configured_budget(self):
+        results = []
+        for index in range(1, 4):
+            body = (f"Source {index} directly states the requested fact. " * 260).strip()
+            results.append(
+                {
+                    "title": f"Source {index}",
+                    "url": f"https://example.org/source-{index}",
+                    "page_excerpt": body,
+                    "content": body,
+                    "source_excerpt": body,
+                    "body_verified": True,
+                    "evidence_origin": "fetched_page_body",
+                    "evidence_boundary": "page_body_only",
+                    "source_chunks": [
+                        {
+                            "chunk_id": f"source-{index}-chunk-1",
+                            "index": 0,
+                            "text": body,
+                            "token_count": len(body.split()),
+                        }
+                    ],
+                    "chunk_count": 1,
+                }
+            )
+        context = build_evidence_context(
+            {"query": "requested fact", "results": results},
+            constraints={"strategy_config": {"context_source_count": 3}},
+            query="requested fact",
+        )
+        self.assertEqual([item["ref_id"] for item in context["selected_evidence"]], ["S1", "S2", "S3"])
+        self.assertLessEqual(context["context_tokens"], 7500)
+        self.assertIn("BEGIN EVIDENCE SOURCE S3", context["text"])
+        self.assertEqual(context["usable_evidence_count"], 3)
+        self.assertEqual(
+            sum(item["chunk_count"] for item in context["selected_evidence"]),
+            context["chunk_count"],
+        )
+
+    def test_relevance_beats_large_generic_homepage_for_source_ordering(self):
+        generic = "nginx homepage navigation and unrelated release notes. " * 700
+        relevant = (
+            "nginx WebSocket reverse proxy configuration uses proxy_http_version 1.1, "
+            "Upgrade, and Connection headers. "
+        ) * 30
+        context = build_evidence_context(
+            {
+                "query": "nginx WebSocket reverse proxy configuration",
+                "results": [
+                    {
+                        "title": "NGINX home",
+                        "url": "https://nginx.org/en/",
+                        "content": generic,
+                        "page_excerpt": generic,
+                        "source_excerpt": generic,
+                        "body_verified": True,
+                        "evidence_origin": "fetched_page_body",
+                    },
+                    {
+                        "title": "WebSocket proxying",
+                        "url": "https://nginx.org/en/docs/http/websocket.html",
+                        "content": relevant,
+                        "page_excerpt": relevant,
+                        "source_excerpt": relevant,
+                        "body_verified": True,
+                        "evidence_origin": "fetched_page_body",
+                    },
+                ],
+            },
+            constraints={"strategy_config": {"context_source_count": 1}},
+        )
+        self.assertEqual(context["selected_evidence"][0]["url"], "https://nginx.org/en/docs/http/websocket.html")
+
+    def test_duplicate_source_rows_do_not_consume_context_slots(self):
+        body = "The primary source states the release date is 2026-07-30. " * 12
+        results = [
+            {
+                "title": "Primary source",
+                "url": "https://example.org/fact/#section",
+                "content": body,
+                "page_excerpt": body,
+                "source_excerpt": body,
+                "body_verified": True,
+                "evidence_origin": "fetched_page_body",
+            },
+            {
+                "title": "The same source from another provider",
+                "url": "HTTPS://EXAMPLE.ORG/fact/",
+                "content": body,
+                "page_excerpt": body,
+                "source_excerpt": body,
+                "body_verified": True,
+                "evidence_origin": "fetched_page_body",
+            },
+            {
+                "title": "Independent source",
+                "url": "https://example.net/confirmation",
+                "content": body,
+                "page_excerpt": body,
+                "source_excerpt": body,
+                "body_verified": True,
+                "evidence_origin": "fetched_page_body",
+            },
+        ]
+        context = build_evidence_context(
+            {"query": "release date", "results": results},
+            constraints={"strategy_config": {"context_source_count": 3}},
+            query="release date",
+        )
+        self.assertEqual(context["duplicate_source_count"], 1)
+        self.assertEqual(
+            [item["url"] for item in context["selected_evidence"]],
+            ["https://example.org/fact/#section", "https://example.net/confirmation"],
+        )
+
+    def test_configured_source_count_does_not_admit_unrelated_pages(self):
+        relevant = "The WebSocket reverse proxy uses the Upgrade header. " * 8
+        unrelated = "This page is a generic download index with release archives. " * 30
+        context = build_evidence_context(
+            {
+                "query": "WebSocket reverse proxy Upgrade header",
+                "results": [
+                    {
+                        "title": "Relevant documentation",
+                        "url": "https://example.org/websocket",
+                        "content": relevant,
+                        "page_excerpt": relevant,
+                        "source_excerpt": relevant,
+                        "evidence_origin": "fetched_page_body",
+                    },
+                    {
+                        "title": "Unrelated downloads",
+                        "url": "https://example.org/downloads",
+                        "content": unrelated,
+                        "page_excerpt": unrelated,
+                        "source_excerpt": unrelated,
+                        "evidence_origin": "fetched_page_body",
+                    },
+                ],
+            },
+            constraints={"strategy_config": {"context_source_count": 2}},
+            query="WebSocket reverse proxy Upgrade header",
+        )
+        self.assertEqual([item["url"] for item in context["selected_evidence"]], ["https://example.org/websocket"])
+
     def test_experiment_model_contract_is_the_active_rwkv_13b_profile(self):
         profile = get_experiment_model_config()
         self.assertEqual(profile["model"], "rwkv7-g1i_preview4922-13.3b-20260720-ctx12288")
-        self.assertEqual(profile["endpoint"], "http://172.31.89.209:29613/v1")
+        self.assertEqual(profile["endpoint"], LLM_ENDPOINTS["local_13b"]["base_url"])
         self.assertEqual(profile["context_length"], 12288)
         self.assertEqual(validate_experiment_model_contract()["api_key"], "rwkv-skills")
 
@@ -428,84 +634,26 @@ class ExperimentPipelineTests(unittest.TestCase):
             self.assertEqual(calls["count"], 1)
             self.assertEqual([event["type"] for event in events], ["error"])
 
-    def test_controlled_orchestrator_run_writes_full_trace_without_model_service(self):
+    def test_retry_policy_can_fail_fast_on_timeouts(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            output = root / "output"
-            trace_log = root / "logs"
-            retrieved = {
-                "status": "ok",
-                "real_network": False,
-                "retrieved_at": "2026-07-27T00:00:00+00:00",
-                "results": [{"title": "Fixture source", "url": "https://example.com/fixture", "page_excerpt": "The fixture fact is 42."}],
-                "sources": ["https://example.com/fixture"],
-                "citation_refs": [{"ref_id": "S1", "title": "Fixture source", "url": "https://example.com/fixture", "content": "The fixture fact is 42."}],
-                "provider_errors": [],
-            }
-            with (
-                patch.dict("config.DATA_PIPELINE", {"output_directory": str(output)}, clear=False),
-                patch.dict("config.TRACKING", {"log_dir": str(trace_log), "enable": False}, clear=False),
-                patch("agent.controlled_retrieval.generate_query_candidates", return_value={"queries": ["fixture fact"], "source": "test"}),
-                patch("agent.controlled_retrieval.execute_parallel_candidates", return_value=[("fixture fact", retrieved)]),
-                patch(
-                    "agent.controlled_retrieval.synthesize_retrieval_answer",
-                    return_value={
-                        "content": "The fixture fact is 42 [S1].",
-                        "mode": "test_model",
-                        "evidence_count": 1,
-                        "citation_refs": retrieved["citation_refs"],
-                        "prompt": "test prompt",
-                        "model_output": "The fixture fact is 42 [S1].",
-                        "context_text": "[S1] Fixture source\nFacts: The fixture fact is 42.",
-                        "selected_evidence": [
-                            {
-                                "ref_id": "S1",
-                                "url": "https://example.com/fixture",
-                                "source_chars": 25,
-                                "selected_chars": 25,
-                                "chunk_count": 1,
-                                "truncated": False,
-                            }
-                        ],
-                        "context_stats": {"context_tokens": 12, "chunk_count": 1, "truncated_count": 0},
-                    },
-                ),
-            ):
-                orchestrator = Orchestrator()
-                def fail_if_planner_runs(*_args):
-                    raise AssertionError("controlled retrieval must bypass the planner")
+            output = Path(directory) / "output"
+            token = current_task_id.set("TIMEOUT_1")
+            calls = {"count": 0}
 
-                orchestrator.planner.plan_next_action = fail_if_planner_runs
-                result = orchestrator.run(
-                    "search fixture fact",
-                    task_id="CONTROLLED_TRACE",
-                    run_metadata={
-                        "experiment_id": "test",
-                        "variant": "baseline",
-                        "dataset_version": "eval-test",
-                        "search_action": "search_web_keyless",
-                    },
-                )
-                trace = reconstruct_run("CONTROLLED_TRACE", output)
+            @retry_with_fallback(max_retries=3, delay=0, backoff=1, retry_timeout_errors=False)
+            def timed_out():
+                calls["count"] += 1
+                raise TimeoutError("model read timeout")
 
-            self.assertIn("42", result)
-            event_types = {event["type"] for event in trace["events"]}
-            self.assertTrue(
-                {
-                    "query_candidates",
-                    "tool_result",
-                    "content_extract",
-                    "ranking",
-                    "context_build",
-                    "citation_validation",
-                    "synthesis",
-                    "final",
-                }.issubset(event_types)
-            )
-            self.assertEqual(trace["manifest"]["experiment"]["dataset_version"], "eval-test")
-            self.assertEqual(trace["model_outputs"][0]["prompt"], "test prompt")
-            self.assertEqual(trace["context_trace"][0]["data"]["context_stats"]["chunk_count"], 1)
-            self.assertEqual(trace["ranking_trace"][0]["data"]["method"], "evidence_quality.v1")
+            try:
+                with patch.dict("config.DATA_PIPELINE", {"output_directory": str(output)}, clear=False):
+                    with self.assertRaises(TimeoutError):
+                        timed_out()
+                    events = reconstruct_run("TIMEOUT_1", output)["events"]
+            finally:
+                current_task_id.reset(token)
+            self.assertEqual(calls["count"], 1)
+            self.assertEqual([event["type"] for event in events], ["error"])
 
     def test_agentic_loop_bounds_repeat_and_forces_summary(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -515,7 +663,7 @@ class ExperimentPipelineTests(unittest.TestCase):
             orchestrator.state.task_id = "REPEAT_STEP_TRACE"
             orchestrator.state.task_output_dir = str(task_dir)
             orchestrator.state.user_query = "find stations"
-            orchestrator.state.run_metadata = {"max_tool_steps": 3, "retrieval_fork": False}
+            orchestrator.state.run_metadata = {"max_tool_steps": 3}
             plan = {
                 "schema_version": "task_plan.v1",
                 "goal": "find stations",
@@ -592,354 +740,10 @@ class ExperimentPipelineTests(unittest.TestCase):
             self.assertIn("bounded summary", result)
             self.assertEqual([item[0] for item in executed], ["search_mediawiki", "fetch_mediawiki_page"])
             self.assertEqual(len(synthesis_calls), 1)
-            self.assertEqual(synthesis_calls[0]["termination_reason"], "repeated_failed_request")
-
-    def test_retrieval_fork_lets_each_task_point_choose_tools_from_all(self):
-        with tempfile.TemporaryDirectory() as directory:
-            task_dir = Path(directory) / "task"
-            task_dir.mkdir()
-            orchestrator = Orchestrator()
-            orchestrator.state.task_id = "FORK_TRACE"
-            orchestrator.state.task_output_dir = str(task_dir)
-            orchestrator.state.user_query = "collect the fact"
-            orchestrator.state.run_metadata = {
-                "max_tool_steps": 2,
-                "retrieval_fork": True,
-                "retrieval_branch_width": 1,
-            }
-            plan = {
-                "schema_version": "task_plan.v1",
-                "goal": "collect the fact",
-                "atomic_points": [
-                    {
-                        "id": "P1",
-                        "task": "collect the fact",
-                        "objective": "collect one directly supported fact",
-                        "evidence_needed": ["the source fact"],
-                        "acceptance_criteria": ["the source directly supports the fact"],
-                        "output_format": "prose",
-                        "status": "pending",
-                    }
-                ],
-                "completion_rule": "supported",
-            }
-
-            class FakeBranch:
-                def __init__(self):
-                    self.calls = 0
-
-                def plan_next_action(self, *_args):
-                    self.calls += 1
-                    if self.calls == 1:
-                        return {"action": "search_web_keyless", "args": {"query": "fact"}, "task_point_id": "P1"}
-                    return {
-                        "action": "fetch_web_url",
-                        "args": {"url": "https://example.com/fact"},
-                        "task_point_id": "P1",
-                    }
-
-                def observe_tool_result(self, *_args):
-                    return None
-
-                def execution_transcript(self):
-                    return "branch transcript"
-
-            executed = []
-
-            def fake_execute(action, args, context, phase=None):
-                executed.append((action, args, phase))
-                if action == "search_web_keyless":
-                    return json.dumps(
-                        {
-                            "status": "ok",
-                            "retrieval_role": "discovery",
-                            "results": [{"title": "Fact", "url": "https://example.com/fact"}],
-                        }
-                    )
-                return json.dumps({"status": "ok", "retrieval_role": "evidence", "results": []})
-
-            def fake_page(*_args, **_kwargs):
-                return {
-                    "status": "ok",
-                    "results": [
-                        {
-                            "title": "Fact",
-                            "url": "https://example.com/fact",
-                            "page_excerpt": "The fact is 42.",
-                        }
-                    ],
-                    "compact_facts": "The fact is 42.",
-                    "page_evidence": {"status": "ok"},
-                }
-
-            with (
-                patch("agent.orchestrator.append_task_event"),
-                patch("agent.orchestrator.ToolRegistry.execute", side_effect=fake_execute),
-                patch("agent.orchestrator.ToolRegistry.can_execute", return_value=True),
-                patch("agent.orchestrator.synthesize_retrieval_answer", return_value={
-                    "content": "The fact is 42.",
-                    "mode": "test_final",
-                    "model_output": "The fact is 42.",
-                    "context_text": "The fact is 42.",
-                    "selected_evidence": [],
-                    "context_stats": {},
-                    "citation_refs": [],
-                }),
-                patch.object(orchestrator, "_process_single_page_result", side_effect=fake_page),
-            ):
-                orchestrator.planner.create_task_plan = lambda *_args: plan
-                orchestrator.planner.begin_task = lambda *_args: None
-                orchestrator.planner.fork_for_point = lambda *_args, **_kwargs: FakeBranch()
-                result = orchestrator._run_model_tool_loop("collect the fact", {})
-
-            self.assertEqual(result, "The fact is 42.")
-            self.assertEqual(
-                [(action, phase) for action, _args, phase in executed],
-                [("search_web_keyless", "ALL"), ("fetch_web_url", "ALL")],
-            )
-
-    def test_generic_web_fork_exposes_only_model_owned_web_search(self):
-        with tempfile.TemporaryDirectory() as directory:
-            task_dir = Path(directory) / "task"
-            task_dir.mkdir()
-            orchestrator = Orchestrator()
-            orchestrator.state.task_id = "GENERIC_FORK_TRACE"
-            orchestrator.state.task_output_dir = str(task_dir)
-            orchestrator.state.user_query = "collect the generic web fact"
-            orchestrator.state.run_metadata = {
-                "max_tool_steps": 2,
-                "retrieval_fork": True,
-                "generic_web_search_only": True,
-                "retrieval_branch_width": 1,
-            }
-            plan = {
-                "schema_version": "task_plan.v1",
-                "goal": "collect the generic web fact",
-                "atomic_points": [
-                    {
-                        "id": "P1",
-                        "task": "collect the generic web fact",
-                        "objective": "collect one directly supported fact",
-                        "evidence_needed": ["the source fact"],
-                        "acceptance_criteria": ["the source directly supports the fact"],
-                        "output_format": "prose",
-                        "status": "pending",
-                    }
-                ],
-                "completion_rule": "supported",
-            }
-
-            class FakeBranch:
-                def __init__(self):
-                    self.calls = 0
-
-                def plan_next_action(self, *_args):
-                    self.calls += 1
-                    if self.calls == 1:
-                        return {
-                            "action": "web_search",
-                            "args": {"query": "generic web fact"},
-                            "task_point_id": "P1",
-                        }
-                    return {"action": "finish_task", "args": {}, "task_point_id": "P1"}
-
-                def observe_tool_result(self, *_args):
-                    return None
-
-                def execution_transcript(self):
-                    return "generic branch transcript"
-
-            executed = []
-
-            def fake_execute(action, args, context, phase=None):
-                executed.append((action, args, phase))
-                return json.dumps(
-                    {
-                        "status": "ok",
-                        "retrieval_role": "discovery",
-                        "evidence_ready": True,
-                        "results": [
-                            {
-                                "title": "Fact",
-                                "url": "https://example.com/fact",
-                                "page_excerpt": "The fact is 42.",
-                            }
-                        ],
-                        "page_evidence": [
-                            {"url": "https://example.com/fact", "status": "ok"}
-                        ],
-                    }
-                )
-
-            with (
-                patch("agent.orchestrator.append_task_event"),
-                patch("agent.orchestrator.ToolRegistry.execute", side_effect=fake_execute),
-                patch("agent.orchestrator.synthesize_retrieval_answer", return_value={
-                    "content": "The fact is 42.",
-                    "mode": "test_final",
-                    "model_output": "The fact is 42.",
-                    "context_text": "The fact is 42.",
-                    "selected_evidence": [],
-                    "context_stats": {},
-                    "citation_refs": [],
-                }),
-            ):
-                orchestrator.planner.create_task_plan = lambda *_args: plan
-                orchestrator.planner.begin_task = lambda *_args: None
-                orchestrator.planner.fork_for_point = lambda *_args, **_kwargs: FakeBranch()
-                result = orchestrator._run_model_tool_loop(
-                    "collect the generic web fact",
-                    {},
-                )
-
-            self.assertEqual(result, "The fact is 42.")
-            self.assertEqual(
-                [(action, phase) for action, _args, phase in executed],
-                [("web_search", "GENERIC_WEB")],
-            )
-            self.assertTrue(ToolRegistry.can_execute("web_search", "GENERIC_WEB"))
-            self.assertFalse(ToolRegistry.can_execute("search_web_keyless", "GENERIC_WEB"))
-
-    def test_invalid_citation_triggers_one_bounded_recovery_round(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            output = root / "output"
-            trace_log = root / "logs"
-            bad = {
-                "status": "ok",
-                "real_network": False,
-                "results": [{"title": "Search page", "url": "https://www.google.com/search?q=bad", "page_excerpt": "The search page body is intentionally invalid and does not support the requested fact."}],
-                "sources": ["https://www.google.com/search?q=bad"],
-                "citation_refs": [{"ref_id": "BAD", "url": "https://www.google.com/search?q=bad"}],
-                "provider_errors": [],
-            }
-            good = {
-                "status": "ok",
-                "real_network": False,
-                "results": [{"title": "Primary", "url": "https://example.com/primary", "page_excerpt": "The reviewed fact is 7, and this source body directly supports the requested citation recovery test."}],
-                "sources": ["https://example.com/primary"],
-                "citation_refs": [{"ref_id": "GOOD", "url": "https://example.com/primary"}],
-                "provider_errors": [],
-            }
-            syntheses = [
-                {
-                    "content": "Unsupported [BAD].",
-                    "mode": "test_model",
-                    "evidence_count": 1,
-                    "citation_refs": bad["citation_refs"],
-                    "prompt": "bad prompt",
-                    "model_output": "Unsupported [BAD].",
-                },
-                {
-                    "content": "The reviewed fact is 7 [GOOD].",
-                    "mode": "test_model",
-                    "evidence_count": 1,
-                    "citation_refs": good["citation_refs"],
-                    "prompt": "good prompt",
-                    "model_output": "The reviewed fact is 7 [GOOD].",
-                },
-            ]
-            with (
-                patch.dict("config.DATA_PIPELINE", {"output_directory": str(output)}, clear=False),
-                patch.dict("config.TRACKING", {"log_dir": str(trace_log), "enable": False}, clear=False),
-                patch(
-                    "agent.controlled_retrieval.generate_query_candidates",
-                    side_effect=[{"queries": ["bad"], "source": "test"}, {"queries": ["good"], "source": "test"}],
-                ),
-                patch("agent.controlled_retrieval.execute_parallel_candidates", side_effect=[[('bad', bad)], [('good', good)]]),
-                patch("agent.controlled_retrieval.synthesize_retrieval_answer", side_effect=syntheses),
-            ):
-                orchestrator = Orchestrator()
-                orchestrator.planner.create_task_plan = lambda *_args: {
-                    "schema_version": "task_plan.v1",
-                    "goal": "recover citation",
-                    "atomic_points": [
-                        {
-                            "id": "P1",
-                            "task": "verify the reviewed fact",
-                            "objective": "recover the reviewed fact",
-                            "evidence_needed": ["reviewed fact"],
-                            "acceptance_criteria": ["the reviewed fact is directly supported"],
-                            "output_format": "prose",
-                            "status": "pending",
-                        }
-                    ],
-                    "completion_rule": "The reviewed fact is supported.",
-                }
-                orchestrator.planner.plan_next_action = lambda *_args: {
-                    "action": "search_web_keyless",
-                    "args": {"max_results": 1, "fetch_pages": 1},
-                    "router": "test",
-                }
-                orchestrator.run(
-                    "recover citation",
-                    task_id="CITATION_RECOVERY",
-                    run_metadata={"retrieval_fork": False},
-                )
-                trace = reconstruct_run("CITATION_RECOVERY", output)
-
-            recovery = [event for event in trace["events"] if event["type"] == "citation_recovery"]
-            final = [event for event in trace["events"] if event["type"] == "final"][-1]
-            self.assertEqual([event["status"] for event in recovery], ["scheduled", "completed"])
-            self.assertEqual(final["status"], "completed")
-            self.assertIn("reviewed fact", trace["final_answer"])
-
-    def test_retrieval_only_mode_skips_synthesis_without_model_service(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            output = root / "output"
-            trace_log = root / "logs"
-            retrieved = {
-                "status": "ok",
-                "real_network": False,
-                "results": [
-                    {
-                        "title": "Fixture source",
-                        "url": "https://example.com/fixture",
-                        "page_excerpt": "The fixture fact is 42.",
-                    }
-                ],
-                "sources": ["https://example.com/fixture"],
-                "citation_refs": [
-                    {
-                        "ref_id": "S1",
-                        "title": "Fixture source",
-                        "url": "https://example.com/fixture",
-                        "content": "The fixture fact is 42.",
-                    }
-                ],
-            }
-            with (
-                patch.dict("config.DATA_PIPELINE", {"output_directory": str(output)}, clear=False),
-                patch.dict("config.TRACKING", {"log_dir": str(trace_log), "enable": False}, clear=False),
-                patch("agent.controlled_retrieval.generate_query_candidates", return_value={"queries": ["fixture fact"], "source": "test"}),
-                patch("agent.controlled_retrieval.execute_parallel_candidates", return_value=[("fixture fact", retrieved)]),
-                patch(
-                    "agent.controlled_retrieval.synthesize_retrieval_answer",
-                    side_effect=AssertionError("retrieval-only mode must not call synthesis"),
-                ),
-            ):
-                orchestrator = Orchestrator()
-                orchestrator.planner.plan_next_action = lambda *_args: (_ for _ in ()).throw(
-                    AssertionError("retrieval-only mode must bypass planning")
-                )
-                result = orchestrator.run(
-                    "search fixture fact",
-                    task_id="RETRIEVAL_ONLY_TRACE",
-                    run_metadata={
-                        "search_action": "search_web_keyless",
-                        "retrieval_only": True,
-                    },
-                )
-                trace = reconstruct_run("RETRIEVAL_ONLY_TRACE", output)
-
-            self.assertEqual(result, "")
-            self.assertEqual(trace["final_answer"], "")
-            self.assertEqual(trace["events"][-1]["mode"], "retrieval_only")
-            self.assertFalse([event for event in trace["events"] if event["type"] == "model_call"])
-            self.assertEqual(trace["model_outputs"][0]["mode"], "retrieval_only")
-            validation = validate_replay_trace(trace)
-            self.assertTrue(validation["valid"], validation)
+            # A blocked/repeated request is recoverable evidence feedback, not
+            # a terminal reason.  The loop now reaches its configured global
+            # step guard and then forces the final RWKV summary.
+            self.assertEqual(synthesis_calls[0]["termination_reason"], "max_steps_reached")
 
     def test_runtime_gate_is_persisted_and_released(self):
         with tempfile.TemporaryDirectory() as directory:

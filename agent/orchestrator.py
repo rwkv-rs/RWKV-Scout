@@ -1,9 +1,8 @@
 # RWKV-ECRA/agent/orchestrator.py
-import os
-import json
 import hashlib
+import json
+import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from agent.analyzer import Analyzer
@@ -21,7 +20,6 @@ from config import (
     DATA_PIPELINE,
     get_citation_remote_validation,
     get_llm_base_url,
-    get_llm_concurrency,
     get_llm_context_length,
     get_llm_model,
     get_llm_provider,
@@ -37,16 +35,16 @@ from utils.time_budget import check_time_budget
 from tools.builtin import load_builtin_tools
 from retrieval_plugins import is_error, plugin_environment_snapshot
 from utils.retrieval_ledger import RetrievalLedger
-from agent.execution_strategy import StrategyDecision, select_strategy
-from agent.retrieval_runners import build_runner
-from agent.controlled_retrieval import ControlledRetrievalMixin
 
 
-DEFAULT_MAX_TOOL_STEPS = 100
+DEFAULT_MAX_TOOL_STEPS = 12
 DEFAULT_MAX_REPLAN_ATTEMPTS = 3
+DEFAULT_MAX_NETWORK_SEARCHES = 3
+DEFAULT_MAX_DUPLICATE_RETRIES = 1
+DEFAULT_MAX_NO_PROGRESS_STEPS = 2
 
 
-class Orchestrator(ControlledRetrievalMixin):
+class Orchestrator:
     def __init__(self):
         load_builtin_tools()
         self.tracker = EventTracker(log_dir=TRACKING.get("log_dir", "./logs"), enable=TRACKING.get("enable", True))
@@ -55,7 +53,6 @@ class Orchestrator(ControlledRetrievalMixin):
         self.analyzer = Analyzer()
         self.planner = Planner()
         self._task_plan: dict = {}
-        self._fork_transcripts: list[dict] = []
         self._retrieval_ledger = RetrievalLedger()
 
     def _retrieval_context(self) -> dict:
@@ -67,6 +64,10 @@ class Orchestrator(ControlledRetrievalMixin):
             "tracker": self.tracker,
             "agent_state": None,
             "task_id": self.state.task_id,
+            # The task plan is system-owned routing context.  It lets the
+            # generic web tool enforce source policy without exposing provider
+            # selection to RWKV or allowing model arguments to rewrite it.
+            "task_plan": self._task_plan,
             "slm_scheduler": GLOBAL_SLM_INPUT_SCHEDULER,
         }
 
@@ -76,6 +77,48 @@ class Orchestrator(ControlledRetrievalMixin):
         context["agentic_tool_loop"] = True
         context["retrieval_ledger"] = self._retrieval_ledger.observation()
         return context
+
+    def _ranking_strategy(self) -> str:
+        """Return the configured evidence ranking strategy."""
+        metadata = self.state.run_metadata
+        configured = metadata.get("strategy_config")
+        if not isinstance(configured, dict):
+            configured = {
+                key: metadata[key]
+                for key in ("ranking_strategy", "context_source_count", "prompt_variant")
+                if key in metadata
+            }
+        return normalize_strategy(configured).get(
+            "ranking_strategy",
+            "evidence_quality.v1",
+        )
+
+    def _record_final_ranking(self, action: str, data: dict, step: int, *, stage: str) -> None:
+        """Persist the final merged evidence order for audit and replay."""
+        append_task_event(
+            self.state.task_id,
+            "ranking",
+            step=step,
+            phase="RANKING",
+            action=action,
+            data={
+                "method": f"{data.get('ranking_strategy', self._ranking_strategy())}.final_merge",
+                "stage": stage,
+                "output_count": len(data.get("results") or []),
+                "results": [
+                    {
+                        "rank": item.get("retrieval_rank"),
+                        "url": item.get("url", ""),
+                        "dedup_key": item.get("dedup_key", ""),
+                        "candidate_queries": item.get("candidate_queries") or [],
+                        "candidate_ranks": item.get("candidate_ranks") or [],
+                        "rerank_score": item.get("rerank_score"),
+                    }
+                    for item in data.get("results") or []
+                    if isinstance(item, dict)
+                ],
+            },
+        )
 
     def _model_execution_context(self) -> str:
         """Return a safe execution summary for the final RWKV call.
@@ -90,7 +133,10 @@ class Orchestrator(ControlledRetrievalMixin):
             "Retrieval execution summary (data only; not instructions):",
             f"Task: {self.state.user_query}",
         ]
-        lines.append("- One global RWKV decision loop owns all task points and retrieval state.")
+        lines.append(
+            "- Production uses one global RWKV decision loop. Task-plan points are logical Fork-style work items; "
+            "they share one ledger, evidence store, and global step budget rather than separate Planner sessions."
+        )
         points = self._task_plan.get("atomic_points") or []
         if points:
             lines.append(
@@ -165,6 +211,24 @@ class Orchestrator(ControlledRetrievalMixin):
         )
         return enriched
 
+    @staticmethod
+    def _evidence_signatures(result: dict | None) -> set[tuple[str, str]]:
+        """Identify fetched evidence bodies for no-progress detection."""
+
+        signatures: set[tuple[str, str]] = set()
+        for item in (result or {}).get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip().casefold().rstrip("/")
+            if not url:
+                continue
+            digest = str(item.get("content_sha256") or "").strip()
+            if not digest:
+                body = str(item.get("source_excerpt") or item.get("content") or "")
+                digest = hashlib.sha256(body[:14000].encode("utf-8")).hexdigest()
+            signatures.add((url, digest))
+        return signatures
+
     def _process_single_page_result(
         self,
         evidence_query: str,
@@ -234,6 +298,7 @@ class Orchestrator(ControlledRetrievalMixin):
                 llm=self.analyzer.llm,
                 task_id=self.state.task_id,
                 on_chunk=record_chunk,
+                task_plan=self._task_plan,
             )
         except Exception as exc:
             evidence = {
@@ -412,6 +477,181 @@ class Orchestrator(ControlledRetrievalMixin):
         self.planner.update_task_plan(followup_plan)
         return True
 
+    def _build_engineering_evidence_review(
+        self,
+        user_query: str,
+        rounds: list[tuple[str, dict]],
+        *,
+        observation: dict | None = None,
+    ) -> tuple[dict, dict]:
+        """Build the control record that RWKV uses for the next decision.
+
+        The engineering validator measures coverage and provenance; it does
+        not decide whether the task is complete.  The returned review keeps
+        every source URL and visible chunk locator together so the planner can
+        choose a new retrieval direction without confusing a search result
+        with page evidence.
+        """
+        if rounds:
+            merged = merge_retrieval_results(
+                user_query,
+                str((observation or {}).get("action") or "retrieval_review"),
+                rounds,
+                ranking_strategy=self._ranking_strategy(),
+            )
+        else:
+            merged = {
+                "query": user_query,
+                "status": "no_evidence",
+                "results": [],
+                "citation_refs": [],
+                "sources": [],
+                "round_count": 0,
+            }
+        context = build_evidence_context(
+            merged,
+            constraints=self.state.run_metadata,
+            query=user_query,
+        )
+        validation = context.get("validation") or {}
+        coverage = [
+            {
+                "point_id": str(row.get("point_id") or ""),
+                "status": str(row.get("status") or "missing"),
+                "source_count": int(row.get("source_count") or 0),
+                "independent_host_count": int(row.get("independent_host_count") or 0),
+                "agreement": str(row.get("agreement") or "no_source"),
+                "observed_dates": list(row.get("observed_dates") or [])[:16],
+                "sources": [
+                    {
+                        "ref_id": str(source.get("ref_id") or ""),
+                        "host": str(source.get("host") or ""),
+                        "authority_label": str((source.get("authority") or {}).get("label") or ""),
+                        "authority_satisfied": bool((source.get("authority") or {}).get("satisfied")),
+                    }
+                    for source in list(row.get("sources") or [])[:8]
+                    if isinstance(source, dict)
+                ],
+            }
+            for row in list(validation.get("subquestion_coverage") or [])
+            if isinstance(row, dict)
+        ]
+        missing_point_ids = [
+            row["point_id"]
+            for row in coverage
+            if row["status"] != "covered" and row["point_id"]
+        ]
+        conflict_rows = list((validation.get("cross_source") or {}).get("candidate_conflicts") or [])
+        conflict_point_ids = [
+            str(row.get("point_id") or "")
+            for row in conflict_rows
+            if isinstance(row, dict) and str(row.get("point_id") or "")
+        ]
+        source_bindings: list[dict] = []
+        for item in list(context.get("selected_evidence") or [])[:8]:
+            if not isinstance(item, dict):
+                continue
+            ref_id = str(item.get("ref_id") or "")
+            spans = []
+            for chunk in list(item.get("chunks") or [])[:8]:
+                if not isinstance(chunk, dict):
+                    continue
+                index = int(chunk.get("index", 0) or 0)
+                spans.append(
+                    {
+                        "span_id": f"{ref_id}:C{index + 1}",
+                        "chunk_id": str(chunk.get("chunk_id") or f"chunk-{index + 1}"),
+                        "index": index,
+                        "token_count": int(chunk.get("token_count") or 0),
+                    }
+                )
+            source_bindings.append(
+                {
+                    "ref_id": ref_id,
+                    "url": str(item.get("url") or ""),
+                    "title": str(item.get("title") or ""),
+                    "evidence_origin": str(item.get("evidence_origin") or ""),
+                    "evidence_boundary": str(item.get("evidence_boundary") or ""),
+                    "authority": item.get("authority") or {},
+                    "spans": spans,
+                }
+            )
+        if not context.get("usable_evidence_count"):
+            evidence_state = "none"
+        elif missing_point_ids or conflict_point_ids:
+            evidence_state = "partial_or_conflicted"
+        else:
+            evidence_state = "all_points_have_candidate_coverage"
+        review = {
+            "schema_version": "evidence_review.v1",
+            "validator": "engineering_evidence_validation.v1",
+            "decision_owner": "rwkv",
+            "status": "ok",
+            "evidence_state": evidence_state,
+            "round_count": len(rounds),
+            "usable_evidence_count": int(context.get("usable_evidence_count") or 0),
+            "task_point_count": len(self._task_plan.get("atomic_points") or []),
+            "covered_point_ids": [
+                row["point_id"] for row in coverage if row["status"] == "covered" and row["point_id"]
+            ],
+            "missing_point_ids": missing_point_ids,
+            "conflict_point_ids": conflict_point_ids,
+            "coverage": coverage,
+            "cross_source": {
+                "multi_source_points": int((validation.get("cross_source") or {}).get("multi_source_points") or 0),
+                "single_source_points": int((validation.get("cross_source") or {}).get("single_source_points") or 0),
+                "missing_points": int((validation.get("cross_source") or {}).get("missing_points") or 0),
+                "repeated_fact_signatures": list((validation.get("cross_source") or {}).get("repeated_fact_signatures") or [])[:16],
+                "candidate_conflicts": conflict_rows[:8],
+            },
+            "source_bindings": source_bindings,
+            "next_decision": {
+                "must_be_made_by": "rwkv",
+                "continue_when": "a requested point is missing, a fact/date conflicts, or another independent source is needed",
+                "finish_when": "rwkv judges the requested points sufficiently supported by the visible evidence bodies",
+                "duplicate_query": "network request is blocked; keep evidence and choose a different direction or finish",
+            },
+            "last_observation": {
+                "status": str((observation or {}).get("status") or ""),
+                "error_class": str((observation or {}).get("error_class") or ""),
+            },
+        }
+        return review, validation
+
+    def _attach_engineering_evidence_review(
+        self,
+        user_query: str,
+        rounds: list[tuple[str, dict]],
+        observation: dict,
+        *,
+        step: int,
+        action: str,
+        phase: str,
+        branch_id: str = "",
+        task_point_id: str = "",
+    ) -> dict:
+        """Attach a bounded validator review to the next RWKV observation."""
+        review, validation = self._build_engineering_evidence_review(
+            user_query,
+            rounds,
+            observation={**observation, "action": action},
+        )
+        enriched = dict(observation)
+        enriched["evidence_review"] = review
+        append_task_event(
+            self.state.task_id,
+            "evidence_review",
+            step=step,
+            phase="VALIDATION",
+            action=action,
+            branch_id=branch_id,
+            task_point_id=task_point_id,
+            data=review,
+            validation=validation,
+            evidence_rounds=len(rounds),
+        )
+        return enriched
+
     def _evidence_query_for_point(self, task_point_id: str, fallback: str) -> str:
         """Project the model-selected atomic point into the evidence prompt."""
         point_id = str(task_point_id or "").strip()
@@ -488,6 +728,7 @@ class Orchestrator(ControlledRetrievalMixin):
                 citation_refs=synthesis.get("citation_refs") or [],
                 validation=synthesis.get("validation") or {},
                 answer_alignment=synthesis.get("answer_alignment") or {},
+                answer_quality=synthesis.get("answer_quality") or {},
                 prompt=synthesis.get("prompt", ""),
             model_output=synthesis.get("model_output", ""),
             context_text=synthesis.get("context_text", ""),
@@ -512,6 +753,7 @@ class Orchestrator(ControlledRetrievalMixin):
             mode=synthesis.get("mode") or "local_rwkv_final",
             termination_reason=termination_reason,
             model_output_available=model_output_available,
+            answer_quality=synthesis.get("answer_quality") or {},
         )
         self._write_agentic_report(
             user_query,
@@ -556,7 +798,7 @@ class Orchestrator(ControlledRetrievalMixin):
                 user_query,
                 action,
                 rounds,
-                ranking_strategy=self._strategy()["ranking_strategy"],
+                ranking_strategy=self._ranking_strategy(),
             )
             self._record_final_ranking(action, merged, step, stage="model_tool_loop_merge")
             synthesis = synthesize_retrieval_answer(
@@ -624,6 +866,7 @@ class Orchestrator(ControlledRetrievalMixin):
                 risk_validation=risk_validation,
                 validation=synthesis.get("validation") or {},
                 answer_alignment=synthesis.get("answer_alignment") or {},
+                answer_quality=synthesis.get("answer_quality") or {},
                 prompt=synthesis.get("prompt", ""),
                 model_output=synthesis.get("model_output", ""),
                 repair_prompt=synthesis.get("repair_prompt", ""),
@@ -656,368 +899,12 @@ class Orchestrator(ControlledRetrievalMixin):
                 risk_validation=risk_validation,
                 validation=synthesis.get("validation") or {},
                 answer_alignment=synthesis.get("answer_alignment") or {},
+                answer_quality=synthesis.get("answer_quality") or {},
                 termination_reason=termination_reason,
                 model_output_available=model_output_available,
             )
             self._write_agentic_report(user_query, action, answer, data=merged, mode=synthesis.get("mode", "model_tool_loop"))
             return answer
-
-    def _run_fork_branch_step(
-        self,
-        user_query: str,
-        branch: dict,
-        model_profile: dict,
-        step: int,
-        branch_phase: str,
-        generic_web_mode: bool,
-    ) -> tuple[int, tuple[str, dict] | None]:
-        """Execute one model-owned step for one fork.
-
-        A branch owns its planner and mutable counters.  The outer Fork loop
-        may therefore submit several of these steps concurrently while the
-        shared ledger and event stream remain the only synchronized state.
-        """
-        branch_id = str(branch["branch_id"])
-        point = branch["point"]
-        branch_planner = branch["planner"]
-        branch_step = int(branch.get("branch_step", 0)) + 1
-        branch["branch_step"] = branch_step
-        task_point_id = str(point.get("id") or "")
-        plan = branch_planner.plan_next_action(user_query, {}, "", branch_phase)
-        action = str(plan.get("action") or "").strip()
-        args = dict(plan.get("args") or {}) if isinstance(plan.get("args"), dict) else {}
-        branch["tools"].append(action or "(empty)")
-        append_task_event(
-            self.state.task_id,
-            "model_tool_decision",
-            step=step,
-            phase="FORK",
-            branch_id=branch_id,
-            branch_step=branch_step,
-            action=action,
-            args=args,
-            task_point_id=task_point_id,
-            router=plan.get("router", "model_tool_decision"),
-            raw_model_output=plan.get("raw_model_output", ""),
-            planner_error=plan.get("planner_error", ""),
-            model=model_profile,
-        )
-        if plan.get("planner_error"):
-            branch["stop_reason"] = "planner_error"
-            branch["active"] = False
-            branch_planner.observe_tool_result(
-                {
-                    "schema_version": "retrieval.v1",
-                    "status": "error",
-                    "error_class": "model_tool_decision",
-                    "message": plan.get("planner_error", ""),
-                    "results": [],
-                }
-            )
-            return step, None
-
-        if action in {"answer_user", "finish_task"}:
-            branch["stop_reason"] = "model_requested_finish"
-            branch["active"] = False
-            return step, None
-
-        if not ToolRegistry.can_execute(action, branch_phase):
-            observation = {
-                "schema_version": "retrieval.v1",
-                "status": "error",
-                "error_class": "tool_not_allowed",
-                "message": f"tool '{action or '(empty)'}' is not available in retrieval episode",
-                "allowed_tools": ToolRegistry.model_visible_names(branch_phase),
-                "results": [],
-            }
-            branch_planner.observe_tool_result(observation)
-            append_task_event(
-                self.state.task_id,
-                "tool_result",
-                step=step,
-                phase="FORK",
-                retrieval_phase=branch_phase,
-                branch_id=branch_id,
-                branch_step=branch_step,
-                action=action,
-                result=json.dumps(observation, ensure_ascii=False),
-                execution_status="error",
-                decision_source="model",
-            )
-            return step, None
-
-        append_task_event(
-            self.state.task_id,
-            "tool_call",
-            step=step,
-            phase="FORK",
-            branch_id=branch_id,
-            branch_step=branch_step,
-            action=action,
-            args=args,
-            decision_source="model",
-        )
-        raw_result: Any = ""
-        try:
-            raw_result = ToolRegistry.execute(
-                action,
-                args,
-                self._agentic_tool_context(),
-                phase=branch_phase,
-            )
-            structured_result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
-        except (TypeError, json.JSONDecodeError):
-            structured_result = {"status": "ok", "raw": str(raw_result)}
-        except Exception as exc:
-            structured_result = {
-                "schema_version": "retrieval.v1",
-                "status": "error",
-                "error_class": "tool_execution",
-                "message": f"{type(exc).__name__}: {exc}",
-                "results": [],
-            }
-        if not isinstance(structured_result, dict):
-            structured_result = {"status": "ok", "raw": structured_result}
-
-        tool_meta = ToolRegistry.metadata(action)
-        retrieval_role = str(tool_meta.get("retrieval_role") or "")
-        observed_result = structured_result
-        round_item: tuple[str, dict] | None = None
-        if generic_web_mode and action == "web_search" and not is_error(structured_result):
-            branch["discovery_results"] = [
-                item for item in (structured_result.get("results") or [])
-                if isinstance(item, dict)
-            ]
-            if structured_result.get("evidence_ready") and branch["discovery_results"]:
-                branch["evidence_count"] += len(branch["discovery_results"])
-                round_item = (str(args.get("query") or user_query), structured_result)
-        elif retrieval_role == "evidence" and not is_error(structured_result):
-            evidence_query = self._evidence_query_for_point(task_point_id, user_query)
-            observed_result = self._process_single_page_result(
-                evidence_query,
-                structured_result,
-                step,
-                evidence_action=action,
-            )
-            if observed_result.get("results"):
-                branch["evidence_count"] += len(observed_result.get("results") or [])
-                round_item = (str(args.get("url") or user_query), observed_result)
-        elif retrieval_role == "discovery":
-            branch["discovery_results"] = [
-                item for item in (structured_result.get("results") or [])
-                if isinstance(item, dict)
-            ]
-
-        if retrieval_role in {"discovery", "evidence"} or action == "web_search":
-            observed_result = self._record_retrieval_progress(
-                observed_result,
-                query=str(args.get("query") or args.get("url") or user_query),
-                step=step,
-                action=action,
-                phase=branch_phase,
-                branch_id=branch_id,
-                task_point_id=task_point_id,
-            )
-        branch_planner.observe_tool_result(observed_result)
-        append_task_event(
-            self.state.task_id,
-            "tool_result",
-            step=step,
-            phase="FORK",
-            branch_id=branch_id,
-            branch_step=branch_step,
-            action=action,
-            result=raw_result if isinstance(raw_result, str) else json.dumps(raw_result, ensure_ascii=False),
-            real_network=bool(structured_result.get("real_network", True)),
-            decision_source="model",
-            retrieval_role=retrieval_role,
-            evidence_count=len(observed_result.get("results") or []),
-            retrieval_phase=branch_phase,
-        )
-        return step, round_item
-
-    def _run_forked_retrieval(
-        self,
-        user_query: str,
-        task_plan: dict,
-        model_profile: dict,
-        max_steps: int,
-    ) -> str:
-        """Run model-generated task points as independent retrieval branches.
-
-        The task planner supplies the semantic branches. Each forked Planner
-        receives the same narrow public retrieval contract and independently
-        chooses whether to search and what query to issue. Provider selection,
-        page fetching and evidence processing remain backend responsibilities.
-        The controller records the branch transcript, enforces the global step
-        budget, and sends all page evidence to the final RWKV synthesis.
-        """
-        generic_web_mode = bool(self.state.run_metadata.get("generic_web_search_only"))
-        branch_phase = "GENERIC_WEB" if generic_web_mode else "ALL"
-        points = [
-            point for point in (task_plan.get("atomic_points") or [])
-            if isinstance(point, dict)
-        ]
-        configured_width = self.state.run_metadata.get("retrieval_branch_width")
-        if configured_width is None:
-            branch_width = len(points)
-        else:
-            branch_width = max(1, min(int(configured_width or 1), len(points) or 1))
-        points = points[:branch_width] or [
-            {
-                "id": "ROOT",
-                "task": user_query,
-                "objective": user_query,
-                "evidence_needed": [user_query],
-                "acceptance_criteria": ["Answer the user's request directly."],
-                "output_format": "mixed",
-                "status": "pending",
-            }
-        ]
-        self._fork_transcripts = []
-        append_task_event(
-            self.state.task_id,
-            "retrieval_fork_started",
-            step=0,
-            phase="FORK",
-            retrieval_phase=branch_phase,
-            generic_web_search_only=generic_web_mode,
-            branch_width=len(points),
-            max_tool_steps=max_steps,
-            branches=[
-                {
-                    "branch_id": f"B{index + 1}",
-                    "task_point_id": str(point.get("id") or ""),
-                    "objective": str(point.get("objective") or point.get("task") or ""),
-                }
-                for index, point in enumerate(points)
-            ],
-        )
-
-        rounds: list[tuple[str, dict]] = []
-        branch_states: list[dict] = []
-        total_steps = 0
-        for index, point in enumerate(points, start=1):
-            branch_id = f"B{index}"
-            if generic_web_mode:
-                branch_planner = self.planner.fork_for_point(
-                    branch_id,
-                    point,
-                    phase=branch_phase,
-                )
-            else:
-                # Preserve the legacy test-double call shape for the
-                # provider-specific Fork path.
-                branch_planner = self.planner.fork_for_point(branch_id, point)
-            branch_states.append(
-                {
-                    "branch_id": branch_id,
-                    "point": point,
-                    "planner": branch_planner,
-                    "tools": [],
-                    "evidence_count": 0,
-                    "discovery_results": [],
-                    "branch_step": 0,
-                    "active": True,
-                    "stop_reason": "model_step_budget",
-                }
-            )
-
-        # Execute one step per active branch concurrently.  The global step
-        # budget remains unchanged; only independent branches in the same
-        # round are submitted together.  RWKV/vLLM performs continuous
-        # batching, while this bound prevents an unbounded request storm.
-        configured_concurrency = self.state.run_metadata.get("retrieval_fork_concurrency")
-        fork_concurrency = get_llm_concurrency()
-        if configured_concurrency is not None:
-            fork_concurrency = max(1, int(configured_concurrency or 1))
-        fork_concurrency = max(1, min(fork_concurrency, len(branch_states) or 1))
-        append_task_event(
-            self.state.task_id,
-            "retrieval_fork_concurrency",
-            step=0,
-            phase="FORK",
-            configured=fork_concurrency,
-            source="run_metadata" if configured_concurrency is not None else "llm_concurrency",
-        )
-        while total_steps < max_steps and any(item["active"] for item in branch_states):
-            active = [item for item in branch_states if item["active"]]
-            batch = active[: min(fork_concurrency, max_steps - total_steps)]
-            if not batch:
-                break
-            assignments = {
-                id(branch): total_steps + index + 1
-                for index, branch in enumerate(batch)
-            }
-            with ThreadPoolExecutor(max_workers=len(batch), thread_name_prefix="rwkv-fork") as pool:
-                futures = {
-                    pool.submit(
-                        self._run_fork_branch_step,
-                        user_query,
-                        branch,
-                        model_profile,
-                        assignments[id(branch)],
-                        branch_phase,
-                        generic_web_mode,
-                    ): branch
-                    for branch in batch
-                }
-                completed_steps = []
-                for future in as_completed(futures):
-                    completed_steps.append(future.result())
-            total_steps += len(batch)
-            for _, round_item in sorted(completed_steps, key=lambda item: item[0]):
-                if round_item is not None:
-                    rounds.append(round_item)
-
-        if total_steps >= max_steps:
-            for branch in branch_states:
-                if branch["active"]:
-                    branch["active"] = False
-                    branch["stop_reason"] = "global_step_limit"
-        branch_records = []
-        for branch in branch_states:
-            branch_record = {
-                "branch_id": branch["branch_id"],
-                "task_point_id": str(branch["point"].get("id") or ""),
-                "objective": str(branch["point"].get("objective") or branch["point"].get("task") or ""),
-                "tools": branch["tools"],
-                "evidence_count": branch["evidence_count"],
-                "discovery_count": len(branch["discovery_results"]),
-                "stop_reason": branch["stop_reason"],
-                "retrieval_ledger": self._retrieval_ledger.observation(
-                    branch_id=branch["branch_id"],
-                    task_point_id=str(branch["point"].get("id") or ""),
-                ),
-                "transcript": branch["planner"].execution_transcript(),
-            }
-            branch_records.append(branch_record)
-            self._fork_transcripts.append(branch_record)
-
-        append_task_event(
-            self.state.task_id,
-            "retrieval_fork_completed",
-            step=total_steps,
-            phase="FORK",
-            retrieval_phase=branch_phase,
-            generic_web_search_only=generic_web_mode,
-            branch_count=len(branch_records),
-            evidence_rounds=len(rounds),
-            total_tool_steps=total_steps,
-            retrieval_ledger=self._retrieval_ledger.snapshot(),
-            branches=[
-                dict(item)
-                for item in branch_records
-            ],
-        )
-        termination_reason = "max_steps_reached" if total_steps >= max_steps else "model_requested_finish"
-        return self._complete_model_tool_loop(
-            user_query,
-            "retrieval_fork",
-            rounds,
-            max(total_steps, 1),
-            termination_reason=termination_reason,
-        )
 
     def _prepare_task_plan(self, user_query: str, phase: str) -> dict:
         """Create the model plan once and initialize the shared transcript."""
@@ -1046,7 +933,6 @@ class Orchestrator(ControlledRetrievalMixin):
             self.planner.begin_task(user_query, plan_context, task_plan, phase)
         else:
             self.planner.begin_task(user_query, plan_context, task_plan)
-        self._fork_transcripts = []
         return task_plan
 
     def _fail_task_plan(self, user_query: str, task_plan: dict) -> str:
@@ -1060,33 +946,19 @@ class Orchestrator(ControlledRetrievalMixin):
             content=answer,
             action="task_plan",
             mode="model_task_plan_failed",
+            error_class=task_plan.get("error_class", "task_plan_invalid"),
             planner_error=task_plan.get("message", ""),
         )
         self._write_agentic_report(user_query, "task_plan", answer, mode="model_task_plan_failed")
         return answer
 
-    def _select_retrieval_strategy(self, task_plan: dict) -> StrategyDecision:
-        """Persist and trace the policy chosen from the atomic task points."""
-        decision = select_strategy(task_plan, self.state.run_metadata)
-        selected = decision.as_dict()
-        self.state.run_metadata["retrieval_strategy"] = decision.strategy
-        self.state.run_metadata["retrieval_strategy_decision"] = selected
-        append_task_event(
-            self.state.task_id,
-            "retrieval_strategy_selected",
-            step=0,
-            phase="ROUTING",
-            strategy=decision.strategy,
-            point_count=decision.point_count,
-            point_ids=list(decision.point_ids),
-            source=decision.source,
-            reason=decision.reason,
-            override=decision.source.endswith("override"),
-        )
-        return decision
-
     def _run_model_tool_loop(self, user_query: str, model_profile: dict) -> str:
-        """Prepare the task once, select a runner, and execute the episode."""
+        """Run the one global model-owned retrieval loop.
+
+        The task plan is a shared checklist (the Fork idea), not a request to
+        create independent planner conversations.  All task points, queries,
+        evidence, validation, and the step budget stay in one state object.
+        """
         generic_web_mode = bool(self.state.run_metadata.get("generic_web_search_only"))
         max_steps = max(
             1,
@@ -1103,9 +975,32 @@ class Orchestrator(ControlledRetrievalMixin):
         if task_plan.get("status") == "error":
             return self._fail_task_plan(user_query, task_plan)
 
-        decision = self._select_retrieval_strategy(task_plan)
-        runner = build_runner(decision, self)
-        return runner.run(user_query, task_plan, model_profile, max_steps)
+        point_ids = [
+            str(point.get("id") or "")
+            for point in task_plan.get("atomic_points") or []
+            if isinstance(point, dict) and str(point.get("id") or "").strip()
+        ]
+        decision = {
+            "strategy": "single_loop",
+            "point_count": len(point_ids),
+            "point_ids": point_ids,
+            "source": "global_shared_state",
+            "reason": (
+                "task points are logical Fork-style work items inside one "
+                "shared planner, retrieval ledger, evidence store, and step budget"
+            ),
+        }
+        self.state.run_metadata["retrieval_strategy"] = "single_loop"
+        self.state.run_metadata["retrieval_strategy_decision"] = decision
+        append_task_event(
+            self.state.task_id,
+            "retrieval_strategy_selected",
+            step=0,
+            phase="ROUTING",
+            **decision,
+            override=False,
+        )
+        return self._run_single_loop(user_query, model_profile, task_plan, max_steps)
 
     def _run_single_loop(
         self,
@@ -1126,8 +1021,42 @@ class Orchestrator(ControlledRetrievalMixin):
         last_action = "model_tool_loop"
         retrieval_attempted = False
         last_discovery_results: list[dict] = []
+        last_retrieval_failure: dict | None = None
         empty_evidence_attempts = 0
         replan_attempts = 0
+        duplicate_recovery_turns = 0
+        network_searches = 0
+        no_progress_steps = 0
+        max_network_searches = max(
+            1,
+            int(
+                self.state.run_metadata.get(
+                    "max_network_searches",
+                    DEFAULT_MAX_NETWORK_SEARCHES,
+                )
+                or DEFAULT_MAX_NETWORK_SEARCHES
+            ),
+        )
+        max_duplicate_retries = max(
+            0,
+            int(
+                self.state.run_metadata.get(
+                    "max_duplicate_retries",
+                    DEFAULT_MAX_DUPLICATE_RETRIES,
+                )
+                or DEFAULT_MAX_DUPLICATE_RETRIES
+            ),
+        )
+        max_no_progress_steps = max(
+            1,
+            int(
+                self.state.run_metadata.get(
+                    "max_no_progress_steps",
+                    DEFAULT_MAX_NO_PROGRESS_STEPS,
+                )
+                or DEFAULT_MAX_NO_PROGRESS_STEPS
+            ),
+        )
         max_replan_attempts = max(
             0,
             int(
@@ -1145,6 +1074,9 @@ class Orchestrator(ControlledRetrievalMixin):
             phase="GLOBAL",
             retrieval_phase=phase,
             max_tool_steps=max_steps,
+            max_network_searches=max_network_searches,
+            max_duplicate_retries=max_duplicate_retries,
+            max_no_progress_steps=max_no_progress_steps,
             max_replan_attempts=max_replan_attempts,
             task_point_count=len(task_plan.get("atomic_points") or []),
         )
@@ -1159,7 +1091,27 @@ class Orchestrator(ControlledRetrievalMixin):
                 append_task_event(self.state.task_id, "final", status="stopped", content=self.state.final_result)
                 return self.state.final_result
 
-            context_text = self.state.to_markdown_context()
+            if no_progress_steps >= max_no_progress_steps:
+                append_task_event(
+                    self.state.task_id,
+                    "retrieval_no_progress_terminated",
+                    step=step,
+                    phase="RECOVERY",
+                    action=last_action,
+                    no_progress_steps=no_progress_steps,
+                    max_no_progress_steps=max_no_progress_steps,
+                    network_searches=network_searches,
+                    message="retrieval produced no new evidence or coverage; force a bounded final summary",
+                )
+                return self._complete_model_tool_loop(
+                    user_query,
+                    last_action,
+                    rounds,
+                    step,
+                    termination_reason="no_progress",
+                )
+
+            context_text = self.state.to_retrieval_context()
             plan = self.planner.plan_next_action(user_query, {}, context_text, phase)
             action = str(plan.get("action") or "").strip()
             args = dict(plan.get("args") or {}) if isinstance(plan.get("args"), dict) else {}
@@ -1208,18 +1160,6 @@ class Orchestrator(ControlledRetrievalMixin):
                     termination_reason=termination_reason,
                 )
 
-            # Keep compatibility with the existing controlled test harness;
-            # real planner responses use router=model_tool_decision.
-            if step == 1 and plan.get("router") == "test":
-                data, _, _ = self._run_rwkv_search_round(
-                    user_query,
-                    action,
-                    args,
-                    step=1,
-                    round_name="initial",
-                )
-                return self._finish_rwkv_retrieval(user_query, action, data, 2)
-
             if action in {"answer_user", "finish_task"}:
                 plan_requires_evidence = any(
                     isinstance(point, dict) and bool(point.get("evidence_needed"))
@@ -1243,6 +1183,7 @@ class Orchestrator(ControlledRetrievalMixin):
                         error=answer_rejection["message"],
                         error_class=answer_rejection["error_class"],
                     )
+                    no_progress_steps += 1
                     phase = "GENERIC_WEB" if generic_web_mode else "ALL"
                     continue
                 if rounds:
@@ -1254,6 +1195,35 @@ class Orchestrator(ControlledRetrievalMixin):
                         termination_reason=("max_steps_reached" if step >= max_steps else "model_requested_finish"),
                     )
                     return answer
+                if retrieval_attempted and last_retrieval_failure and replan_attempts < max_replan_attempts:
+                    # A discovery/provider failure is not evidence.  Give the
+                    # model-owned planner the configured recovery rounds even
+                    # when RWKV emits finish_task immediately after the error.
+                    # These replan calls are deliberately outside the global
+                    # tool-step counter; the next real tool decision advances
+                    # that counter as usual.
+                    replan_attempts += 1
+                    append_task_event(
+                        self.state.task_id,
+                        "task_replan_attempt",
+                        step=step,
+                        phase="RECOVERY",
+                        attempt=replan_attempts,
+                        max_attempts=max_replan_attempts,
+                        trigger="no_usable_retrieval_evidence",
+                        counts_toward_global_steps=False,
+                    )
+                    replanned = self._replan_after_retrieval_failure(
+                        user_query,
+                        last_retrieval_failure,
+                        step,
+                        attempt=replan_attempts,
+                        max_attempts=max_replan_attempts,
+                    )
+                    if replanned:
+                        no_progress_steps = 0
+                        phase = "GENERIC_WEB" if generic_web_mode else "ALL"
+                        continue
                 if retrieval_attempted:
                     # Once the model has entered a web-retrieval episode, do
                     # not let answer_user bypass the evidence contract by
@@ -1313,12 +1283,31 @@ class Orchestrator(ControlledRetrievalMixin):
                     }
                 )
                 append_task_event(self.state.task_id, "error", step=step, phase="ROUTING", error=error, error_class="model_tool_decision")
+                no_progress_steps += 1
                 phase = "GENERIC_WEB" if generic_web_mode else "ALL"
                 continue
 
             duplicate_query = None
             if action == "web_search":
                 duplicate_query = self._retrieval_ledger.query_status(args.get("query"))
+                if not duplicate_query or not duplicate_query.get("attempted"):
+                    if network_searches >= max_network_searches:
+                        append_task_event(
+                            self.state.task_id,
+                            "retrieval_network_budget_reached",
+                            step=step,
+                            phase="RECOVERY",
+                            action=action,
+                            network_searches=network_searches,
+                            max_network_searches=max_network_searches,
+                        )
+                        return self._complete_model_tool_loop(
+                            user_query,
+                            last_action,
+                            rounds,
+                            step,
+                            termination_reason="network_budget_reached",
+                        )
             if duplicate_query and duplicate_query.get("attempted"):
                 duplicate_block = self._retrieval_ledger.record_duplicate_block(
                     args.get("query"),
@@ -1340,8 +1329,19 @@ class Orchestrator(ControlledRetrievalMixin):
                     ),
                     "results": [],
                 }
+                blocked = self._attach_engineering_evidence_review(
+                    user_query,
+                    rounds,
+                    blocked,
+                    step=step,
+                    action=action,
+                    phase=phase,
+                    task_point_id=task_point_id,
+                )
                 self.state.last_feedback = blocked["message"]
                 self.planner.observe_tool_result(blocked)
+                duplicate_recovery_turns += 1
+                no_progress_steps += 1
                 append_task_event(
                     self.state.task_id,
                     "retrieval_duplicate_blocked",
@@ -1366,26 +1366,40 @@ class Orchestrator(ControlledRetrievalMixin):
                 )
                 append_task_event(
                     self.state.task_id,
-                    "retrieval_duplicate_terminated",
+                    "retrieval_duplicate_routed",
                     step=step,
-                    phase="SYNTHESIS",
+                    phase="RECOVERY",
                     action=action,
                     query=str(args.get("query") or ""),
-                    termination_reason="duplicate_query_blocked",
                     evidence_rounds=len(rounds),
+                    next_decision="model",
+                    network_request_made=False,
                 )
-                # A duplicate is an execution error, not a new observation
-                # that should re-enter the same model loop. Greedy RWKV can
-                # reproduce the same JSON forever; transition to synthesis
-                # and let the final model answer from existing evidence or
-                # state that evidence is insufficient.
-                return self._complete_model_tool_loop(
-                    user_query,
-                    action,
-                    rounds,
-                    step,
-                    termination_reason="duplicate_query_blocked",
-                )
+                if duplicate_recovery_turns > max_duplicate_retries:
+                    append_task_event(
+                        self.state.task_id,
+                        "retrieval_no_progress_terminated",
+                        step=step,
+                        phase="RECOVERY",
+                        action=action,
+                        duplicate_recovery_turns=duplicate_recovery_turns,
+                        max_duplicate_retries=max_duplicate_retries,
+                        message="duplicate retrieval request made no progress; force final synthesis",
+                    )
+                    return self._complete_model_tool_loop(
+                        user_query,
+                        action,
+                        rounds,
+                        step,
+                        termination_reason="duplicate_no_progress",
+                    )
+                # A duplicate stops only the network request.  The shared
+                # ledger and evidence review are now observations for the
+                # same RWKV loop, which may cross-check existing evidence,
+                # choose a materially different direction, or finish.  The
+                # global step limit remains the only loop guard.
+                phase = "GENERIC_WEB" if generic_web_mode else "ALL"
+                continue
 
             previous_request = self._retrieval_ledger.request_status(action, args)
             if previous_request and previous_request.get("failed"):
@@ -1414,7 +1428,17 @@ class Orchestrator(ControlledRetrievalMixin):
                     previous_request=previous_request,
                     execution_status="skipped",
                 )
+                blocked = self._attach_engineering_evidence_review(
+                    user_query,
+                    rounds,
+                    blocked,
+                    step=step,
+                    action=action,
+                    phase=phase,
+                    task_point_id=task_point_id,
+                )
                 self.planner.observe_tool_result(blocked)
+                no_progress_steps += 1
                 append_task_event(
                     self.state.task_id,
                     "tool_result",
@@ -1426,13 +1450,8 @@ class Orchestrator(ControlledRetrievalMixin):
                     decision_source="model",
                     retrieval_environment=plugin_environment_snapshot(),
                 )
-                return self._complete_model_tool_loop(
-                    user_query,
-                    last_action,
-                    rounds,
-                    step,
-                    termination_reason="repeated_failed_request",
-                )
+                phase = "GENERIC_WEB" if generic_web_mode else "ALL"
+                continue
 
             append_task_event(
                 self.state.task_id,
@@ -1471,6 +1490,9 @@ class Orchestrator(ControlledRetrievalMixin):
                 }
                 raw_result = json.dumps(structured_result, ensure_ascii=False)
 
+            if action == "web_search":
+                network_searches += 1
+
             request_status = self._retrieval_ledger.record_request(
                 action,
                 args,
@@ -1485,6 +1507,8 @@ class Orchestrator(ControlledRetrievalMixin):
             # any observation.  Never feed the raw page body back into the
             # model-owned routing transcript.
             observed_result = structured_result
+            retrieval_progressed = False
+            progress_counted = False
             tool_meta = ToolRegistry.metadata(action)
             retrieval_role = str(tool_meta.get("retrieval_role") or "")
             if retrieval_role in {"discovery", "evidence"}:
@@ -1495,12 +1519,41 @@ class Orchestrator(ControlledRetrievalMixin):
                 # admitted URLs, fetched pages, Markdown chunks and merged
                 # evidence. Keep usable records for final synthesis instead
                 # of silently dropping them outside legacy GENERIC_WEB mode.
+                retrieval_attempted = True
                 last_discovery_results = [
                     item for item in (structured_result.get("results") or []) if isinstance(item, dict)
                 ]
-                if structured_result.get("evidence_ready") and last_discovery_results:
+                current_signatures = self._evidence_signatures(structured_result)
+                previous_signatures = set().union(
+                    *(self._evidence_signatures(round_result) for _, round_result in rounds)
+                ) if rounds else set()
+                retrieval_progressed = bool(current_signatures - previous_signatures)
+                if structured_result.get("evidence_ready") and last_discovery_results and retrieval_progressed:
                     rounds.append((str(args.get("query") or user_query), structured_result))
+                    last_retrieval_failure = None
+                    duplicate_recovery_turns = 0
+                    no_progress_steps = 0
+                elif structured_result.get("evidence_ready") and last_discovery_results:
+                    no_progress_steps += 1
+                    progress_counted = True
+                    last_retrieval_failure = {
+                        **dict(structured_result),
+                        "error_class": "no_new_evidence",
+                        "message": "web_search returned only evidence bodies already seen in this episode",
+                    }
+                else:
+                    no_progress_steps += 1
+                    progress_counted = True
+                    last_retrieval_failure = dict(structured_result)
+                    last_retrieval_failure.setdefault("error_class", "no_evidence")
+                    last_retrieval_failure.setdefault(
+                        "message",
+                        "web_search returned no usable page evidence",
+                    )
             if is_error(structured_result):
+                if not progress_counted:
+                    no_progress_steps += 1
+                    progress_counted = True
                 if retrieval_role == "evidence" and last_discovery_results:
                     selected_url = str(args.get("url") or "").strip()
                     alternative_urls = [
@@ -1530,6 +1583,17 @@ class Orchestrator(ControlledRetrievalMixin):
                         phase=phase,
                         task_point_id=task_point_id,
                     )
+                if retrieval_role == "discovery" or action == "web_search":
+                    last_retrieval_failure = dict(structured_result)
+                structured_result = self._attach_engineering_evidence_review(
+                    user_query,
+                    rounds,
+                    structured_result,
+                    step=step,
+                    action=action,
+                    phase=phase,
+                    task_point_id=task_point_id,
+                )
                 self.planner.observe_tool_result(structured_result)
                 append_task_event(
                     self.state.task_id,
@@ -1584,6 +1648,7 @@ class Orchestrator(ControlledRetrievalMixin):
                             "message": "the selected page produced no usable chunk evidence",
                         }
                     )
+                    last_retrieval_failure = dict(observed_result)
                     request_status = self._retrieval_ledger.record_request(
                         action,
                         args,
@@ -1617,6 +1682,27 @@ class Orchestrator(ControlledRetrievalMixin):
                     phase=phase,
                     task_point_id=task_point_id,
                 )
+                if retrieval_role == "evidence" and usable_page_evidence:
+                    # The current page must be visible to the validator and
+                    # to RWKV's next decision in the same turn.  Previously
+                    # this append happened after evidence_review was built,
+                    # so the review lagged one successful fetch behind.
+                    current_signatures = self._evidence_signatures(observed_result)
+                    previous_signatures = set().union(
+                        *(self._evidence_signatures(round_result) for _, round_result in rounds)
+                    ) if rounds else set()
+                    retrieval_progressed = bool(current_signatures - previous_signatures)
+                    if retrieval_progressed:
+                        rounds.append((str(args.get("url") or user_query), observed_result))
+                observed_result = self._attach_engineering_evidence_review(
+                    user_query,
+                    rounds,
+                    observed_result,
+                    step=step,
+                    action=action,
+                    phase=phase,
+                    task_point_id=task_point_id,
+                )
             self.state.last_feedback = (
                 f"[{action}] model-selected tool result:\n"
                 f"{json.dumps(observed_result, ensure_ascii=False)[:6000]}"
@@ -1639,7 +1725,12 @@ class Orchestrator(ControlledRetrievalMixin):
                 # allowing the model to select another URL itself.
                 if usable_page_evidence:
                     empty_evidence_attempts = 0
-                    rounds.append((str(args.get("url") or user_query), observed_result))
+                    if retrieval_progressed:
+                        no_progress_steps = 0
+                        duplicate_recovery_turns = 0
+                    elif not progress_counted:
+                        no_progress_steps += 1
+                        progress_counted = True
                     # Evidence for one point does not finish a multi-point
                     # task.  Return to the shared recovery phase so the same
                     # Planner can select another point, refine the query, or
@@ -1659,13 +1750,16 @@ class Orchestrator(ControlledRetrievalMixin):
                                 max_attempts=max_replan_attempts,
                                 counts_toward_global_steps=False,
                             )
-                            self._replan_after_retrieval_failure(
+                            replanned = self._replan_after_retrieval_failure(
                                 user_query,
                                 observed_result,
                                 step,
                                 attempt=replan_attempts,
                                 max_attempts=max_replan_attempts,
                             )
+                            if replanned:
+                                no_progress_steps = 0
+                                empty_evidence_attempts = 0
                         else:
                             append_task_event(
                                 self.state.task_id,
@@ -1693,6 +1787,11 @@ class Orchestrator(ControlledRetrievalMixin):
                 last_discovery_results = [
                     item for item in (structured_result.get("results") or []) if isinstance(item, dict)
                 ]
+                if last_discovery_results:
+                    # A genuinely new candidate set resolves the previous
+                    # discovery failure; the next empty/failed retrieval may
+                    # start a fresh bounded replan sequence.
+                    last_retrieval_failure = None
                 phase = "GENERIC_WEB" if generic_web_mode else "ALL"
             else:
                 phase = "GENERIC_WEB" if generic_web_mode else "ALL"
@@ -1716,7 +1815,6 @@ class Orchestrator(ControlledRetrievalMixin):
         self.state.task_id = task_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.state.run_metadata = dict(run_metadata or {})
         self._retrieval_ledger = RetrievalLedger()
-        self._fork_transcripts = []
         self.state.task_output_dir = os.path.join(DATA_PIPELINE.get("output_directory", "./data/output"), self.state.task_id)
         os.makedirs(self.state.task_output_dir, exist_ok=True)
         
@@ -1740,7 +1838,7 @@ class Orchestrator(ControlledRetrievalMixin):
             experiment=run_metadata or {},
             config={
                 "model": model_profile,
-                "retrieval": {"search_action": (run_metadata or {}).get("search_action", "")},
+                "retrieval": {"strategy": "global_shared_state"},
             },
             prompt_version=(run_metadata or {}).get("prompt_version", "unversioned"),
             run_metadata=run_metadata or {},
@@ -1752,32 +1850,6 @@ class Orchestrator(ControlledRetrievalMixin):
         
         with open(trace_file, "w", encoding="utf-8") as f:
             f.write(f"# Deep Research 执行追踪日志\n\n**启动时间**: {session_id}\n**用户指令**: {user_query}\n\n---\n\n")
-
-        # Controlled experiments may pin one registered retrieval plugin, but
-        # normal routing never depends on a provider name. Keep this legacy
-        # path metadata-driven so adding a plugin does not add an orchestrator
-        # branch.
-        discovery_actions = [
-            name
-            for name in ToolRegistry.names("DISCOVERY")
-            if ToolRegistry.metadata(name).get("retrieval_role") == "discovery"
-        ]
-        if not discovery_actions:
-            discovery_actions = [
-                name
-                for name in ToolRegistry.names()
-                if ToolRegistry.metadata(name).get("retrieval_role") == "discovery"
-            ]
-
-        def is_registered_discovery(action_name: str) -> bool:
-            return ToolRegistry.metadata(action_name).get("retrieval_role") == "discovery"
-
-        def discovery_args(action_name: str, scope: str = "") -> dict:
-            allowed = set(ToolRegistry.metadata(action_name).get("allowed_args") or ())
-            values = {"scope": scope or "paper", "max_results": 8}
-            if action_name != "search_papers":
-                values = {"max_results": 6, "fetch_pages": 3}
-            return {key: value for key, value in values.items() if key in allowed}
 
         step_count = 0
         progress_log = []
@@ -1793,278 +1865,4 @@ class Orchestrator(ControlledRetrievalMixin):
 
         push_progress("🚀 已启用联网检索，等待 RWKV 自主选择工具...")
 
-        # Do not inject a local-workspace inventory into every ordinary web
-        # conversation.  It adds unrelated state, creates the misleading
-        # “感知到 N 份文件” progress line, and biases the planner toward the
-        # legacy file-research path.  Local files remain available through the
-        # registered local-file tool when RWKV explicitly chooses it.  A
-        # controlled run may opt into the old inventory with metadata.
-        if (run_metadata or {}).get("include_workspace"):
-            try:
-                initial_files_json = ToolRegistry.execute("search_local_file", {"keyword": ""}, {})
-                initial_files = json.loads(initial_files_json)
-                for i, p in enumerate(initial_files):
-                    fid = f"DOC_{i+1}"
-                    self.state.id_to_path[fid] = p
-                    self.state.path_to_id[p] = fid
-                self.state.last_feedback = f"本地工作区已按任务要求挂载，共 {len(initial_files)} 份文件。"
-                push_progress(f"本地工作区已挂载：{len(initial_files)} 份文件。\n")
-            except Exception:
-                self.state.last_feedback = "按任务要求挂载本地工作区失败。"
-                push_progress("本地工作区挂载失败，将继续使用联网检索。\n")
-            
-        # Scholarly and live-web requests have a deterministic, auditable
-        # retrieval path.  Keep the local RWKV analysis as a trace signal, but
-        # do not make a network retrieval wait on the legacy file-research
-        # loop or on a second free-form planner generation.
-        forced_action = str((run_metadata or {}).get("search_action") or "").strip()
-        if not forced_action and not self.state.run_metadata.get("retrieval_only"):
-            # Production/API requests are model-owned.  A search_action is
-            # reserved for controlled experiments where the provider is the
-            # explicitly varied variable; it must not silently redefine the
-            # normal routing contract.
-            return self._run_model_tool_loop(user_query, model_profile)
-        if not forced_action and self.state.run_metadata.get("retrieval_only"):
-            # Diagnostic retrieval-only runs still need a concrete provider,
-            # but they must not spend a model routing call before measuring it.
-            forced_action = discovery_actions[0] if discovery_actions else ""
-
-        if is_registered_discovery(forced_action):
-            forced_args = discovery_args(forced_action)
-            direct_plan = {
-                "action": forced_action,
-                "args": forced_args,
-                "router": "experiment_single_variable_override",
-            }
-            append_task_event(
-                self.state.task_id,
-                "experiment_control",
-                phase="ROUTING",
-                changed_variable="search_action",
-                baseline_action=(run_metadata or {}).get("baseline_search_action", ""),
-                candidate_action=forced_action,
-                invariant_model=model_profile,
-            )
-        else:
-            # A controlled experiment must not spend an untracked planner call
-            # before the explicitly selected retrieval action. This also lets
-            # retrieval-only diagnostics run when the RWKV endpoint is offline.
-            direct_plan = self.planner.plan_next_action(user_query, {}, "", "DISCOVERY")
-        if direct_plan.get("action") == "multi_hop_research":
-            first_action = str(
-                (direct_plan.get("args") or {}).get("first_action")
-                or (discovery_actions[0] if discovery_actions else "")
-            )
-            if not is_registered_discovery(first_action):
-                first_action = discovery_actions[0] if discovery_actions else ""
-            scope = str((direct_plan.get("args") or {}).get("scope") or "paper")
-            append_task_event(
-                self.state.task_id,
-                "plan",
-                step=1,
-                phase="DISCOVERY",
-                action="multi_hop_research",
-                args={"first_action": first_action, "scope": scope},
-                router=direct_plan.get("router", "static_multi_hop_cue"),
-            )
-            append_task_event(
-                self.state.task_id,
-                "planner_start",
-                step=1,
-                phase="DISCOVERY",
-                query=user_query,
-                router_hint=direct_plan.get("router", "static_multi_hop_cue"),
-            )
-            first_args = discovery_args(first_action, scope)
-            first_data, first_queries, _ = self._run_rwkv_search_round(
-                user_query,
-                first_action,
-                first_args,
-                step=1,
-                round_name="initial",
-            )
-            followup_action = first_action
-            followup_args = discovery_args(followup_action, scope)
-            append_task_event(
-                self.state.task_id,
-                "planner_start",
-                step=2,
-                phase="DISCOVERY",
-                query=user_query,
-                router_hint="rwkv_followup_from_initial_evidence",
-            )
-            second_data, second_queries, _ = self._run_rwkv_search_round(
-                user_query,
-                followup_action,
-                followup_args,
-                step=2,
-                round_name="followup",
-                previous_query=first_queries[0] if first_queries else user_query,
-                observation=first_data,
-            )
-            merged = merge_retrieval_results(
-                user_query,
-                followup_action,
-                [
-                    (first_queries[0] if first_queries else user_query, first_data),
-                    (second_queries[0] if second_queries else user_query, second_data),
-                ],
-                scope=scope,
-                ranking_strategy=self._strategy()["ranking_strategy"],
-            )
-            merged["round_count"] = 2
-            merged["candidate_queries"] = [*first_queries, *second_queries]
-            self._record_final_ranking(followup_action, merged, 2, stage="multi_hop_merge")
-            append_task_event(
-                self.state.task_id,
-                "multi_hop_merge",
-                step=2,
-                phase="DISCOVERY",
-                data={
-                    "round_count": 2,
-                    "first_queries": first_queries,
-                    "second_queries": second_queries,
-                    "first_result_count": len(first_data.get("results") or []),
-                    "second_result_count": len(second_data.get("results") or []),
-                    "final_result_count": len(merged.get("results") or []),
-                    "result_count": merged.get("count", 0),
-                },
-            )
-            return self._finish_rwkv_retrieval(user_query, followup_action, merged, 3)
-
-        if is_registered_discovery(str(direct_plan.get("action") or "")):
-            action = direct_plan["action"]
-            args = dict(direct_plan.get("args") or {})
-            append_task_event(
-                self.state.task_id,
-                "planner_start",
-                step=1,
-                phase="DISCOVERY",
-                query=user_query,
-                router_hint=direct_plan.get("router", "local_rwkv_candidate_search"),
-            )
-            append_task_event(
-                self.state.task_id,
-                "plan",
-                step=1,
-                phase="DISCOVERY",
-                action=action,
-                args=args,
-                router=direct_plan.get("router", "local_rwkv_candidate_search"),
-            )
-            data, _, _ = self._run_rwkv_search_round(
-                user_query,
-                action,
-                args,
-                step=1,
-                round_name="initial",
-            )
-            return self._finish_rwkv_retrieval(user_query, action, data, 2)
-
-        # Closed-world prompts should not enter the legacy analyzer/planner
-        # loop. That loop can spend minutes retrying a local-model request and
-        # may hallucinate a different tool (for example weather for a
-        # translation request). Keep the step visible in the trace while
-        # executing exactly one deterministic/local action.
-        if direct_plan.get("action") in {"answer_user", "get_current_weather"}:
-            step_count = 1
-            action = direct_plan["action"]
-            args = dict(direct_plan.get("args") or {})
-            context_text = self.state.to_markdown_context()
-            append_task_event(
-                self.state.task_id,
-                "analysis",
-                step=step_count,
-                phase="DIRECT",
-                context_snapshot=context_text,
-                data={
-                    "execution_route": "direct_closed_world_action",
-                    "intent_mode": "NO_SEARCH",
-                    "refined_query": user_query,
-                    "next_phase": "DIRECT",
-                },
-            )
-            append_task_event(
-                self.state.task_id,
-                "planner_start",
-                step=step_count,
-                phase="DIRECT",
-                query=user_query,
-                router_hint=direct_plan.get("router", "deterministic_no_search"),
-            )
-            append_task_event(
-                self.state.task_id,
-                "plan",
-                step=step_count,
-                phase="DIRECT",
-                action=action,
-                args=args,
-                router=direct_plan.get("router", "deterministic_no_search"),
-            )
-            append_task_event(
-                self.state.task_id,
-                "tool_call",
-                step=step_count,
-                phase="DIRECT",
-                action=action,
-                args=args,
-            )
-            env_context = {
-                "original_goal": user_query,
-                "path_to_id": self.state.path_to_id,
-                "id_to_path": self.state.id_to_path,
-                "working_memory": self.state.working_memory,
-                "tracker": self.tracker,
-                "agent_state": self.state,
-                "task_id": self.state.task_id,
-                "slm_scheduler": GLOBAL_SLM_INPUT_SCHEDULER,
-            }
-            started_at = time.perf_counter()
-            result = ToolRegistry.execute(action, args=args, context=env_context)
-            duration_ms = round((time.perf_counter() - started_at) * 1000, 1)
-            append_task_event(
-                self.state.task_id,
-                "tool_result",
-                step=step_count,
-                phase="DIRECT",
-                action=action,
-                result=result,
-                real_network=action == "get_current_weather",
-            )
-            self.state.is_finished = True
-            self.state.final_result = self.state.final_result or result
-            append_task_event(
-                self.state.task_id,
-                "final",
-                status="completed",
-                content=self.state.final_result,
-                action=action,
-                duration_ms=duration_ms,
-            )
-            return self.state.final_result
-
-        # The former Analyzer -> Planner -> retry loop is intentionally no
-        # longer part of the runtime. Unknown work is stopped safely instead
-        # of allowing a small model to invent a tool or loop over local files.
-        self.state.is_finished = True
-        self.state.final_result = "当前请求未命中受支持的静态路由，未执行旧式循环，也未编造答案。"
-        append_task_event(
-            self.state.task_id,
-            "analysis",
-            step=1,
-            phase="ROUTING",
-            data={
-                "execution_route": "unsupported_safe_stop",
-                "intent_mode": "UNSUPPORTED",
-                "refined_query": user_query,
-                "next_phase": "STOP",
-            },
-        )
-        append_task_event(
-            self.state.task_id,
-            "final",
-            status="completed",
-            content=self.state.final_result,
-            action="safe_stop",
-        )
-        return self.state.final_result
+        return self._run_model_tool_loop(user_query, model_profile)

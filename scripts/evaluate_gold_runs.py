@@ -37,15 +37,33 @@ def load_gold(path: Path) -> dict[str, dict]:
     return {row["id"]: row for row in (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip())}
 
 
-def score(name: str, path: Path, gold: dict[str, dict]) -> dict:
+def load_run_rows(path: Path) -> list[dict]:
+    """Load both the legacy API ``results`` shape and the local ``cases`` shape."""
     payload = json.loads(path.read_text(encoding="utf-8"))
-    rows = payload.get("results", [])
+    rows = payload.get("results") if isinstance(payload, dict) else payload
+    if rows is None and isinstance(payload, dict):
+        rows = payload.get("cases")
+    normalized = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        item.setdefault("id", item.get("benchmark_id") or item.get("case_id"))
+        if "answer" not in item:
+            item["answer"] = item.get("final_output") or ""
+        normalized.append(item)
+    return normalized
+
+
+def score(name: str, path: Path, gold: dict[str, dict]) -> dict:
+    rows = load_run_rows(path)
     passed = 0
     nonempty = 0
     body = 0
     forbidden = 0
     category: dict[str, dict[str, int]] = {}
     durations = []
+    details = []
     for row in rows:
         case = gold.get(row.get("id"), {})
         answer = norm(answer_text(row))
@@ -59,7 +77,15 @@ def score(name: str, path: Path, gold: dict[str, dict]) -> dict:
         if answer:
             nonempty += 1
         local_report = row.get("report") or {}
-        has_body = bool(local_report.get("source_count") or row.get("evidence_count") or local_report.get("real_network") or row.get("source_count"))
+        trace_stats = ((row.get("trace") or {}).get("stats") or {}) if isinstance(row.get("trace"), dict) else {}
+        has_body = bool(
+            local_report.get("source_count")
+            or row.get("evidence_count")
+            or local_report.get("real_network")
+            or row.get("source_count")
+            or trace_stats.get("page_fetches")
+            or trace_stats.get("web_search_page_evidence")
+        )
         if has_body:
             body += 1
         if has_forbidden:
@@ -69,6 +95,19 @@ def score(name: str, path: Path, gold: dict[str, dict]) -> dict:
         bucket["n"] += 1
         bucket["strict"] += int(strict)
         bucket["body"] += int(has_body)
+        details.append(
+            {
+                "id": row.get("id"),
+                "question": case.get("question", ""),
+                "reference_answer": case.get("final_answer", ""),
+                "model_answer": answer_text(row),
+                "required_facts": (case.get("gold") or {}).get("required_facts", []),
+                "forbidden_facts": forbidden_facts,
+                "strict_pass": strict,
+                "forbidden_fact_hit": has_forbidden,
+                "status": row.get("status", ""),
+            }
+        )
     return {
         "run": name,
         "file": str(path),
@@ -83,6 +122,7 @@ def score(name: str, path: Path, gold: dict[str, dict]) -> dict:
         "avg_ms": round(statistics.mean(durations), 1) if durations else 0,
         "p95_ms": round(p95(durations), 1),
         "by_category": category,
+        "details": details,
     }
 
 
@@ -90,10 +130,21 @@ def main() -> int:
     if len(sys.argv) < 3:
         raise SystemExit("usage: python scripts/evaluate_gold_runs.py <gold.jsonl> <name=run.json> ...")
     gold = load_gold(Path(sys.argv[1]))
+    output_path = None
+    specs = []
+    for argument in sys.argv[2:]:
+        if argument.startswith("--output="):
+            output_path = Path(argument.split("=", 1)[1])
+        else:
+            specs.append(argument)
     report = {}
-    for spec in sys.argv[2:]:
+    for spec in specs:
         name, raw_path = spec.split("=", 1)
         report[name] = score(name, Path(raw_path), gold)
+    if output_path is not None:
+        report["_artifact"] = str(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 

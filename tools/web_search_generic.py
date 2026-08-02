@@ -24,6 +24,7 @@ from tools.web_search_keyless import _is_search_result_url, search_web_keyless
 from tools.web_search_tavily import search_web_tavily
 from utils.task_events import append_task_event
 from utils.evidence_quality import MIN_PAGE_BODY_CHARS, has_substantive_evidence
+from utils.source_authority import annotate_source, resolve_source_policy
 from utils.web_retrieval import candidate_score, normalize_url
 
 
@@ -80,9 +81,16 @@ def _direct_candidate(url: str) -> dict[str, Any]:
     }
 
 
-def _merge_candidates(query: str, provider_results: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+def _merge_candidates(
+    query: str,
+    provider_results: list[dict[str, Any]],
+    limit: int = 8,
+    *,
+    task_plan: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Deduplicate and rank candidates without classifying the task domain."""
 
+    source_policy = resolve_source_policy(query, {"task_plan": task_plan or {}})
     merged: dict[str, dict[str, Any]] = {}
     for result in provider_results:
         for item in result.get("results") or []:
@@ -104,6 +112,7 @@ def _merge_candidates(query: str, provider_results: list[dict[str, Any]], limit:
                     "source": str(item.get("source") or result.get("provider") or "web"),
                 }
             )
+            row = annotate_source(row, query, {"task_plan": task_plan or {}})
             row["candidate_score"] = candidate_score(query, row)
             row["discovery_providers"] = [row["source"]]
             existing = merged.get(url)
@@ -125,11 +134,24 @@ def _merge_candidates(query: str, provider_results: list[dict[str, Any]], limit:
     ranked = sorted(
         merged.values(),
         key=lambda item: (
+            int(bool((item.get("authority") or {}).get("satisfied"))),
+            int((item.get("authority") or {}).get("rank") or 0),
             float(item.get("candidate_score") or 0),
             len(item.get("discovery_providers") or []),
         ),
         reverse=True,
     )
+    # For an official-source task, do not spend the fetch budget on unrelated
+    # third-party pages when an admitted required-domain candidate exists.
+    required_candidates = [
+        item for item in ranked
+        if (item.get("authority") or {}).get("satisfied")
+    ]
+    if source_policy.get("required") and required_candidates:
+        ranked = required_candidates + [
+            item for item in ranked if item not in required_candidates
+        ]
+
     # Keep a bounded amount of domain diversity.  This is a fetch-budget
     # boundary, not a source/domain policy for the user's question.
     selected: list[dict[str, Any]] = []
@@ -164,6 +186,7 @@ def _compact_page(
     fetched: dict[str, Any],
     llm: LLMClient,
     task_id: str,
+    task_plan: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     pages = [item for item in fetched.get("results") or [] if isinstance(item, dict)]
     if len(pages) != 1:
@@ -207,6 +230,7 @@ def _compact_page(
             llm=llm,
             task_id=task_id,
             on_chunk=on_chunk,
+            task_plan=task_plan,
         )
     except Exception as exc:
         evidence = {
@@ -236,13 +260,21 @@ def _compact_page(
     if not source_excerpt:
         return None, page_evidence
 
-    if not compact_facts:
-        page_evidence["status"] = "ok"
-        page_evidence["evidence_origin"] = "fetched_page_body"
-        page_evidence["model_extraction_status"] = "no_evidence"
-    else:
+    if compact_facts:
         page_evidence["evidence_origin"] = "fetched_page_body_with_model_locator"
         page_evidence["model_extraction_status"] = "ok"
+    else:
+        # A failed/empty parallel-candidate call is an extraction miss, not a
+        # failed page fetch.  The cleaned page body and its source_chunks are
+        # still first-party retrieval evidence and must remain available for
+        # ranking, cross-checking, and final synthesis.  Dropping the whole
+        # page here made a transient model timeout look identical to an empty
+        # webpage and caused valid search results to disappear.
+        page_evidence["evidence_origin"] = "fetched_page_body"
+        page_evidence["model_extraction_status"] = "no_evidence"
+        page_evidence.setdefault("errors", []).append(
+            "parallel-candidate returned no locator facts; retained cleaned page body"
+        )
 
     record = {
         "title": page_evidence["title"],
@@ -271,6 +303,7 @@ def _compact_page(
         "source_chunks": evidence.get("source_chunks") or [],
         "candidate_rank": candidate.get("candidate_rank"),
         "discovery_providers": candidate.get("discovery_providers") or [],
+        "authority": candidate.get("authority") or {},
     }
     if not has_substantive_evidence(record):
         page_evidence["status"] = "no_evidence"
@@ -297,6 +330,8 @@ def _compact_page(
 def web_search(query: str, **kwargs: Any) -> str:
     query = " ".join(str(query or "").split()).strip()
     task_id = str(kwargs.get("task_id") or "")
+    task_plan = kwargs.get("task_plan") if isinstance(kwargs.get("task_plan"), dict) else {}
+    source_policy = resolve_source_policy(query, {"task_plan": task_plan})
     if not query:
         return json.dumps({"status": "error", "message": "query is empty", "results": []}, ensure_ascii=False)
 
@@ -348,7 +383,7 @@ def web_search(query: str, **kwargs: Any) -> str:
         provider_statuses = [
             {"provider": "direct_url", "status": "ok", "count": 1, "errors": []}
         ]
-        candidates = [_direct_candidate(direct_url)]
+        candidates = [annotate_source(_direct_candidate(direct_url), query, {"task_plan": task_plan})]
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(run_keyless), pool.submit(run_tavily)]
@@ -363,7 +398,12 @@ def web_search(query: str, **kwargs: Any) -> str:
             }
             for result in provider_results
         ]
-        candidates = _merge_candidates(query, provider_results, limit=max_candidates)
+        candidates = _merge_candidates(
+            query,
+            provider_results,
+            limit=max_candidates,
+            task_plan=task_plan,
+        )
     append_task_event(
         task_id,
         "web_search_stage",
@@ -375,7 +415,16 @@ def web_search(query: str, **kwargs: Any) -> str:
         candidates=[
             {
                 key: item.get(key)
-                for key in ("candidate_rank", "title", "url", "snippet", "source", "candidate_score", "discovery_providers")
+                for key in (
+                    "candidate_rank",
+                    "title",
+                    "url",
+                    "snippet",
+                    "source",
+                    "candidate_score",
+                    "discovery_providers",
+                    "authority",
+                )
             }
             for item in candidates
         ],
@@ -410,6 +459,52 @@ def web_search(query: str, **kwargs: Any) -> str:
             indent=2,
         )
 
+    if source_policy.get("required") and not any(
+        bool((item.get("authority") or {}).get("satisfied")) for item in candidates
+    ):
+        candidate_urls = [
+            {
+                key: item.get(key)
+                for key in ("candidate_rank", "title", "url", "source", "candidate_score", "authority")
+            }
+            for item in candidates
+        ]
+        append_task_event(
+            task_id,
+            "web_search_stage",
+            phase="DISCOVERY",
+            action="web_search",
+            stage="authority_gate",
+            query=query,
+            required_domains=source_policy.get("required_domains") or [],
+            candidate_count=len(candidates),
+            message="no candidate satisfies the required official-domain policy; page fetch skipped",
+        )
+        return json.dumps(
+            {
+                "status": "no_evidence",
+                "real_network": True,
+                "provider": "web.generic",
+                "retrieval_role": "discovery",
+                "query": query,
+                "count": 0,
+                "candidate_count": len(candidates),
+                "results": [],
+                "sources": [],
+                "citation_refs": [],
+                "provider_statuses": provider_statuses,
+                "provider_errors": [],
+                "candidate_urls": candidate_urls,
+                "page_evidence": [],
+                "evidence_ready": False,
+                "authority_missing": True,
+                "required_domains": source_policy.get("required_domains") or [],
+                "evidence_policy": "official-domain gate blocked page fetch; refine the query or use a matching official URL",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
     llm = LLMClient()
     selected = candidates[:max_pages]
     fetched: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -426,7 +521,14 @@ def web_search(query: str, **kwargs: Any) -> str:
     evidence_pages: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
     for candidate, fetched_result in fetched:
-        record, page_evidence = _compact_page(query, candidate, fetched_result, llm, task_id)
+        record, page_evidence = _compact_page(
+            query,
+            candidate,
+            fetched_result,
+            llm,
+            task_id,
+            task_plan=task_plan,
+        )
         evidence_pages.append(page_evidence)
         append_task_event(
             task_id,

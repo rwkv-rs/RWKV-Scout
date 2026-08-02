@@ -15,6 +15,9 @@ from config import (
     get_llm_base_url,
     get_llm_model,
     get_llm_provider,
+    get_model_retry_attempts,
+    get_model_retry_delay_seconds,
+    get_model_retry_timeout_errors,
     is_local_provider,
 )
 from runtime import get_model_backend
@@ -115,7 +118,11 @@ class LLMClient:
         record_model_event(payload.pop("task_id"), **payload)
         return response
 
-    @retry_with_fallback(max_retries=3, delay=3)
+    @retry_with_fallback(
+        max_retries=get_model_retry_attempts,
+        delay=get_model_retry_delay_seconds,
+        retry_timeout_errors=get_model_retry_timeout_errors,
+    )
     def chat_completion(
         self,
         messages: list,
@@ -215,7 +222,11 @@ class LLMClient:
         )
         return msg
 
-    @retry_with_fallback(max_retries=3, delay=3)
+    @retry_with_fallback(
+        max_retries=get_model_retry_attempts,
+        delay=get_model_retry_delay_seconds,
+        retry_timeout_errors=get_model_retry_timeout_errors,
+    )
     def text_completion(
         self,
         prompt: str,

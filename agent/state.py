@@ -108,3 +108,21 @@ class AgentState:
             self._mount_feedback(),
         ]
         return "\n\n".join(module for module in modules if module)
+
+    def to_retrieval_context(self) -> str:
+        """Return only state that can affect the next web-tool decision.
+
+        The legacy Markdown context describes the local workspace and its
+        file-processing workflow.  Sending that context to an ordinary web
+        retrieval turn creates a false "environment ready" signal and spends
+        model tokens on an unrelated task.  File research still uses
+        ``to_markdown_context``; the model-owned web loop gets this narrow
+        routing view instead.
+        """
+        lines = [
+            "Retrieval task state (routing metadata only; not evidence):",
+            f"Task: {self.refined_query or self.user_query}",
+        ]
+        if self.last_feedback:
+            lines.append(f"Latest controller feedback: {self.last_feedback}")
+        return "\n".join(lines)

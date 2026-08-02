@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import time
+from collections.abc import Callable
 
 from utils.error_policy import classify_error
 
@@ -43,35 +44,48 @@ def _record_retry_event(
         return
 
 
-def retry_with_fallback(max_retries=3, delay=2, backoff=2):
-    max_retries = max(1, int(max_retries))
-    delay = max(0.0, float(delay))
+def _resolve(value, default):
+    resolved = value() if callable(value) else value
+    return default if resolved is None else resolved
+
+
+def retry_with_fallback(
+    max_retries=3,
+    delay=2,
+    backoff=2,
+    retry_timeout_errors: bool | Callable[[], bool] = True,
+):
     backoff = max(1.0, float(backoff))
 
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             last_exception = None
-            for attempt in range(max_retries):
+            attempts = max(1, int(_resolve(max_retries, 3)))
+            base_delay = max(0.0, float(_resolve(delay, 2)))
+            allow_timeout_retry = bool(_resolve(retry_timeout_errors, True))
+            for attempt in range(attempts):
                 try:
                     return func(*args, **kwargs)
                 except Exception as exc:
                     last_exception = exc
                     error_class = classify_error(exc)
                     retryable = error_class not in {"auth", "validation", "filesystem"}
-                    next_delay = delay * (backoff**attempt) if attempt < max_retries - 1 else 0.0
+                    if error_class == "timeout" and not allow_timeout_retry:
+                        retryable = False
+                    next_delay = base_delay * (backoff**attempt) if attempt < attempts - 1 else 0.0
                     _record_retry_event(
-                        "retry" if attempt < max_retries - 1 and retryable else "error",
+                        "retry" if attempt < attempts - 1 and retryable else "error",
                         function=f"{func.__module__}.{func.__qualname__}",
                         attempt=attempt + 1,
-                        max_retries=max_retries,
+                        max_retries=attempts,
                         error=exc,
                         delay=next_delay,
                     )
                     print(
-                        f"[retry] {func.__name__} attempt {attempt + 1}/{max_retries}: {exc}"
+                        f"[retry] {func.__name__} attempt {attempt + 1}/{attempts}: {exc}"
                     )
-                    if attempt < max_retries - 1 and retryable:
+                    if attempt < attempts - 1 and retryable:
                         time.sleep(next_delay)
                     elif not retryable:
                         raise

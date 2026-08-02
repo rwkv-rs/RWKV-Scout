@@ -11,12 +11,13 @@ app/
     ├── task_runner.py        # 后台任务生命周期与配置覆盖
     └── workspace_files.py    # 文件、路径和报告读写
 agent/
-├── orchestrator.py           # 流程编排，不拥有底层文件实现
-├── controlled_retrieval.py   # 仅用于显式受控实验和 retrieval-only 诊断
+├── orchestrator.py           # 单一有界检索循环和任务编排
 ├── state.py                  # 单任务状态与上下文投影
-├── slm_scheduler.py          # 本地 SLM 批量调度
-├── planner.py                # 查询/动作路由
-└── retrieval_*.py            # 检索循环与答案合成
+├── slm_scheduler.py          # 可选的本地 SLM 调度
+├── planner.py                # 任务计划和下一步动作路由
+├── retrieval_loop.py         # 检索结果合并与去重
+├── page_evidence.py          # 单页正文取证
+└── retrieval_synthesis.py    # 证据上下文和最终回答合成
 tools/
 └── *_search.py               # 外部数据源适配器，只返回结构化证据
 workflows/
@@ -60,23 +61,22 @@ runtime.ModelBackend
 - 前端继续读取原有任务、事件和报告 JSON 结构。
 - 文件路径统一经过 app.services.workspace_files 校验。
 
-## 检索执行策略
+## 当前检索执行链
 
-首个 Planner RWKV 只负责把用户目标拆成 `task_plan.v1` 的
-`atomic_points`，不输出工具、搜索源、查询词、URL 或执行策略。策略由
-`agent/execution_strategy.py` 根据分点数量选择：一个或两个分点进入
-Single-loop，三个及以上分点进入 Fork。`retrieval_strategy` 和旧的
-`retrieval_fork` 仅作为受控实验的显式覆盖，不参与普通请求的默认路由。
+生产请求使用一个共享状态的有界循环。任务计划只定义用户要回答的原子点；
+RWKV 决定是否继续检索以及下一次搜索方向，代码负责工具边界、来源策略、
+证据去重、循环上限和最终回答协议。
 
 ```text
 task_plan.v1
     ↓
-execution_strategy.select_strategy
-    ├── single_loop → SingleLoopRunner
-    └── fork        → ForkRunner
+Orchestrator global loop
+    ├── Planner：选择 web_search 或 finish_task
+    ├── web_search：发现候选、抓取正文、逐页取证
+    ├── RetrievalLedger + evidence_review：记录进度和来源约束
+    └── retrieval_synthesis：只用保留下来的正文生成回答
 ```
 
-两种 Runner 共享工具注册表、网页证据管线、Evidence、RetrievalLedger、
-事件追踪和最终总结；差异只在模型上下文的调度方式。策略选择会写入
-`retrieval_strategy_selected` 事件，便于前端、JSON 测试报告和回归分析读取
-真实执行架构。
+`task_plan`、`RetrievalLedger`、网页正文证据和最终合成属于同一条链路；
+不再维护并行的 Fork/Runner 默认架构。实验脚本可以覆盖搜索预算，不能改变
+生产链路的证据边界。

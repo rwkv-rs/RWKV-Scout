@@ -14,7 +14,20 @@ from html.parser import HTMLParser
 from typing import Iterable
 
 
-_SKIP_TAGS = {"script", "style", "noscript", "svg", "template"}
+# Page chrome is not factual page evidence.  The original response remains in
+# the retrieval trace; this only removes menus and controls from the bounded
+# Markdown projection used by ranking, chunking, and synthesis.
+_SKIP_TAGS = {
+    "head",
+    "script",
+    "style",
+    "noscript",
+    "svg",
+    "template",
+    "nav",
+    "footer",
+    "form",
+}
 _BLOCK_TAGS = {
     "address",
     "article",
@@ -63,6 +76,31 @@ def markdown_table(rows: Iterable[Iterable[object]]) -> list[str]:
     ]
     output.extend("| " + " | ".join(row) + " |" for row in normalized[1:])
     return output
+
+
+def _remove_anchor_only_toc(value: str) -> str:
+    """Remove one-row in-page TOC tables while retaining factual tables."""
+
+    lines = value.splitlines()
+    output: list[str] = []
+    index = 0
+    anchor_link = re.compile(r"\[[^\]]+\]\(#[^)]+\)")
+    while index < len(lines):
+        current = lines[index].strip()
+        next_line = lines[index + 1].strip() if index + 1 < len(lines) else ""
+        cells = [cell.strip() for cell in current.strip("|").split("|")]
+        is_separator = bool(next_line) and all(
+            re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in next_line.strip("|").split("|")
+        )
+        is_anchor_only = bool(cells) and all(
+            cell and not anchor_link.sub("", cell).strip() for cell in cells
+        )
+        if current.startswith("|") and is_separator and is_anchor_only:
+            index += 2
+            continue
+        output.append(lines[index])
+        index += 1
+    return "\n".join(output)
 
 
 class _MarkdownParser(HTMLParser):
@@ -244,6 +282,7 @@ def html_to_markdown(value: object, max_chars: int | None = None) -> str:
     result = parser.finish()
     if not result and "<" not in source:
         result = "\n".join(" ".join(line.split()) for line in source.splitlines() if line.strip())
+    result = _remove_anchor_only_toc(result)
     return result[:max_chars] if max_chars else result
 
 

@@ -40,6 +40,98 @@ def test_validation_reports_coverage_and_candidate_date_conflict_without_calling
     assert report["cross_source"]["candidate_conflicts"]
 
 
+def test_validation_recognizes_a_cjk_ordered_list_without_planner_word_overlap():
+    body = _page(
+        "https://metro.example/line-1",
+        "深圳地铁1号线站点：罗湖、国贸、老街、大剧院、科学馆，按线路顺序排列。",
+    )
+    report = build_evidence_validation(
+        {"results": [body]},
+        query="深圳地铁一号线有哪些站点？请列出完整站点，并保持线路顺序。",
+        constraints={
+            "task_plan": {
+                "atomic_points": [
+                    {
+                        "id": "P1",
+                        "task": "验证站点列表的完整性和顺序",
+                        "objective": "确认列表中的站点数量与线路信息一致",
+                        "output_format": "prose",
+                    }
+                ]
+            }
+        },
+        selected=[body],
+    )
+
+    row = report["subquestion_coverage"][0]
+    assert row["status"] == "covered"
+    assert row["sources"]
+
+
+def test_validation_does_not_cover_unstated_subpoints_from_shared_topic_words():
+    body = _page(
+        "https://example.org/gpu",
+        "Docker Compose can request GPU resources for a container.",
+    )
+    report = build_evidence_validation(
+        {"results": [body]},
+        query="docker compose 怎么给容器用GPU",
+        constraints={
+            "task_plan": {
+                "atomic_points": [
+                    {"id": "P1", "task": "查找 Docker Compose GPU 性能表现"}
+                ]
+            }
+        },
+        selected=[body],
+    )
+
+    assert report["subquestion_coverage"][0]["status"] == "missing"
+
+
+def test_validation_uses_bilingual_topic_anchors_for_english_official_body():
+    body = _page(
+        "https://docs.python.org/3/howto/free-threading-python.html",
+        (
+            "Python support for free threading. Starting with Python 3.13, the official "
+            "build can disable the GIL. Build from source with --disable-gil; PYTHON_GIL "
+            "and -Xgil control runtime behavior. The threading module and Lock are used "
+            "for synchronization. "
+        )
+        * 4,
+    )
+    report = build_evidence_validation(
+        {"results": [body]},
+        query="python 3.14 free threading到底怎么开，查官方文档",
+        constraints={
+            "task_plan": {
+                "source_policy": "official_required",
+                "required_domains": ["docs.python.org"],
+                "atomic_points": [
+                    {
+                        "id": "P1",
+                        "task": "查找 Python 3.14 官方文档中关于 free threading 的说明",
+                        "objective": "获取官方文档中关于如何启用 free threading 的描述",
+                    },
+                    {
+                        "id": "P2",
+                        "task": "查找 threading 模块的使用说明",
+                        "objective": "确认其与 free threading 的关系",
+                    },
+                ],
+            }
+        },
+        selected=[body],
+    )
+
+    rows = report["subquestion_coverage"]
+    assert all(row["status"] == "covered" for row in rows)
+    assert all(
+        any(source["coverage_basis"] == "bilingual_topic_anchors" for source in row["sources"])
+        for row in rows
+    )
+
+
 def test_answer_alignment_marks_supported_and_unmatched_claim_lines():
     sources = [_page("https://official.example/release", "release date: 2024-07-04. Official release notice.")]
     alignment = assess_answer_alignment(
@@ -55,12 +147,12 @@ def test_answer_alignment_marks_supported_and_unmatched_claim_lines():
 def test_context_ranking_prefers_verified_structured_record_before_relevance_tiebreak():
     page = _page(
         "https://blog.example/release",
-        "release date: 2024-07-04. This is a long enough fetched body record for the ranking test.",
+        "release date: 2024-07-04. This is a long enough fetched body record for the ranking test and source context.",
     )
     structured = {
         "url": "https://api.example/release",
         "title": "release record",
-        "structured_evidence_text": "release date: 2024-07-04. Structured API record with direct fields.",
+        "structured_evidence_text": "release date: 2024-07-04. Structured API record with direct fields and authoritative publication context.",
         "evidence_origin": "structured_api_record",
         "source": "api",
     }
@@ -76,7 +168,7 @@ def test_context_ranking_prefers_verified_structured_record_before_relevance_tie
 def test_context_projection_keeps_evidence_available_to_alignment():
     page = _page(
         "https://official.example/release",
-        "release date: 2024-07-04. Official release notice with enough source text.",
+        "release date: 2024-07-04. Official release notice with enough source text and publication context.",
     )
     context = build_evidence_context(
         {"query": "release date", "results": [page]},

@@ -138,6 +138,8 @@ def validate_citations(
         captured_evidence = retrieved_by_url.get(normalized, "")
         evidence_text = inline_evidence or captured_evidence
         locator = _locator(ref, evidence_text)
+        locator_url = _normalized_url(locator.get("url")) if locator else ""
+        locator_spans = list(locator.get("spans") or []) if locator else []
         row: dict[str, Any] = {
             "index": index,
             "ref_id": str(ref.get("ref_id") or f"S{index}"),
@@ -151,6 +153,8 @@ def validate_citations(
             "evidence_source": "citation" if inline_evidence else ("retrieved_result" if captured_evidence else "none"),
             "locator_present": bool(locator),
             "locator_type": locator.get("type") if locator else "",
+            "locator_url": str(locator.get("url") or "") if locator else "",
+            "locator_bound": bool(locator and locator_url and locator_url == normalized),
             "accessible": None,
             "support_overlap": None,
             "issues": [],
@@ -163,6 +167,18 @@ def validate_citations(
             row["issues"].append("missing_evidence")
         if row["evidence_present"] and not row["locator_present"]:
             row["issues"].append("missing_locator")
+        if locator and locator_url and locator_url != normalized:
+            row["issues"].append("locator_url_mismatch")
+        if locator and locator.get("type") == "source_chunks":
+            if not locator_spans:
+                row["issues"].append("empty_chunk_locator")
+            ref_id = str(row["ref_id"] or "")
+            if ref_id and any(
+                not str(span.get("span_id") or "").startswith(f"{ref_id}:")
+                for span in locator_spans
+                if isinstance(span, dict)
+            ):
+                row["issues"].append("locator_ref_mismatch")
         if check_remote and valid_url:
             try:
                 body = fetch_text(url, timeout=timeout)
@@ -199,6 +215,7 @@ def validate_citations(
         "referenced": count(lambda row: row["referenced_in_answer"]),
         "evidence_present": count(lambda row: row["evidence_present"]),
         "located": count(lambda row: row["locator_present"]),
+        "bound_locators": count(lambda row: row["locator_bound"]),
         "supported": count(lambda row: (row["support_overlap"] or 0) >= 0.15),
         "invalid": count(lambda row: not row["valid"]),
         "rows": rows,

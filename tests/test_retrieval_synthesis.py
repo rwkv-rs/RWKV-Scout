@@ -1,7 +1,15 @@
 import unittest
 from types import SimpleNamespace
 
-from agent.retrieval_synthesis import _clean_answer, _final_completion_budget, synthesize_retrieval_answer
+from agent.retrieval_synthesis import (
+    _attach_mechanical_citations,
+    _clean_answer,
+    _final_completion_budget,
+    _normalize_evidence_code_spans,
+    _normalize_free_threading_polarity,
+    build_evidence_context,
+    synthesize_retrieval_answer,
+)
 from config import get_llm_context_length
 from utils.chunker import get_token_count
 
@@ -18,6 +26,73 @@ class _FakeLLM:
 
 
 class RetrievalSynthesisTests(unittest.TestCase):
+    def test_answer_first_contract_is_used_only_with_visible_evidence(self):
+        llm = _FakeLLM()
+        result = synthesize_retrieval_answer(
+            "核验这句话是否正确，并计算相隔多少天",
+            {
+                "query": "核验这句话是否正确，并计算相隔多少天",
+                "results": [
+                    {
+                        "title": "Grounded source",
+                        "url": "https://example.com/source",
+                        "content": "The source states the two dates and the corrected claim. " * 20,
+                        "evidence_origin": "fetched_page_body",
+                    }
+                ],
+            },
+            llm=llm,
+        )
+        self.assertIn("ANSWER-FIRST CONTRACT", llm.calls[0][0])
+        self.assertIn("CLAIM-CHECK MODE", llm.calls[0][0])
+        self.assertIn("CALCULATION MODE", llm.calls[0][0])
+        self.assertIn("routing metadata", llm.calls[0][0])
+        self.assertTrue(result["context_stats"]["final_usable_evidence_count"])
+
+    def test_near_miss_code_span_is_restored_from_evidence(self):
+        answer = "Use `sys.is_gil_enabled()` to inspect the interpreter."
+        evidence = "The `sys._is_gil_enabled()` function checks whether the GIL is disabled."
+        self.assertEqual(
+            _normalize_evidence_code_spans(answer, evidence),
+            "Use `sys._is_gil_enabled()` to inspect the interpreter.",
+        )
+        self.assertEqual(
+            _normalize_evidence_code_spans(
+                "Use `sys.version_info` for the version.",
+                "Use `sys.version` or `sys.version_info` for the version.",
+            ),
+            "Use `sys.version_info` for the version.",
+        )
+
+    def test_explicit_free_threading_runtime_direction_is_preserved(self):
+        answer = (
+            "The GIL can be disabled at runtime with the environment variable `PYTHON_GIL` "
+            "or the command-line option `-Xgil`."
+        )
+        evidence = (
+            "Free-threaded builds support optionally running with the GIL enabled at runtime "
+            "using the environment variable `PYTHON_GIL` or the command-line option `-Xgil`."
+        )
+        corrected = _normalize_free_threading_polarity(
+            answer,
+            "python free threading how to enable",
+            evidence,
+        )
+        self.assertIn("run with the GIL enabled at runtime", corrected)
+
+    def test_aligned_uncited_fact_gets_existing_source_reference(self):
+        answer = _attach_mechanical_citations(
+            "The source directly states that the release date is 2024-01-01.",
+            [
+                {
+                    "url": "https://example.com/fact",
+                    "content": "The source directly states that the release date is 2024-01-01.",
+                    "evidence_origin": "fetched_page_body",
+                }
+            ],
+        )
+        self.assertIn("[S1]", answer)
+
     def test_evidence_protocol_is_not_a_user_facing_answer(self):
         self.assertEqual(
             _clean_answer(
@@ -27,6 +102,22 @@ class RetrievalSynthesisTests(unittest.TestCase):
             ),
             "",
         )
+
+    def test_clean_answer_removes_continuation_xml_scaffolding(self):
+        self.assertEqual(
+            _clean_answer("<response>\n<answer>Actual answer [S1]</answer>\n</response>"),
+            "Actual answer [S1]",
+        )
+
+    def test_clean_answer_collapses_budget_exhaustion_list_repeats(self):
+        cleaned = _clean_answer(
+            "1. Enable the module.\n"
+            "2. Enable the module.\n"
+            "3. Enable the module.\n"
+            "4. Enable the module.\n"
+            "5. Enable the module."
+        )
+        self.assertEqual(cleaned, "1. Enable the module.")
         self.assertEqual(
             _clean_answer(
                 "[S1](https://example.com)\n\n"
@@ -34,6 +125,10 @@ class RetrievalSynthesisTests(unittest.TestCase):
                 "Copied page text"
             ),
             "",
+        )
+        self.assertEqual(
+            _clean_answer("P1: internal routing point\nP2: another point\nUser-facing answer."),
+            "User-facing answer.",
         )
 
     def test_final_budget_never_requests_more_than_remaining_context(self):
@@ -81,9 +176,10 @@ class RetrievalSynthesisTests(unittest.TestCase):
         self.assertLessEqual(llm.calls[0][1], 8192)
         self.assertIn("Acceptance checklist", llm.calls[0][0])
         self.assertIn("row/column relationship", llm.calls[0][0])
+        self.assertNotIn("The fixture fact is 42", llm.calls[0][0])
         self.assertIn("[S1](https://example.com/stations)", result["content"])
 
-    def test_final_summary_receives_visible_execution_context_at_step_limit(self):
+    def test_final_summary_keeps_execution_trace_out_of_evidence_prompt(self):
         llm = _FakeLLM()
         result = synthesize_retrieval_answer(
             "find a fact",
@@ -92,11 +188,31 @@ class RetrievalSynthesisTests(unittest.TestCase):
             execution_context="RWKV planner transcript:\nAssistant: search_mediawiki\nFunction output: status=ok",
             termination_reason="max_steps_reached",
         )
-        self.assertIn("max_steps_reached", llm.calls[0][0])
-        self.assertIn("search_mediawiki", llm.calls[0][0])
-        self.assertIn("status=ok", result["context_text"])
+        self.assertNotIn("max_steps_reached", llm.calls[0][0])
+        self.assertNotIn("search_mediawiki", llm.calls[0][0])
+        self.assertNotIn("status=ok", result["context_text"])
+        self.assertFalse(result["context_stats"]["execution_context_in_final_prompt"])
 
-    def test_no_usable_evidence_requires_explicit_refusal(self):
+    def test_source_packing_is_not_reported_as_final_prompt_truncation(self):
+        context = build_evidence_context(
+            {
+                "query": "find the fact",
+                "results": [
+                    {
+                        "title": "Long source",
+                        "url": "https://example.com/long",
+                        "content": "A directly supported fact. " * 6000,
+                        "source": "test",
+                    }
+                ],
+            },
+            query="find the fact",
+        )
+        self.assertTrue(context["source_context_truncated"])
+        self.assertTrue(context["context_truncated"])
+        self.assertFalse(context["final_context_truncated"])
+
+    def test_no_usable_evidence_uses_short_closed_world_hint(self):
         llm = _FakeLLM()
         result = synthesize_retrieval_answer(
             "Who is the founder?",
@@ -116,8 +232,146 @@ class RetrievalSynthesisTests(unittest.TestCase):
             llm=llm,
         )
         self.assertIn("NO_USABLE_EVIDENCE", llm.calls[0][0])
-        self.assertIn("only valid answer is an explicit refusal", llm.calls[0][0])
+        self.assertIn("state that briefly", llm.calls[0][0])
+        self.assertNotIn("only valid answer is an explicit refusal", llm.calls[0][0])
         self.assertEqual(result["citation_refs"], [])
+        self.assertTrue(result["answer_quality"]["closed_world_boundary_enforced"])
+        self.assertIn("无法根据当前检索到的正文证据确认", result["content"])
+
+    def test_generic_plan_words_do_not_count_as_fact_coverage(self):
+        context = build_evidence_context(
+            {
+                "query": "RWKV founder papers GitHub projects",
+                "results": [
+                    {
+                        "title": "GitHub profile",
+                        "url": "https://github.com/example",
+                        "content": (
+                            "RWKV GitHub projects repositories search results source stars forks. "
+                            * 80
+                        ),
+                        "evidence_origin": "fetched_page_body",
+                    }
+                ],
+            },
+            query="RWKV founder papers GitHub projects",
+            constraints={
+                "task_plan": {
+                    "atomic_points": [
+                        {
+                            "id": "P3",
+                            "task": "List all GitHub projects created by the founder(s) of RWKV",
+                            "objective": "repository ownership and metadata",
+                            "evidence_needed": ["GitHub repository URL and metadata"],
+                            "acceptance_criteria": ["Each repository is owned by the founder(s)"],
+                        }
+                    ]
+                }
+            },
+        )
+        row = context["validation"]["subquestion_coverage"][0]
+        self.assertEqual(row["status"], "missing")
+
+    def test_product_homepage_does_not_cover_a_specific_feature(self):
+        context = build_evidence_context(
+            {
+                "query": "Docker Compose GPU configuration",
+                "results": [
+                    {
+                        "title": "Docker documentation",
+                        "url": "https://docs.docker.com/",
+                        "content": (
+                            "Docker documentation. Docker Compose helps define and run applications. "
+                            "Browse the reference and guides for containers. "
+                            * 80
+                        ),
+                        "evidence_origin": "fetched_page_body",
+                    }
+                ],
+            },
+            query="Docker Compose GPU configuration",
+            constraints={
+                "task_plan": {
+                    "atomic_points": [
+                        {
+                            "id": "P1",
+                            "task": "Find the exact Docker Compose GPU configuration syntax",
+                            "objective": "Expose a GPU to a container",
+                        }
+                    ]
+                }
+            },
+        )
+        row = context["validation"]["subquestion_coverage"][0]
+        self.assertEqual(row["status"], "missing")
+
+    def test_irrelevant_substantive_pages_remain_visible_for_rwkv_decision(self):
+        llm = _FakeLLM()
+        result = synthesize_retrieval_answer(
+            "specific requested fact",
+            {
+                "query": "specific requested fact",
+                "results": [
+                    {
+                        "title": "Unrelated page",
+                        "url": "https://example.com/unrelated",
+                        "content": "This is a long unrelated page body about gardening and weather. " * 40,
+                        "evidence_origin": "fetched_page_body",
+                    }
+                ],
+                "citation_refs": [],
+            },
+            llm=llm,
+            constraints={
+                "task_plan": {
+                    "atomic_points": [
+                        {
+                            "id": "P1",
+                            "task": "find the requested fact",
+                            "objective": "specific requested fact",
+                            "evidence_needed": ["the exact fact"],
+                            "acceptance_criteria": ["directly stated"],
+                        }
+                    ]
+                }
+            },
+        )
+        # The engineering validator may report that the requested point is
+        # still missing, but it must not erase fetched page evidence before
+        # RWKV gets to decide whether to cross-check or re-plan.
+        self.assertIn("PARTIAL_EVIDENCE", llm.calls[0][0])
+        self.assertIn("gardening and weather", llm.calls[0][0])
+        self.assertFalse(result["context_stats"]["final_evidence_suppressed"])
+        self.assertEqual(result["context_stats"]["retrieved_usable_evidence_count"], 1)
+        self.assertEqual(result["context_stats"]["final_usable_evidence_count"], 1)
+        self.assertEqual(result["context_stats"]["final_selected_evidence_count"], 1)
+        self.assertEqual(len(result["citation_refs"]), 1)
+
+    def test_citation_ref_binds_url_to_selected_chunk_locator(self):
+        llm = _FakeLLM()
+        result = synthesize_retrieval_answer(
+            "specific requested fact",
+            {
+                "query": "specific requested fact",
+                "results": [
+                    {
+                        "title": "Grounded page",
+                        "url": "https://example.com/fact",
+                        "content": "The requested fact is stated on this page. " * 20,
+                        "evidence_origin": "fetched_page_body",
+                        "evidence_boundary": "page_body_only",
+                    }
+                ],
+                "citation_refs": [],
+            },
+            llm=llm,
+        )
+        ref = result["citation_refs"][0]
+        locator = ref["evidence_locator"]
+        self.assertEqual(ref["url"], "https://example.com/fact")
+        self.assertEqual(locator["url"], ref["url"])
+        self.assertTrue(locator["spans"])
+        self.assertTrue(locator["spans"][0]["span_id"].startswith(f"{ref['ref_id']}:C"))
 
 
 if __name__ == "__main__":

@@ -71,15 +71,15 @@ class PaperSearchTests(unittest.TestCase):
 
     def test_merge_deduplicates_citations_by_url_across_rounds(self):
         first = {
-            "results": [{"title": "Source", "url": "https://example.com/source", "content": "This source contains the evidence body required for citation deduplication."}],
+            "results": [{"title": "Source", "url": "https://example.com/source", "content": "This source contains the evidence body required for citation deduplication. The captured paragraph is long enough to remain a valid auditable source."}],
             "sources": ["https://example.com/source"],
-            "citation_refs": [{"ref_id": "S1", "url": "https://example.com/source", "evidence_text": "This source contains the evidence body required for citation deduplication."}],
+            "citation_refs": [{"ref_id": "S1", "url": "https://example.com/source", "evidence_text": "This source contains the evidence body required for citation deduplication. The captured paragraph is long enough to remain a valid auditable source."}],
             "real_network": False,
         }
         second = {
-            "results": [{"title": "Source", "url": "https://example.com/source", "content": "This source contains the evidence body required for citation deduplication."}],
+            "results": [{"title": "Source", "url": "https://example.com/source", "content": "This source contains the evidence body required for citation deduplication. The captured paragraph is long enough to remain a valid auditable source."}],
             "sources": ["https://example.com/source"],
-            "citation_refs": [{"ref_id": "S2", "url": "https://example.com/source", "evidence_text": "This source contains the evidence body required for citation deduplication."}],
+            "citation_refs": [{"ref_id": "S2", "url": "https://example.com/source", "evidence_text": "This source contains the evidence body required for citation deduplication. The captured paragraph is long enough to remain a valid auditable source."}],
             "real_network": False,
         }
         merged = merge_retrieval_results("source", "search_papers", [("source", first), ("source", second)])

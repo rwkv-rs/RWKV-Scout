@@ -4,7 +4,17 @@
     "baidu": "key",
     "volcengine": "key",
     "tavily": "",
-    "tavily_pool": [],
+    "tavily_pool": [
+      "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",
+      "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",
+      "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",
+      "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",
+      "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",
+      "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",
+      "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",
+      "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",
+      "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"
+    ],
     "local": "rwkv-skills",
     "local_7b": "rwkv-skills",
     "local_13b": "rwkv-skills"
@@ -32,7 +42,7 @@
     },
     "local_13b": {
       "label": "RWKV 13.3B",
-      "base_url": "http://172.21.122.93:29613/v1",
+      "base_url": "http://127.0.0.1:29613/v1",
       "model": "rwkv7-g1i_preview4922-13.3b-20260720-ctx12288",
       "max_tokens": 8192,
       "temperature": 0.0,
@@ -75,7 +85,7 @@
     "allowed_extensions": [".txt", ".md"],
     "max_chunk_tokens": 2400,
     "web_chunk_mode": "adaptive",
-    "web_chunk_single_pass_tokens": 7000,
+    "web_chunk_single_pass_tokens": 4096,
     "web_chunk_tokens": 4096,
     "web_chunk_min_tokens": 1024,
     "web_chunk_max_tokens": 4096,
@@ -83,6 +93,7 @@
     "web_chunk_output_reserve_tokens": 4096,
     "web_chunk_safety_margin_tokens": 512,
     "web_chunk_overlap_ratio": 0.1,
+    "web_context_max_chunks_per_source": 3,
     "web_candidate_max_tokens": 8192,
     "web_candidate_max_facts": 64,
     "overlap_ratio": 0.05,
@@ -108,7 +119,7 @@
     "concurrency": 4
   },
   "SLM_CONFIG": {
-    "endpoint": "http://172.21.122.93:29613/v1/chat/completions",
+    "endpoint": "http://127.0.0.1:29613/v1/chat/completions",
     "protocol": "openai",
     "password": "rwkv-skills",
     "concurrency": 4,
@@ -126,6 +137,10 @@
   },
   "MODEL_RUNTIME": {
     "backend": "openai_compat",
+    "max_inflight_requests": 2,
+    "max_retry_attempts": 2,
+    "retry_delay_seconds": 1,
+    "retry_timeout_errors": false,
     "direct_rwkv": {
       "engine_root": "",
       "model_path": "",
@@ -141,7 +156,7 @@
     }
   },
   "RUNTIME": {
-    "analysis_timeout_seconds": 600,
+    "analysis_timeout_seconds": null,
     "model_connect_timeout_seconds": 10,
     "model_read_timeout_seconds": 180,
     "network_timeout_seconds": 20

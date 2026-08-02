@@ -117,7 +117,7 @@ def test_fetched_body_keeps_model_locator_out_of_canonical_text():
         "title": "Fetched page",
         "url": "https://example.com/page",
         "snippet": "Search summary with a wrong date 2024-01-01.",
-        "source_excerpt": "The fetched page body states the release date is 2025-05-20.",
+        "source_excerpt": "The fetched page body states the release date is 2025-05-20. The source also includes the publication context.",
         "model_extracted_facts": "The model guessed 2024-01-01.",
         "evidence_origin": "fetched_page_body",
     }

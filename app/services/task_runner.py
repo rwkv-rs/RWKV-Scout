@@ -63,11 +63,6 @@ def run_background_analysis(
             "rejection_criteria": request.rejection_criteria or [],
             "risk_checks": request.risk_checks or [],
             "prompt_version": request.prompt_version or "",
-            "search_action": request.search_action or "",
-            "baseline_search_action": request.baseline_search_action or "",
-            "retrieval_only": request.retrieval_only,
-            "retrieval_strategy": request.retrieval_strategy or "",
-            "retrieval_fork": request.retrieval_fork,
             "strategy_config": request.strategy_config,
         }
         with task_time_budget(task_id), analysis_slot(task_id):

@@ -45,6 +45,7 @@ class ToolRegistry:
         "slm_scheduler",
         "agentic_tool_loop",
         "run_metadata",
+        "task_plan",
     }
 
     @classmethod
@@ -260,7 +261,10 @@ class ToolRegistry:
 
         arguments = dict(args or {})
         if meta.get("strict_args", True):
-            allowed = set(meta.get("allowed_args") or ()) | cls._runtime_context_keys
+            # Runtime context is system-owned.  It is never part of the
+            # model's argument contract and cannot be overridden by a tool
+            # call emitted by RWKV.
+            allowed = set(meta.get("allowed_args") or ())
             unknown = sorted(set(arguments) - allowed)
             missing = sorted(set(meta.get("required_args") or ()) - set(arguments))
             if unknown or missing:
@@ -283,7 +287,10 @@ class ToolRegistry:
                     ensure_ascii=False,
                 )
 
-        merged_kwargs = {**(context or {}), **arguments}
+        # Keep model arguments and system context separate.  Context wins on
+        # the final call as a defensive backstop for non-strict legacy tools;
+        # strict tools already reject context keys above.
+        merged_kwargs = {**arguments, **(context or {})}
         try:
             result = meta["func"](**merged_kwargs)
         except Exception as exc:

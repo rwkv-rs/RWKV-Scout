@@ -13,9 +13,11 @@ from urllib.parse import urlparse
 from typing import Any, Iterable
 
 from utils.evidence_quality import date_mentions, evidence_kind, evidence_text
+from utils.source_authority import authority_for_url, resolve_source_policy
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u3400-\u9fff]{2,}")
+_LATIN_TOPIC_RE = re.compile(r"(?i)c\+\+|c#|[a-z][a-z0-9_+-]{2,}")
 _STOP_TERMS = {
     "什么",
     "哪些",
@@ -34,6 +36,102 @@ _STOP_TERMS = {
     "find",
     "list",
     "tell",
+    # Planning language is not fact-bearing evidence.  Without this second
+    # group, a generic GitHub profile can appear to cover a point merely
+    # because both the point and the page contain words such as
+    # ``repositories`` or ``source``.
+    "all",
+    "projects",
+    "project",
+    "repositories",
+    "repository",
+    "github",
+    "results",
+    "search",
+    "source",
+    "sources",
+    "stars",
+    "forks",
+    "with",
+    "paper",
+    "papers",
+    "link",
+    "links",
+    "url",
+    "metadata",
+    "title",
+    "authors",
+    "author",
+    "venue",
+    "year",
+    "number",
+    "direct",
+    "working",
+    "official",
+    "profile",
+    "page",
+    "primary",
+    "authoritative",
+    "reliable",
+    "independent",
+    "multiple",
+    "verify",
+    "verification",
+    "completeness",
+    "complete",
+    "correctly",
+    "present",
+    "attributed",
+    "include",
+    "including",
+    "provide",
+    "every",
+    "determine",
+    "identify",
+    "person",
+    "people",
+    "name",
+    "names",
+    "affiliation",
+    "published",
+    "owned",
+    "created",
+    "required",
+    "requested",
+    "fact",
+    "facts",
+    "information",
+    "question",
+    "answer",
+    "format",
+    "output",
+    "body",
+    "ownership",
+    # Function words and request verbs do not identify the requested fact.
+    "the",
+    "for",
+    "and",
+    "that",
+    "this",
+    "current",
+    "how",
+    "can",
+    "use",
+    "using",
+    "support",
+    "configure",
+    "configuration",
+    "documentation",
+    "reference",
+    "identify",
+    "locate",
+    "extract",
+    "syntax",
+    "exact",
+    "ensure",
+    "prose",
+    "code",
+    "table",
 }
 
 
@@ -55,6 +153,51 @@ def _terms(value: Any) -> set[str]:
             for size in (2, 3, 4):
                 terms.update(token[index : index + size] for index in range(len(token) - size + 1))
     return {term for term in terms if term and term not in _STOP_TERMS}
+
+
+def _semantic_terms(value: Any) -> set[str]:
+    """Return compact topic terms for coverage diagnostics.
+
+    ``_terms`` intentionally emits overlapping CJK n-grams for ranking, but
+    using every 2/3/4-gram as a hard requirement makes a long Chinese task
+    description look uncovered even when its table or ordered list is present.
+    This smaller set is only a routing signal; it never promotes metadata to
+    evidence or decides that an answer is true.
+    """
+
+    terms: set[str] = set()
+    for token in _TOKEN_RE.findall(str(value or "")):
+        token = token.casefold()
+        if token in _STOP_TERMS:
+            continue
+        if re.fullmatch(r"[\u3400-\u9fff]+", token):
+            terms.update(
+                token[index : index + 2]
+                for index in range(max(0, len(token) - 1))
+                if token[index : index + 2] not in _STOP_TERMS
+            )
+        else:
+            terms.add(token)
+    return {term for term in terms if term and term not in _STOP_TERMS}
+
+
+def _latin_topic_terms(value: Any) -> set[str]:
+    """Return stable English/product anchors for mixed-language requests.
+
+    The planner commonly writes Chinese task descriptions while the retrieved
+    official page is English.  Comparing every translated planning word makes
+    a genuine page look uncovered.  This helper intentionally keeps only
+    product/entity/topic tokens that can be compared across that language
+    boundary; it is a routing signal, not a claim verifier.
+    """
+
+    terms: set[str] = set()
+    for token in _LATIN_TOPIC_RE.findall(str(value or "")):
+        token = token.casefold()
+        if token in _STOP_TERMS:
+            continue
+        terms.add(token)
+    return terms
 
 
 def source_quality(item: dict[str, Any]) -> dict[str, Any]:
@@ -91,12 +234,23 @@ def source_quality(item: dict[str, Any]) -> dict[str, Any]:
     if isinstance(candidate_score, (int, float)):
         score += max(0.0, min(1.0, float(candidate_score))) * 0.25
         signals.append("candidate_rank_signal")
+    authority = item.get("authority")
+    if isinstance(authority, dict):
+        authority_rank = int(authority.get("rank") or 0)
+        score += min(1.5, authority_rank * 0.35)
+        if authority.get("satisfied"):
+            signals.append("required_authority_satisfied")
+        elif authority.get("required"):
+            signals.append("required_authority_missing")
+        elif authority_rank:
+            signals.append("institutional_authority_signal")
     return {
         "score": round(score, 4),
         "host": host,
         "kind": kind,
         "signals": signals,
         "body_chars": len(text),
+        "authority": authority if isinstance(authority, dict) else {},
     }
 
 def _point_rows(constraints: dict[str, Any] | None, query: str) -> list[dict[str, Any]]:
@@ -111,23 +265,85 @@ def _point_rows(constraints: dict[str, Any] | None, query: str) -> list[dict[str
                     str(point.get(key) or "")
                     for key in ("task", "objective", "question", "output_format")
                 ).strip(),
-                "acceptance": [str(value) for value in point.get("acceptance_criteria") or [] if str(value).strip()],
+                "acceptance": [
+                    str(value)
+                    for value in point.get("acceptance_criteria") or []
+                    if str(value).strip()
+                ],
             }
             for index, point in enumerate(points, start=1)
         ]
     return [{"id": "P1", "text": str(query or ""), "acceptance": []}]
 
 
-def _coverage(point_text: str, body: str) -> dict[str, Any]:
+def _coverage(point_text: str, body: str, query: str = "") -> dict[str, Any]:
     required = _terms(point_text)
     observed = _terms(body)
     matched = sorted(required & observed)
     score = len(matched) / max(1, len(required))
+    minimum_matches = 2 if len(required) <= 2 else 3
+    compact_required = _semantic_terms(point_text)
+    compact_matched = sorted(compact_required & _semantic_terms(body))
+    compact_score = len(compact_matched) / max(1, len(compact_required))
+    query_required = _semantic_terms(query)
+    query_matched = sorted(query_required & _semantic_terms(body))
+    query_score = len(query_matched) / max(1, len(query_required))
+    # Use the user's original query as a bilingual topic anchor.  A Chinese
+    # planner point such as "获取 Python free threading 的启用方式" cannot
+    # be expected to share its Chinese n-grams with an English docs.python.org
+    # body, but the entity/topic anchors still identify the intended page.
+    query_topic_required = _latin_topic_terms(query)
+    point_topic_required = _latin_topic_terms(point_text)
+    topic_required = query_topic_required & point_topic_required
+    if len(topic_required) < 2:
+        topic_required = query_topic_required
+    topic_observed = _latin_topic_terms(body)
+    topic_matched = sorted(topic_required & topic_observed)
+    topic_score = len(topic_matched) / max(1, len(topic_required))
+    structured_list_point = bool(
+        re.search(
+            r"(?i)(list|table|order|整理|列表|顺序|清单|表格)",
+            point_text,
+        )
+    )
+    compact_threshold = max(4, min(10, (len(compact_required) + 3) // 4))
+    compact_covered = len(compact_matched) >= compact_threshold and compact_score >= 0.18
+    query_anchor_covered = (
+        structured_list_point
+        and len(query_matched) >= 3
+        and query_score >= 0.20
+        and bool(compact_matched)
+    )
+    bilingual_topic_covered = (
+        len(topic_required) >= 2
+        and len(topic_matched) == len(topic_required)
+    )
+    covered = (
+        len(matched) >= minimum_matches and score >= 0.30
+    ) or compact_covered or query_anchor_covered or bilingual_topic_covered
     return {
         "score": round(score, 4),
         "required_term_count": len(required),
         "matched_terms": matched[:40],
-        "covered": bool(matched) and (score >= 0.12 or len(matched) >= 3),
+        "compact_score": round(compact_score, 4),
+        "compact_matched_terms": compact_matched[:40],
+        "query_anchor_score": round(query_score, 4),
+        "query_anchor_terms": query_matched[:40],
+        "topic_required_terms": sorted(topic_required)[:40],
+        "topic_matched_terms": topic_matched[:40],
+        "topic_anchor_score": round(topic_score, 4),
+        "coverage_basis": (
+            "direct_terms"
+            if len(matched) >= minimum_matches and score >= 0.30
+            else "compact_topic_terms"
+            if compact_covered
+            else "query_anchor_and_structure"
+            if query_anchor_covered
+            else "bilingual_topic_anchors"
+            if bilingual_topic_covered
+            else "none"
+        ),
+        "covered": covered,
     }
 
 
@@ -159,8 +375,12 @@ def build_evidence_validation(
 
     rows = [item for item in (selected if selected is not None else data.get("results") or []) if isinstance(item, dict)]
     profiles: list[dict[str, Any]] = []
+    source_policy = resolve_source_policy(query, constraints)
     for index, item in enumerate(rows, start=1):
-        quality = source_quality(item)
+        authority = item.get("authority")
+        if not isinstance(authority, dict):
+            authority = authority_for_url(item.get("url"), query, constraints)
+        quality = source_quality({**item, "authority": authority})
         profiles.append(
             {
                 "ref_id": f"S{index}",
@@ -171,6 +391,7 @@ def build_evidence_validation(
                 "body_chars": quality["body_chars"],
                 "date_mentions": date_mentions(evidence_text(item)),
                 "fact_signatures": sorted(_fact_signatures(item))[:16],
+                "authority": authority,
             }
         )
 
@@ -181,7 +402,7 @@ def build_evidence_validation(
         source_matches: list[dict[str, Any]] = []
         date_by_host: dict[str, set[str]] = defaultdict(set)
         for index, item in enumerate(rows, start=1):
-            result = _coverage(point["text"], evidence_text(item))
+            result = _coverage(point["text"], evidence_text(item), query)
             if result["covered"]:
                 profile = profiles[index - 1]
                 source_matches.append(
@@ -190,6 +411,8 @@ def build_evidence_validation(
                         "host": profile["host"],
                         "score": result["score"],
                         "matched_terms": result["matched_terms"],
+                        "coverage_basis": result["coverage_basis"],
+                        "authority": profile["authority"],
                     }
                 )
                 for value in profile["date_mentions"]:
@@ -207,11 +430,27 @@ def build_evidence_validation(
                     "interpretation": "candidate conflict only; the final model must inspect the quoted body text",
                 }
             )
+        authority_satisfied = any(
+            bool(row.get("authority", {}).get("satisfied"))
+            for row in source_matches
+        )
+        answerable = bool(source_matches) and (
+            not source_policy.get("required") or authority_satisfied
+        )
         coverage_rows.append(
             {
                 "point_id": point["id"],
                 "task": point["text"],
-                "status": "covered" if source_matches else "missing",
+                "status": (
+                    "covered"
+                    if answerable
+                    else "authority_missing"
+                    if source_matches
+                    else "missing"
+                ),
+                "answerable": answerable,
+                "authority_satisfied": authority_satisfied,
+                "source_policy": source_policy,
                 "source_count": len(source_matches),
                 "independent_host_count": len(independent_hosts),
                 "sources": source_matches,
@@ -243,13 +482,15 @@ def build_evidence_validation(
         "cross_source": {
             "multi_source_points": sum(row["agreement"] == "multi_source_overlap" for row in coverage_rows),
             "single_source_points": sum(row["agreement"] == "single_source" for row in coverage_rows),
-            "missing_points": sum(row["status"] == "missing" for row in coverage_rows),
+            "missing_points": sum(not row.get("answerable") for row in coverage_rows),
+            "authority_missing_points": sum(row["status"] == "authority_missing" for row in coverage_rows),
             "repeated_fact_signatures": repeated_facts[:32],
             "candidate_conflicts": conflicts,
         },
         "policy": (
             "Signals are routing metadata only. They cannot promote snippets, titles, URLs, "
-            "model facts, or a source agreement into truth without direct EVIDENCE BODY text."
+            "model facts, source agreement, or third-party pages into an official claim without "
+            "direct EVIDENCE BODY text and a satisfied source policy."
         ),
     }
 
@@ -258,6 +499,15 @@ def assess_answer_alignment(answer: str, selected_evidence: Iterable[dict[str, A
     """Measure whether answer lines cite and overlap selected source bodies."""
 
     sources = list(selected_evidence or [])
+    if not sources:
+        return {
+            "alignment_version": "answer-alignment.v1",
+            "claim_line_count": 0,
+            "aligned_line_count": 0,
+            "unsupported_line_count": 0,
+            "rows": [],
+            "policy": "No selected evidence; alignment is not applicable.",
+        }
     rows: list[dict[str, Any]] = []
     unsupported = 0
     for raw_line in str(answer or "").splitlines():
@@ -265,6 +515,15 @@ def assess_answer_alignment(answer: str, selected_evidence: Iterable[dict[str, A
         if not line or line.casefold().startswith(("sources:", "source:")):
             continue
         if re.fullmatch(r"\[S\d+\]", line, flags=re.IGNORECASE):
+            continue
+        if line.casefold().startswith(
+            (
+                "the provided source material does not",
+                "the retrieved evidence body does not",
+                "the search results do not",
+                "the available evidence does not",
+            )
+        ):
             continue
         if any(marker in line for marker in ("无法确认", "证据不足", "缺少", "不能确定", "cannot confirm", "insufficient evidence")):
             continue

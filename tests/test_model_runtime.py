@@ -14,6 +14,7 @@ from runtime.direct_rwkv import DirectRWKVBackend
 from runtime.factory import get_model_backend, reset_model_backend
 from runtime.transcript import render_rwkv_transcript
 from scripts.preflight import probe_model_service
+from utils.token_tracker import current_task_id
 
 
 class ModelRuntimeTests(unittest.TestCase):
@@ -103,6 +104,24 @@ class ModelRuntimeTests(unittest.TestCase):
             result = SLMClient()._batch_generate_direct(["one", "two"])
         self.assertEqual(result, ["a", "b"])
         backend.batch_text_completion.assert_called_once()
+
+    def test_compat_batch_completion_preserves_task_context_in_workers(self):
+        backend = OpenAICompatBackend()
+        seen = []
+
+        def fake_text_completion(prompt, *, max_tokens=768, stop=None):
+            del max_tokens, stop
+            seen.append(current_task_id.get())
+            return BackendResponse(content=prompt)
+
+        backend.text_completion = fake_text_completion
+        token = current_task_id.set("CONTEXT_BATCH_1")
+        try:
+            result = backend.batch_text_completion(["a", "b"], max_tokens=8)
+        finally:
+            current_task_id.reset(token)
+        self.assertEqual(result, ["a", "b"])
+        self.assertEqual(seen, ["CONTEXT_BATCH_1", "CONTEXT_BATCH_1"])
 
     def test_direct_preflight_rejects_checkpoint_that_does_not_match_contract(self):
         backend = Mock()

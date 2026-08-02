@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import json
+import threading
 from typing import Any, Sequence
 
 import requests
@@ -29,8 +31,24 @@ class OpenAICompatBackend:
     backend_name = "openai_compat"
 
     def __init__(self):
+        # Requests sessions are not guaranteed to be thread-safe. Page
+        # chunk extraction can issue several model calls in one process, so
+        # keep connection pooling while giving each worker thread its own
+        # session and cookie/header state.
         self._session = requests.Session()
         self._session.trust_env = False
+        self._sessions = threading.local()
+
+    def _request_session(self) -> requests.Session:
+        session = getattr(self._sessions, "session", None)
+        if session is None:
+            if threading.current_thread() is threading.main_thread():
+                session = self._session
+            else:
+                session = requests.Session()
+                session.trust_env = False
+            self._sessions.session = session
+        return session
 
     @property
     def model_name(self) -> str:
@@ -40,7 +58,7 @@ class OpenAICompatBackend:
         endpoint = get_llm_base_url().rstrip("/") + path
         task_id = current_task_id.get() or "model-request"
         with model_request_slot(task_id):
-            response = self._session.post(
+            response = self._request_session().post(
                 endpoint,
                 headers={
                     "Authorization": f"Bearer {get_llm_api_key() or 'local'}",
@@ -137,7 +155,10 @@ class OpenAICompatBackend:
         worker_count = min(max(1, get_slm_concurrency()), len(prompts))
         results = [""] * len(prompts)
         with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {executor.submit(generate, prompt): index for index, prompt in enumerate(prompts)}
+            futures = {
+                executor.submit(contextvars.copy_context().run, generate, prompt): index
+                for index, prompt in enumerate(prompts)
+            }
             for future in concurrent.futures.as_completed(futures):
                 results[futures[future]] = future.result()
         return results
@@ -145,7 +166,7 @@ class OpenAICompatBackend:
     def health(self) -> dict[str, Any]:
         try:
             endpoint = get_llm_base_url().rstrip("/") + "/models"
-            response = self._session.get(
+            response = self._request_session().get(
                 endpoint,
                 headers={"Authorization": f"Bearer {get_llm_api_key() or 'local'}"},
                 timeout=(

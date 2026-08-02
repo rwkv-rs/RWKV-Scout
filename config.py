@@ -39,7 +39,6 @@ MODEL_CONTRACTS = {
     "local_7b": {
         "label": "RWKV 7.2B",
         "model": "rwkv7-g1h-7.2b-20260710-ctx10240",
-        "endpoint": "http://127.0.0.1:29572/v1",
         "api_key": "rwkv-skills",
         "context_length": 10240,
         "provider": "local_7b",
@@ -47,7 +46,6 @@ MODEL_CONTRACTS = {
     "local_13b": {
         "label": "RWKV 13.3B",
         "model": "rwkv7-g1i_preview4922-13.3b-20260720-ctx12288",
-        "endpoint": "http://172.31.89.209:29613/v1",
         "api_key": "rwkv-skills",
         "context_length": 12288,
         "provider": "local_13b",
@@ -55,7 +53,6 @@ MODEL_CONTRACTS = {
     "local_direct_1p5b": {
         "label": "RWKV 1.5B (Direct)",
         "model": "rwkv7-g1h-1.5b-20260710-ctx10240",
-        "endpoint": "",
         "api_key": "",
         "context_length": 10240,
         "provider": "local_direct_1p5b",
@@ -134,7 +131,11 @@ def get_direct_rwkv_config() -> dict:
 
 def get_llm_api_key() -> str:
     provider = get_llm_provider()
-    return override_llm_key.get() or API_KEYS.get(provider, "")
+    return (
+        override_llm_key.get()
+        or os.environ.get("RWKV_ECRA_LLM_API_KEY", "")
+        or API_KEYS.get(provider, "")
+    )
 
 
 def get_search_api_key(service: str) -> str:
@@ -182,17 +183,32 @@ def get_search_api_keys(service: str) -> list[str]:
 
 def get_llm_base_url() -> str:
     provider = get_llm_provider()
-    return override_llm_url.get() or LLM_ENDPOINTS.get(provider, {}).get("base_url", "")
+    return (
+        override_llm_url.get()
+        or os.environ.get("RWKV_ECRA_LLM_BASE_URL", "")
+        or LLM_ENDPOINTS.get(provider, {}).get("base_url", "")
+    )
 
 def get_llm_model() -> str:
     provider = get_llm_provider()
-    return LLM_ENDPOINTS.get(provider, {}).get("model", "")
+    return os.environ.get(
+        "RWKV_ECRA_LLM_MODEL",
+        LLM_ENDPOINTS.get(provider, {}).get("model", ""),
+    )
 
 
 def get_llm_context_length() -> int:
     provider = get_llm_provider()
     try:
-        return max(1, int(LLM_ENDPOINTS.get(provider, {}).get("context_length", 10240)))
+        return max(
+            1,
+            int(
+                os.environ.get(
+                    "RWKV_ECRA_LLM_CONTEXT_LENGTH",
+                    LLM_ENDPOINTS.get(provider, {}).get("context_length", 10240),
+                )
+            ),
+        )
     except (TypeError, ValueError):
         return 10240
 
@@ -214,7 +230,13 @@ def get_experiment_model_config(profile_key: str | None = None) -> dict:
 
 
 def validate_experiment_model_contract(profile_key: str | None = None) -> dict:
-    """Fail closed unless the selected model profile matches its pinned contract."""
+    """Validate model identity without pinning a deployment-specific endpoint.
+
+    The endpoint is deliberately read from ``config.json`` at runtime: the
+    same model may be reached through a local loopback, an SSH forward, or a
+    server address.  Treating that address as model identity made preflight
+    fail after a valid deployment switch.
+    """
     selected = profile_key or EXPERIMENT_CONFIG.get("model_profile") or DEFAULT_LLM_PROVIDER
     actual = get_experiment_model_config(selected)
     expected_contract = MODEL_CONTRACTS.get(selected, EXPERIMENT_MODEL_CONTRACT)
@@ -330,6 +352,26 @@ def get_model_connect_timeout_seconds() -> float:
 
 def get_model_read_timeout_seconds() -> float:
     return _bounded_seconds(RUNTIME_CONFIG.get("model_read_timeout_seconds", 180), 180.0, maximum=900.0)
+
+
+def get_model_retry_attempts() -> int:
+    """Maximum attempts for one model request, including the first attempt."""
+    try:
+        value = int(MODEL_RUNTIME_CONFIG.get("max_retry_attempts", 2))
+    except (TypeError, ValueError):
+        value = 2
+    return max(1, min(value, 4))
+
+
+def get_model_retry_delay_seconds() -> float:
+    return _bounded_seconds(MODEL_RUNTIME_CONFIG.get("retry_delay_seconds", 1), 1.0, maximum=30.0)
+
+
+def get_model_retry_timeout_errors() -> bool:
+    value = MODEL_RUNTIME_CONFIG.get("retry_timeout_errors", False)
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def get_network_timeout_seconds() -> float:

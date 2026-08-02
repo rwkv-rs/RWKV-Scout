@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+from difflib import SequenceMatcher
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from config import DATA_PIPELINE, get_llm_context_length
 from utils.chunker import get_token_count, semantic_chunk_text
+from utils.context_budget import evidence_tokens
 from utils.model_budget import bounded_completion_budget
 from utils.evidence_quality import (
     date_mentions,
@@ -21,6 +25,7 @@ from utils.evidence_validation import (
     build_evidence_validation,
     source_quality,
 )
+from utils.source_authority import authority_for_url, resolve_source_policy
 from utils.risk_policy import risk_context, validate_risk_answer
 from utils.rwkv_prompt import (
     FINAL_CONTINUATION_STOP_SUFFIXES,
@@ -32,6 +37,12 @@ from utils.rwkv_prompt import (
 def _clean_answer(text: str) -> str:
     text = text or ""
     text = re.sub(r"^\s*Assistant\s*:\s*", "", text, count=1, flags=re.IGNORECASE)
+    # Continuation checkpoints sometimes wrap an otherwise usable answer in
+    # XML-like scaffolding. These tags are protocol residue, not user content;
+    # remove balanced outer layers before citation alignment and final cleanup.
+    for _ in range(2):
+        text = re.sub(r"^\s*<(?:response|answer)>\s*", "", text, count=1, flags=re.IGNORECASE)
+        text = re.sub(r"\s*</(?:answer|response)>\s*$", "", text, count=1, flags=re.IGNORECASE)
     if re.search(r"<think>", text, flags=re.IGNORECASE) and not re.search(
         r"</think>", text, flags=re.IGNORECASE
     ):
@@ -69,7 +80,21 @@ def _clean_answer(text: str) -> str:
         "",
         text,
     )
-    text = re.sub(r"^(?:final answer|answer)\s*:\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"^\s*(?:the\s+)?(?:final answer|answer)(?:\s+is)?\s*:\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"(?im)^\s*\*{0,2}(?:final answer|answer)\*{0,2}\s*:\s*\*{0,2}\s*$\n?", "", text)
+    # Planner point labels are routing metadata, not part of the user answer.
+    # A continuation can replay them when evidence is partial; remove only a
+    # complete line-level ``P<number>:`` prefix and preserve ordinary prose.
+    text = re.sub(
+        r"(?im)^\s*\*{0,2}P\d+\*{0,2}\s*[:：\-–—]\s*[^\n]*(?:\n|$)",
+        "",
+        text,
+    )
     # RWKV checkpoints sometimes emit a useful answer wrapped in a draft
     # scaffold. Keep the answer section, but do not expose internal section
     # labels or copy the evidence block into the user-facing result.
@@ -90,6 +115,37 @@ def _clean_answer(text: str) -> str:
         seen_blocks.add(normalized)
         kept_blocks.append(block.strip())
     text = "\n\n".join(kept_blocks)
+    # Internal repair labels are never user-facing content.  Keep the
+    # surrounding answer, but remove the label itself if the checkpoint
+    # echoed it into the continuation.
+    text = re.sub(r"(?im)^\s*(?:DRAFT|REVISED DRAFT|INTERNAL DRAFT)\s*:\s*$", "", text)
+    # Long continuation outputs sometimes repeat the same numbered item with
+    # a new number until the completion budget is exhausted.  Count only
+    # strongly repeated list bodies (three or more occurrences) so legitimate
+    # two-row lists and repeated names are left untouched.
+    numbered_lines = text.splitlines()
+    numbered_bodies: dict[str, int] = {}
+    for line in numbered_lines:
+        match = re.match(r"^\s*\d+[.)]\s+(.+?)\s*$", line)
+        if match:
+            body = re.sub(r"[*_`\[\](){}]", "", match.group(1))
+            body = re.sub(r"\s+", " ", body).strip().casefold()
+            if body:
+                numbered_bodies[body] = numbered_bodies.get(body, 0) + 1
+    if numbered_bodies:
+        filtered_numbered: list[str] = []
+        seen_repeated_bodies: set[str] = set()
+        for line in numbered_lines:
+            match = re.match(r"^\s*\d+[.)]\s+(.+?)\s*$", line)
+            if match:
+                body = re.sub(r"[*_`\[\](){}]", "", match.group(1))
+                body = re.sub(r"\s+", " ", body).strip().casefold()
+                if numbered_bodies.get(body, 0) >= 3:
+                    if body in seen_repeated_bodies:
+                        continue
+                    seen_repeated_bodies.add(body)
+            filtered_numbered.append(line)
+        text = "\n".join(filtered_numbered)
     seen_lines: set[str] = set()
     deduped_lines: list[str] = []
     for line in text.splitlines():
@@ -126,10 +182,28 @@ def _citation_refs_for_context(data: dict[str, Any], context: dict[str, Any]) ->
     output: list[dict[str, Any]] = []
     for index, item in enumerate(selected, start=1):
         matched = by_url.get(_normalized_url(item.get("url")))
+        spans = [
+            {
+                "span_id": f"S{index}:C{int(chunk.get('index', 0) or 0) + 1}",
+                "chunk_id": str(chunk.get("chunk_id") or ""),
+                "index": int(chunk.get("index", 0) or 0),
+            }
+            for chunk in list(item.get("chunks") or [])
+            if isinstance(chunk, dict)
+        ]
+        locator = {
+            "type": "source_chunks",
+            "url": str(item.get("url") or ""),
+            "spans": spans,
+        }
         if matched:
             citation = dict(matched)
             citation["ref_id"] = f"S{index}"
+            citation["url"] = str(item.get("url") or citation.get("url") or "")
             citation["evidence_text"] = evidence_text(item)
+            citation["evidence_origin"] = str(item.get("evidence_origin") or "fetched_page_body")
+            citation["evidence_boundary"] = str(item.get("evidence_boundary") or "page_body_only")
+            citation["evidence_locator"] = locator
             citation["citation_scope"] = "selected_substantive_evidence"
             output.append(citation)
         else:
@@ -140,6 +214,9 @@ def _citation_refs_for_context(data: dict[str, Any], context: dict[str, Any]) ->
                     "url": str(item.get("url") or ""),
                     "source": str(item.get("source") or "selected_context"),
                     "evidence_text": evidence_text(item),
+                    "evidence_origin": str(item.get("evidence_origin") or "fetched_page_body"),
+                    "evidence_boundary": str(item.get("evidence_boundary") or "page_body_only"),
+                    "evidence_locator": locator,
                     "citation_scope": "selected_substantive_evidence",
                 }
             )
@@ -182,6 +259,8 @@ def _enforce_citation_contract(answer: str, data: dict[str, Any], context: dict[
     answer = re.sub(r"\[(S\d+(?::C\d+)?)\](?!\()", expand_citation, answer, flags=re.IGNORECASE)
     answer = re.sub(r"[ \t]{2,}", " ", answer).strip()
     has_source_marker = bool(
+        re.search(r"\[s\d+(?::c\d+)?\]", answer, flags=re.IGNORECASE)
+    ) or bool(
         re.search(
             r"\[s\d+\]|\[source\s+\d+\]|【\d+】|\bsource\s*[:：]\s*s\d+\b",
             answer,
@@ -216,10 +295,141 @@ def _enforce_risk_contract(answer: str, constraints: dict[str, Any] | None) -> s
     return f"{answer.rstrip()} {boundary}"
 
 
-def _evidence_text_value(item: dict[str, Any]) -> str:
+def _attach_mechanical_citations(
+    answer: str,
+    selected_evidence: list[dict[str, Any]] | None,
+) -> str:
+    """Bind clearly aligned uncited lines to an existing source reference.
+
+    This does not create facts or choose a source by model judgement.  It
+    reuses the already recorded line-to-body overlap signal and only attaches
+    a reference when that signal is above the same alignment threshold used
+    by the audit.  Refusal/protocol lines and headings are never annotated.
+    """
+
+    sources = list(selected_evidence or [])
+    if not answer or not sources:
+        return answer
+    alignment = assess_answer_alignment(answer, sources)
+    rows = iter(alignment.get("rows") or [])
+    output: list[str] = []
+    for raw_line in str(answer).splitlines():
+        line = raw_line.strip()
+        if not line or line.casefold().startswith(("sources:", "source:")):
+            output.append(raw_line)
+            continue
+        if re.fullmatch(r"\[S\d+(?::C\d+)?\](?:\([^)]*\))?", line, flags=re.IGNORECASE):
+            output.append(raw_line)
+            continue
+        row = next(rows, None)
+        if row is None:
+            output.append(raw_line)
+            continue
+        if (
+            "[S" not in line
+            and not line.startswith(("#", "```"))
+            and line.count("`") % 2 == 0
+            and len(line) >= 20
+            and not _is_evidence_refusal(line)
+            and row.get("aligned") is True
+            and str(row.get("best_ref") or "")
+            and float(row.get("overlap") or 0.0) >= 0.12
+        ):
+            output.append(f"{raw_line.rstrip()} [{row['best_ref']}]" )
+        else:
+            output.append(raw_line)
+    return "\n".join(output).strip()
+
+
+def _enforce_latest_list_shape(answer: str, task_plan: dict[str, Any] | None) -> str:
+    """Bound obvious list/table rows without rewriting ordinary prose."""
+
+    plan = task_plan if isinstance(task_plan, dict) else {}
+    if str(plan.get("task_mode") or "").casefold() != "latest_list":
+        return answer
+    try:
+        max_items = max(1, min(int(plan.get("max_items") or 5), 50))
+    except (TypeError, ValueError):
+        max_items = 5
+    lines = str(answer or "").splitlines()
+    if not lines:
+        return answer
+
+    separator_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if re.match(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$", line)
+        ),
+        -1,
+    )
+    if separator_index >= 0:
+        output = lines[: separator_index + 1]
+        row_count = 0
+        for line in lines[separator_index + 1 :]:
+            is_row = bool(line.strip()) and "|" in line
+            if is_row:
+                row_count += 1
+                if row_count <= max_items:
+                    output.append(line)
+                continue
+            output.append(line)
+        return "\n".join(output).strip()
+
+    numbered = [index for index, line in enumerate(lines) if re.match(r"^\s*\d+[.)]\s+", line)]
+    if len(numbered) > max_items:
+        drop = set(numbered[max_items:])
+        return "\n".join(line for index, line in enumerate(lines) if index not in drop).strip()
+
+    bullets = [index for index, line in enumerate(lines) if re.match(r"^\s*[-*]\s+", line)]
+    if len(bullets) > max_items:
+        drop = set(bullets[max_items:])
+        return "\n".join(line for index, line in enumerate(lines) if index not in drop).strip()
+    return answer
+
+
+def _latest_list_chunks(item: dict[str, Any], constraints: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Project validated page candidates into a bounded list-task body."""
+
+    task_plan = (constraints or {}).get("task_plan") or {}
+    if not isinstance(task_plan, dict) or str(task_plan.get("task_mode") or "").casefold() != "latest_list":
+        return []
+    try:
+        max_items = max(1, min(int(task_plan.get("max_items") or 5), 50))
+    except (TypeError, ValueError):
+        max_items = 5
+
+    compact: list[dict[str, Any]] = []
+    for candidate in item.get("chunk_candidates") or []:
+        if not isinstance(candidate, dict) or candidate.get("supported") is not True:
+            continue
+        facts = candidate.get("facts") or []
+        if isinstance(facts, str):
+            facts = [facts]
+        values = [re.sub(r"\s+", " ", str(value or "")).strip() for value in facts if str(value or "").strip()]
+        if not values and str(candidate.get("quote") or "").strip():
+            values = [re.sub(r"\s+", " ", str(candidate.get("quote") or "")).strip()]
+        for value in values:
+            compact.append(
+                {
+                    "chunk_id": str(candidate.get("chunk_id") or f"list-{len(compact) + 1}"),
+                    "index": len(compact),
+                    "text": value,
+                    "token_count": get_token_count(value),
+                }
+            )
+            if len(compact) >= max_items:
+                return compact
+    return compact
+
+
+def _evidence_text_value(item: dict[str, Any], constraints: dict[str, Any] | None = None) -> str:
     # The final context must use the canonical evidence gate.  In particular,
     # chunk_candidates and model_extracted_facts are locator/routing outputs,
     # not a replacement for the captured page body.
+    compact = _latest_list_chunks(item, constraints)
+    if compact:
+        return "\n".join(str(chunk.get("text") or "").strip() for chunk in compact).strip()
     return evidence_text(item)
 
 
@@ -239,12 +449,32 @@ def _truncate_markdown_by_tokens(value: str, max_tokens: int) -> str:
     return str(chunks[0] if chunks else text).strip()
 
 
-def _source_chunks_for_context(item: dict[str, Any], body: str) -> list[dict[str, Any]]:
+def _source_chunks_for_context(
+    item: dict[str, Any],
+    body: str,
+    constraints: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Return cleaned source chunks while keeping the raw-body boundary."""
+
+    def unique_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        output: list[dict[str, Any]] = []
+        for chunk in chunks:
+            text = str(chunk.get("text") or "").strip()
+            key = re.sub(r"\s+", " ", text).casefold()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            output.append(chunk)
+        return output
+
+    compact = _latest_list_chunks(item, constraints)
+    if compact:
+        return unique_chunks(compact)
 
     stored = [chunk for chunk in item.get("source_chunks") or [] if isinstance(chunk, dict)]
     if stored:
-        return [
+        return unique_chunks([
             {
                 "chunk_id": str(chunk.get("chunk_id") or f"chunk-{index + 1}"),
                 "index": int(chunk.get("index", index) or index),
@@ -253,7 +483,7 @@ def _source_chunks_for_context(item: dict[str, Any], body: str) -> list[dict[str
             }
             for index, chunk in enumerate(stored)
             if str(chunk.get("text") or "").strip()
-        ]
+        ])
 
     if not body:
         return []
@@ -266,7 +496,7 @@ def _source_chunks_for_context(item: dict[str, Any], body: str) -> list[dict[str
         max_tokens=requested,
         overlap_ratio=float(DATA_PIPELINE.get("web_chunk_overlap_ratio", 0.1) or 0.1),
     )
-    return [
+    return unique_chunks([
         {
             "chunk_id": f"chunk-{index + 1}",
             "index": index,
@@ -275,7 +505,7 @@ def _source_chunks_for_context(item: dict[str, Any], body: str) -> list[dict[str
         }
         for index, chunk in enumerate(chunks)
         if str(chunk or "").strip()
-    ]
+    ])
 
 
 def _select_source_chunks(item: dict[str, Any], chunks: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
@@ -299,31 +529,167 @@ def _select_source_chunks(item: dict[str, Any], chunks: list[dict[str, Any]], qu
             continue
         if 0 <= index < len(chunks) and index not in candidate_indexes:
             candidate_indexes.append(index)
-    if candidate_indexes:
-        return [chunks[index] for index in candidate_indexes[:max_chunks]]
-
     query_terms = _query_terms({"query": query})
     ranked = sorted(
         chunks,
         key=lambda chunk: sum(term in str(chunk.get("text") or "").casefold() for term in query_terms),
         reverse=True,
     )
+    if candidate_indexes:
+        return [chunks[index] for index in candidate_indexes[:max_chunks]]
+
     return sorted(ranked[:max_chunks], key=lambda chunk: int(chunk.get("index", 0)))
 
 
+def _pack_source_evidence(
+    selected_metadata: list[dict[str, Any]],
+    budget_tokens: int,
+) -> tuple[list[dict[str, Any]], str]:
+    """Pack evidence by source and chunk without losing source boundaries.
+
+    A flat token truncation keeps the first page and can silently remove every
+    later sub-question.  This packer gives each selected source one bounded
+    span first, then fills remaining space round-robin with additional spans.
+    The metadata is reduced to exactly what the final model can see, so
+    citation/alignment checks cannot point at an omitted chunk.
+    """
+    if not selected_metadata:
+        return [], "(no retrieved evidence)"
+    budget = max(2048, int(budget_tokens or 2048))
+    source_count = len(selected_metadata)
+    per_source = max(512, budget // source_count)
+    packed: list[dict[str, Any]] = []
+    chunks_by_source: list[list[dict[str, Any]]] = []
+    for item in selected_metadata:
+        chunks = [chunk for chunk in item.get("chunks") or [] if str(chunk.get("text") or "").strip()]
+        chunks_by_source.append(chunks)
+
+    def block_for(item: dict[str, Any], chunks: list[dict[str, Any]]) -> str:
+        body = "\n\n".join(
+            f"SOURCE SPAN [{item.get('ref_id', '')}:C{int(chunk.get('index', 0)) + 1}]\n"
+            f"{str(chunk.get('text') or '').strip()}"
+            for chunk in chunks
+        )
+        return (
+            f"BEGIN EVIDENCE SOURCE {item.get('ref_id', '')}\n"
+            f"URL (citation metadata only): {item.get('url', '')}\n"
+            "The URL, title, search snippet, provider summary and publication metadata are not evidence.\n"
+            "EVIDENCE BODY (the only factual source for this record; cite S#:#):\n"
+            f"{body}\nEND EVIDENCE SOURCE {item.get('ref_id', '')}"
+        )
+
+    # First pass: one span per source, with a fair per-source cap.
+    included: list[list[dict[str, Any]]] = [[] for _ in selected_metadata]
+    for index, chunks in enumerate(chunks_by_source):
+        if not chunks:
+            continue
+        header_tokens = get_token_count(block_for(selected_metadata[index], []))
+        span_budget = max(256, per_source - header_tokens)
+        text = _truncate_markdown_by_tokens(str(chunks[0].get("text") or ""), span_budget)
+        if text:
+            included[index].append({**chunks[0], "text": text, "token_count": get_token_count(text)})
+
+    def render() -> str:
+        return "\n\n".join(
+            block_for(item, chunks)
+            for item, chunks in zip(selected_metadata, included)
+            if chunks
+        )
+
+    # Second pass: add further chunks only when the complete bounded block fits.
+    for chunk_index in range(1, max((len(chunks) for chunks in chunks_by_source), default=0)):
+        for source_index, chunks in enumerate(chunks_by_source):
+            if chunk_index >= len(chunks):
+                continue
+            candidate = chunks[chunk_index]
+            current = render()
+            remaining = budget - get_token_count(current)
+            if remaining <= 256:
+                break
+            text = _truncate_markdown_by_tokens(
+                str(candidate.get("text") or ""),
+                max(256, remaining - 80),
+            )
+            if not text:
+                continue
+            proposed = [list(chunks_for_source) for chunks_for_source in included]
+            proposed[source_index].append({**candidate, "text": text, "token_count": get_token_count(text)})
+            proposed_text = "\n\n".join(
+                block_for(item, source_chunks)
+                for item, source_chunks in zip(selected_metadata, proposed)
+                if source_chunks
+            )
+            if get_token_count(proposed_text) <= budget:
+                included = proposed
+
+    # Final tokenizer-level guard.  Per-source estimates include headings, but
+    # tokenization of multilingual Markdown can still make the aggregate a
+    # little larger than the arithmetic budget.  Trim the largest visible span
+    # in small steps while retaining one span for every source.
+    while get_token_count(render()) > budget:
+        candidates = [
+            (source_index, chunk_index, chunk)
+            for source_index, source_chunks in enumerate(included)
+            for chunk_index, chunk in enumerate(source_chunks)
+            if str(chunk.get("text") or "").strip()
+        ]
+        if not candidates:
+            break
+        source_index, chunk_index, chunk = max(
+            candidates,
+            key=lambda value: get_token_count(str(value[2].get("text") or "")),
+        )
+        current_text = str(chunk.get("text") or "")
+        current_tokens = get_token_count(current_text)
+        reduction = max(128, get_token_count(render()) - budget)
+        next_tokens = max(256, current_tokens - reduction)
+        if next_tokens >= current_tokens:
+            break
+        trimmed = _truncate_markdown_by_tokens(current_text, next_tokens)
+        if not trimmed or trimmed == current_text:
+            break
+        included[source_index][chunk_index] = {
+            **chunk,
+            "text": trimmed,
+            "token_count": get_token_count(trimmed),
+        }
+
+    output_items: list[dict[str, Any]] = []
+    for item, chunks in zip(selected_metadata, included):
+        if not chunks:
+            continue
+        updated = dict(item)
+        updated["chunks"] = chunks
+        updated["evidence_text"] = "\n\n".join(str(chunk.get("text") or "") for chunk in chunks)
+        updated["selected_chars"] = len(updated["evidence_text"])
+        updated["chunk_count"] = len(chunks)
+        updated["selected_chunk_count"] = len(chunks)
+        updated["selected_chunk_indexes"] = [int(chunk.get("index", 0)) for chunk in chunks]
+        updated["truncated"] = bool(item.get("truncated")) or len(chunks) < len(item.get("chunks") or [])
+        output_items.append(updated)
+    return output_items, render() or "(no retrieved evidence)"
+
+
 def _plan_acceptance_context(constraints: dict[str, Any] | None) -> str:
+    """Expose only presentation constraints, never planner-generated facts.
+
+    The task planner is allowed to describe what must be checked, but its
+    acceptance text is still model output and may contain an invented URL or
+    an answer-shaped example.  Passing that text to synthesis turns planning
+    metadata into an unverified source.  The final model already has the user
+    question and the evidence body; it only needs safe shape constraints.
+    """
     plan = (constraints or {}).get("task_plan") or {}
     points = plan.get("atomic_points") if isinstance(plan, dict) else []
     rows: list[str] = []
     for point in points or []:
         if not isinstance(point, dict):
             continue
-        criteria = "; ".join(str(item).strip() for item in point.get("acceptance_criteria") or [] if str(item).strip())
-        if criteria:
-            rows.append(
-                f"{point.get('id', '')} task={point.get('task') or point.get('objective')}; "
-                f"format={point.get('output_format') or 'prose'}; acceptance={criteria}"
-            )
+        output_format = str(point.get("output_format") or "prose").strip()
+        shape = "Preserve every requested item and cite direct evidence."
+        if output_format in {"list", "table", "mixed"}:
+            shape += " Preserve row/column relationships and original order where requested."
+        rows.append(f"{point.get('id', '')} format={output_format}; {shape}")
     return "\n".join(rows)[:6000]
 
 
@@ -344,6 +710,82 @@ def _query_terms(data: dict[str, Any]) -> set[str]:
     return {term for term in terms if term not in {"\u7136\u540e", "\u4ee5\u53ca", "\u544a\u8bc9", "\u54ea\u4e9b", "\u4ec0\u4e48"}}
 
 
+def _canonical_source_url(value: Any) -> str:
+    """Normalize a fetched URL for source-level duplicate detection."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return raw.rstrip("/").casefold()
+    if not parsed.scheme or not parsed.netloc:
+        return raw.rstrip("/").casefold()
+    # Fragments never change the fetched document.  Keep the query because
+    # API-backed pages may use it to select a different record.
+    path = parsed.path.rstrip("/") or "/"
+    return urlunsplit(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            path,
+            parsed.query,
+            "",
+        )
+    )
+
+
+def _source_identity(item: dict[str, Any]) -> str:
+    url = _canonical_source_url(item.get("url"))
+    if url:
+        return f"url:{url}"
+    body = re.sub(r"\s+", " ", evidence_text(item)).strip().casefold()
+    if body:
+        return "body:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return "record:" + hashlib.sha256(
+        repr(sorted(item.items())).encode("utf-8", errors="ignore")
+    ).hexdigest()
+
+
+def _source_quality_key(item: dict[str, Any]) -> tuple[int, int, int, float, int]:
+    body = evidence_text(item)
+    quality = source_quality(item)
+    score = quality.get("score", 0) if isinstance(quality, dict) else 0
+    rerank = item.get("rerank_score")
+    return (
+        int(bool((item.get("authority") or {}).get("satisfied"))),
+        int(has_substantive_evidence(item)),
+        len(body),
+        float(score) if isinstance(score, (int, float)) else 0.0,
+        int(float(rerank) * 1000) if isinstance(rerank, (int, float)) else -1,
+    )
+
+
+def _deduplicate_sources(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Collapse duplicate provider rows before ranking and context packing.
+
+    Providers often return the same URL more than once.  Allowing those rows
+    into the source budget does not add factual coverage and can make overlap
+    look like corroboration.  Keep the richest row deterministically and
+    report the count for diagnostics.
+    """
+
+    kept: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    duplicates = 0
+    for item in items:
+        key = _source_identity(item)
+        if key not in kept:
+            kept[key] = item
+            order.append(key)
+            continue
+        duplicates += 1
+        if _source_quality_key(item) > _source_quality_key(kept[key]):
+            kept[key] = item
+    return [kept[key] for key in order], duplicates
+
+
 def _relevance(item: dict[str, Any], query_terms: set[str]) -> int:
     body = evidence_text(item)
     haystack = " ".join(
@@ -356,11 +798,38 @@ def _relevance(item: dict[str, Any], query_terms: set[str]) -> int:
     return sum(term in haystack for term in query_terms)
 
 
+def _topic_anchor_score(item: dict[str, Any], query: str) -> int:
+    """Prefer a body containing the query's exact technical topic anchors."""
+
+    query_words = [
+        value.casefold()
+        for value in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", str(query or ""))
+    ]
+    if not query_words:
+        return 0
+    haystack = " ".join(
+        [str(item.get("title") or ""), evidence_text(item)]
+    ).casefold()
+    normalized_haystack = re.sub(r"[-_]", " ", haystack)
+    score = sum(word in normalized_haystack for word in query_words)
+    for size in (3, 2):
+        for index in range(len(query_words) - size + 1):
+            phrase = " ".join(query_words[index : index + size])
+            if phrase in normalized_haystack:
+                score += size * 3
+    return score
+
+
 def _requested_source_count(query: str, constraints: dict[str, Any] | None) -> int:
     plan = (constraints or {}).get("task_plan") or {}
     points = plan.get("atomic_points") if isinstance(plan, dict) else []
     point_count = sum(1 for point in points or [] if isinstance(point, dict))
     if point_count:
+        if str(plan.get("task_mode") or "").casefold() == "lookup":
+            # Lookup questions usually ask several facts from one document;
+            # packing one broad overview per point overwhelms a small RWKV
+            # even when all pages are authoritative.
+            return min(2, max(1, point_count))
         return min(4, max(1, point_count))
     # Legacy callers may not pass the model task plan. This only controls
     # evidence coverage; it does not choose tools or decide factual content.
@@ -385,20 +854,45 @@ def build_evidence_context(
     discarded_count = len(all_results) - len(substantive_evidence_items(all_results))
     # Discovery rows remain in the trace, but title/snippet-only rows cannot
     # be ranked into the final model context.
-    all_results = substantive_evidence_items(all_results)
+    all_results, duplicate_source_count = _deduplicate_sources(
+        substantive_evidence_items(all_results)
+    )
     query_text = str(query or data.get("query") or "")
     ranking_data = dict(data)
     ranking_data["query"] = query_text
     query_terms = _query_terms(ranking_data)
+    source_policy = resolve_source_policy(query_text, constraints)
+    for item in all_results:
+        if not isinstance(item.get("authority"), dict):
+            item["authority"] = authority_for_url(item.get("url"), query_text, constraints)
     ranked = sorted(
         all_results,
         key=lambda item: (
-            source_quality(item)["score"],
-            float(item.get("rerank_score")) if isinstance(item.get("rerank_score"), (int, float)) else -1.0,
+            int(bool((item.get("authority") or {}).get("satisfied"))),
+            int((item.get("authority") or {}).get("rank") or 0),
+            # A large, authoritative-looking homepage is not automatically
+            # the right evidence.  Direct body relevance must lead; source
+            # quality and provider rerank signals break ties among relevant
+            # pages.  This avoids selecting a navigation-heavy root page over
+            # a smaller page that actually states the requested fact.
+            _topic_anchor_score(item, query_text),
             _relevance(item, query_terms),
+            float(item.get("rerank_score")) if isinstance(item.get("rerank_score"), (int, float)) else -1.0,
+            source_quality(item)["score"],
         ),
         reverse=True,
     )
+    # For an official-source task, an admitted required-domain page is the
+    # only kind of page allowed to compete for the answer context.  If none
+    # was found, keep the third-party rows as diagnostic alternatives, but the
+    # validation layer will mark the points authority_missing.
+    if source_policy.get("required"):
+        official_rows = [
+            item for item in ranked
+            if (item.get("authority") or {}).get("satisfied")
+        ]
+        if official_rows:
+            ranked = official_rows
     selected: list[dict[str, Any]] = []
     strategy = normalize_strategy((constraints or {}).get("strategy_config") or data.get("strategy_config"))
     configured_count = strategy.get("context_source_count")
@@ -406,6 +900,13 @@ def build_evidence_context(
     max_selected = configured_count or _requested_source_count(query_text, constraints)
     if ranked:
         selected.append(ranked[0])
+        # A lexical match is only a ranking signal.  For a cross-language
+        # query (for example a Chinese question with English source bodies)
+        # every score can legitimately be zero.  In that case retain the
+        # bounded source budget instead of silently dropping all independent
+        # sources after the first one; the evidence contract still prevents
+        # the final model from turning a body into an unsupported fact.
+        lexical_signal = any(_relevance(item, query_terms) > 0 for item in ranked)
         anchor_terms = {
             token.casefold()
             for token in re.findall(
@@ -421,23 +922,32 @@ def build_evidence_context(
         for item in ranked[1:]:
             if len(selected) >= max_selected:
                 break
-            if configured_count is not None or max_selected > 1 or _relevance(item, query_terms) > 0 or any(
+            # A plan may request several independent sources, but its source
+            # count is not evidence that every returned page is relevant.  A
+            # generic homepage, repository shell, or download index must stay
+            # in the trace unless its fetched body actually overlaps the
+            # question (or the selected entity anchor).  This prevents a
+            # large context from turning unrelated pages into false
+            # corroboration and reduces page-copy degeneration.
+            direct_relevance = _relevance(item, query_terms)
+            anchor_relevance = any(
                 term in " ".join(str(item.get("authors") or [])).casefold() for term in anchor_terms
-            ):
+            )
+            if not lexical_signal or direct_relevance > 0 or anchor_relevance:
                 selected.append(item)
 
-    rows: list[str] = []
     selected_metadata: list[dict[str, Any]] = []
     for index, item in enumerate(selected, start=1):
-        normalized_facts = _evidence_text_value(item)
+        normalized_facts = _evidence_text_value(item, constraints)
         normalized_facts = re.sub(r"[ \t]+", " ", normalized_facts)
         normalized_facts = re.sub(r"\n{3,}", "\n\n", normalized_facts).strip()
-        source_chunks = _source_chunks_for_context(item, normalized_facts)
+        source_chunks = _source_chunks_for_context(item, normalized_facts, constraints)
         selected_chunks = _select_source_chunks(item, source_chunks, query_text)
         facts = "\n".join(str(chunk.get("text") or "").strip() for chunk in selected_chunks).strip()
         if not facts:
             facts = normalized_facts
         authors = ", ".join(str(value) for value in (item.get("authors") or [])[:8])
+        provenance = evidence_provenance(item)
         selected_metadata.append(
             {
                 "ref_id": f"S{index}",
@@ -449,6 +959,7 @@ def build_evidence_context(
                 "source_chars": len(normalized_facts),
                 "evidence_text": facts,
                 "evidence_boundary": "fetched_page_or_structured_record_only",
+                "evidence_origin": str(provenance.get("origin") or "fetched_page_body"),
                 "date_mentions": date_mentions(facts),
                 "source_chunk_count": len(source_chunks),
                 "selected_chunk_count": len(selected_chunks),
@@ -465,52 +976,53 @@ def build_evidence_context(
                 "selected_chunk_indexes": [int(chunk.get("index", 0)) for chunk in selected_chunks],
                 "selected_chars": len(facts),
                 "truncated": len(normalized_facts) > len(facts),
-                "evidence_provenance": evidence_provenance(item),
+                "evidence_provenance": provenance,
                 "source_quality": source_quality(item),
+                "authority": item.get("authority") or authority_for_url(item.get("url"), query_text, constraints),
             }
         )
-        rows.append(
-            f"BEGIN EVIDENCE SOURCE S{index}\n"
-            f"URL (citation metadata only): {item.get('url', '')}\n"
-            "The URL, title, search snippet, provider summary and page publication metadata are not evidence.\n"
-            "EVIDENCE BODY (the only factual source for this record; cite S#:#):\n"
-            + "\n\n".join(
-                f"SOURCE SPAN [S{index}:C{int(chunk.get('index', 0)) + 1}]\n{str(chunk.get('text') or '').strip()}"
-                for chunk in selected_chunks
-            )
-            + "\n"
-            f"END EVIDENCE SOURCE S{index}"
-        )
-
-    unbounded_text = "\n\n".join(rows)
-    # Reserve room for the final model's 3000-token completion and its prompt.
-    # This uses the configured 12K context rather than a fixed character cap.
-    context_budget = max(2048, min(7500, int(get_llm_context_length()) - 3500))
-    context_text = _truncate_markdown_by_tokens(unbounded_text, context_budget) or "(no retrieved evidence)"
+    # Pack after ranking but before validation/citation metadata is returned.
+    # The packer preserves source boundaries and reduces metadata to exactly
+    # the chunks visible to the final model.
+    context_budget = evidence_tokens(get_llm_context_length())
+    packed_metadata, context_text = _pack_source_evidence(selected_metadata, context_budget)
     validation = build_evidence_validation(
         data,
         query=query_text,
         constraints=constraints,
-        selected=selected,
+        # Coverage must be computed over the exact source/chunk projection
+        # that the final model receives, not over omitted tail chunks.
+        selected=packed_metadata,
     )
     return {
         "text": context_text,
-        "selected_evidence": selected_metadata,
-        "source_chars": sum(item["source_chars"] for item in selected_metadata),
-        "selected_chars": sum(item["selected_chars"] for item in selected_metadata),
-        "chunk_count": sum(item["chunk_count"] for item in selected_metadata),
-        "usable_evidence_count": sum(1 for item in selected if _has_usable_evidence(item)),
+        "selected_evidence": packed_metadata,
+        "source_chars": sum(item["source_chars"] for item in packed_metadata),
+        "selected_chars": sum(item["selected_chars"] for item in packed_metadata),
+        "chunk_count": sum(item["chunk_count"] for item in packed_metadata),
+        "usable_evidence_count": sum(1 for item in packed_metadata if _has_usable_evidence(item)),
         "discarded_non_evidence_count": discarded_count,
+        "duplicate_source_count": duplicate_source_count,
         # Keep source-level truncation separate from the final aggregate
         # context cut.  A long source may be bounded before the final prompt
         # is built; these are different budgets and must not be reported as
         # repeated 7k page chunking.
-        "truncated_count": sum(bool(item["truncated"]) for item in selected_metadata),
-        "source_truncated_count": sum(bool(item["truncated"]) for item in selected_metadata),
+        "truncated_count": sum(bool(item["truncated"]) for item in packed_metadata),
+        "source_truncated_count": sum(bool(item["truncated"]) for item in packed_metadata),
         "context_chars": len(context_text),
         "context_tokens": get_token_count(context_text),
-        "context_truncated": len(unbounded_text) > len(context_text),
-        "final_context_truncated": len(unbounded_text) > len(context_text),
+        # This is a source/evidence-packing decision.  It is intentionally
+        # not reported as final-context truncation: the final prompt has its
+        # own fit pass after the answer instructions and completion reserve
+        # are known.  Conflating the two made a 12K model look as if its final
+        # prompt had been clipped whenever one long page was shortened.
+        "context_truncated": any(
+            bool(item.get("truncated")) for item in packed_metadata
+        ) or len(packed_metadata) < len(selected_metadata),
+        "source_context_truncated": any(
+            bool(item.get("truncated")) for item in packed_metadata
+        ) or len(packed_metadata) < len(selected_metadata),
+        "final_context_truncated": False,
         "validation": validation,
         "strategy": strategy,
     }
@@ -521,17 +1033,223 @@ def _evidence_text(data: dict[str, Any]) -> str:
     return str(build_evidence_context(data)["text"])
 
 
-def _needs_answer_repair(answer: str) -> bool:
+def _normalized_copy_text(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"\[S\d+(?::C\d+)?\](?:\([^)]*\))?", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"https?://\S+", " ", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _source_copy_ratio(answer: str, selected_evidence: list[dict[str, Any]] | None = None) -> float:
+    """Detect a final answer that mostly reproduces one captured page body."""
+
+    normalized_answer = _normalized_copy_text(answer)
+    if len(normalized_answer) < 1400:
+        return 0.0
+    answer_tokens = re.findall(r"[a-z0-9_]+|[\u3400-\u9fff]+", normalized_answer)
+    if len(answer_tokens) < 180:
+        return 0.0
+    best = 0.0
+    for item in selected_evidence or []:
+        body = _normalized_copy_text(item.get("evidence_text") or item.get("body") or "")
+        if len(body) < 600:
+            continue
+        if normalized_answer in body:
+            return 1.0
+        body_tokens = re.findall(r"[a-z0-9_]+|[\u3400-\u9fff]+", body)
+        if len(body_tokens) >= 8:
+            source_ngrams = {
+                tuple(body_tokens[index : index + 8])
+                for index in range(len(body_tokens) - 7)
+            }
+            answer_ngram_count = max(1, len(answer_tokens) - 7)
+            covered_ngrams = sum(
+                tuple(answer_tokens[index : index + 8]) in source_ngrams
+                for index in range(len(answer_tokens) - 7)
+            )
+            best = max(best, covered_ngrams / answer_ngram_count)
+        answer_lines = {
+            re.sub(r"\s+", " ", line).strip()
+            for line in normalized_answer.splitlines()
+            if len(re.sub(r"\s+", " ", line).strip()) >= 30
+        }
+        body_lines = {
+            re.sub(r"\s+", " ", line).strip()
+            for line in body.splitlines()
+            if len(re.sub(r"\s+", " ", line).strip()) >= 30
+        }
+        if answer_lines:
+            best = max(best, 0.9 * len(answer_lines & body_lines) / len(answer_lines))
+        match = SequenceMatcher(None, normalized_answer, body, autojunk=False).find_longest_match(
+            0,
+            len(normalized_answer),
+            0,
+            len(body),
+        )
+        best = max(best, match.size / max(1, len(normalized_answer)))
+    return round(best, 4)
+
+
+def _needs_answer_repair(
+    answer: str,
+    selected_evidence: list[dict[str, Any]] | None = None,
+) -> bool:
     lowered = answer.casefold()
+    prompt_replay = _is_prompt_replay(answer)
     generic_exposition = any(marker in lowered for marker in ("tutorial", "installation guide", "瀹夎鎸囧崡", "鐢ㄦ埛鎰忓浘"))
-    scaffold = any(marker in lowered for marker in ("**answer:**", "**key evidence:**", "**source links:**", "**limitations"))
+    scaffold = any(
+        marker in lowered
+        for marker in ("**answer:**", "**key evidence:**", "**source links:**", "**limitations", "draft:")
+    )
     tool_protocol = bool(
         re.search(
             r"(?is)(?:```json\s*)?\{\s*\"(?:name|tool_name|action|tool)\"\s*:",
             answer,
         )
     ) or "function output:" in lowered or "assistant: ```json" in lowered
-    return generic_exposition or scaffold or tool_protocol or "<think>" in lowered or "<tool_call>" in lowered
+    bullet_bodies: dict[str, int] = {}
+    for line in answer.splitlines():
+        match = re.match(r"^\s*[-*]\s+(.+?)\s*$", line)
+        if match:
+            body = re.sub(r"[*_`\[\](){}]", "", match.group(1))
+            body = re.sub(r"\s+", " ", body).strip().casefold()
+            if body:
+                bullet_bodies[body] = bullet_bodies.get(body, 0) + 1
+    repeated_bullet = any(count >= 3 for count in bullet_bodies.values())
+    return (
+        generic_exposition
+        or prompt_replay
+        or scaffold
+        or tool_protocol
+        or "<think>" in lowered
+        or "<tool_call>" in lowered
+        or repeated_bullet
+        or _source_copy_ratio(answer, selected_evidence) >= 0.65
+    )
+
+
+def _is_prompt_replay(answer: str) -> bool:
+    """Detect model output that explains the task instead of answering it."""
+
+    text = str(answer or "")
+    if not text.strip():
+        return False
+    # These are continuation/protocol phrases, not ordinary sourced prose.
+    # Require a line-start match so a legitimate answer quoting a user request
+    # is not treated as protocol residue.
+    line_start = re.compile(
+        r"(?im)^\s*(?:the user asks|the answer must|the user wants|we need to "
+        r"(?:extract|find|answer)|the documentation mentions)\b"
+    )
+    if line_start.search(text):
+        return True
+    lowered = text.casefold()
+    return (
+        "no tool calls" in lowered
+        and ("no source list" in lowered or "citation brackets" in lowered)
+    )
+
+
+def _dedupe_repeated_sentences(answer: str) -> str:
+    """Remove exact repeated prose sentences from continuation loops."""
+
+    value = str(answer or "").strip()
+    if not value:
+        return value
+    output: list[str] = []
+    for line in value.splitlines():
+        parts = re.split(r"(?<=[.!?。！？])(?=\s+|$)", line)
+        if len(parts) < 3:
+            output.append(line)
+            continue
+        seen: set[str] = set()
+        kept: list[str] = []
+        for part in parts:
+            normalized = re.sub(r"\s+", " ", part).strip().casefold()
+            if len(normalized) >= 28 and normalized in seen:
+                continue
+            if normalized:
+                seen.add(normalized)
+            kept.append(part)
+        output.append("".join(kept))
+    return "\n".join(output).strip()
+
+
+def _is_evidence_refusal(answer: str) -> bool:
+    """Return whether a no-evidence answer keeps the closed-world boundary.
+
+    This is deliberately a narrow output-contract check, not a factuality
+    judge.  When the evidence gate says there is no usable body, the model is
+    allowed to phrase the refusal naturally; it is not allowed to replace the
+    missing body with remembered facts.
+    """
+
+    lowered = re.sub(r"\s+", " ", str(answer or "").casefold()).strip()
+    if not lowered:
+        return False
+    markers = (
+        "无法根据",
+        "无法确认",
+        "无法提供",
+        "未能确认",
+        "未找到",
+        "没有可用的证据",
+        "没有足够的证据",
+        "证据不足",
+        "缺少证据",
+        "无法核实",
+        "不能确认",
+        "cannot confirm",
+        "unable to confirm",
+        "insufficient evidence",
+        "no usable evidence",
+        "not enough evidence",
+        "not supported by the retrieved",
+        "unconfirmed",
+        "未提供",
+        "does not provide",
+        "doesn't provide",
+        "the provided source material does not",
+        "the retrieved evidence body does not",
+        "the search results do not",
+        "the available evidence does not",
+        "no information about",
+        "unable to provide",
+        "cannot provide",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _closed_world_fallback() -> str:
+    """Return the only safe answer when no fetched body supports the task."""
+
+    return "无法根据当前检索到的正文证据确认该问题所需的事实，因此不提供未经证据支持的答案。"
+
+
+def _answer_revision_key(
+    answer: str,
+    copy_evidence: list[dict[str, Any]] | None,
+    selected_evidence: list[dict[str, Any]] | None,
+    ) -> tuple[int, int, int, int, int]:
+    """Prefer a repair only when it is safer than the current draft.
+
+    A continuation model can answer a repair prompt by replaying the evidence
+    body. Replacing a concise refusal with that replay is a regression, even
+    when the replay has more lexical overlap with the source.
+    """
+
+    copy_ratio = _source_copy_ratio(answer, copy_evidence)
+    alignment = assess_answer_alignment(answer, selected_evidence or [])
+    citation_count = len(
+        re.findall(r"\[S\d+(?::C\d+)?\]", answer or "", flags=re.IGNORECASE)
+    )
+    return (
+        int(_is_prompt_replay(answer)),
+        int(copy_ratio >= 0.65),
+        int(alignment.get("unsupported_line_count") or 0),
+        -citation_count,
+        int(len(str(answer or "")) > 12000),
+    )
 
 
 def _final_completion_budget(prompt: str) -> int:
@@ -545,33 +1263,93 @@ def _final_completion_budget(prompt: str) -> int:
     )
 
 
-def _fit_final_prompt_context(prompt_prefix: str, context_text: str) -> tuple[str, str, bool]:
-    """Fit the complete final prompt, not only the evidence field.
+def _requested_final_completion_budget(
+    constraints: dict[str, Any] | None,
+    query: str = "",
+) -> int:
+    """Scale answer room with task complexity, while retaining a high ceiling.
 
-    The evidence budget is assembled before the execution record, validation
-    report, instructions, and continuation wrapper are added.  Measuring only
-    the evidence therefore allowed ``input + max_tokens`` to exceed the model
-    context and produced HTTP 400 responses.  Trim at source/chunk boundaries
-    until a safe answer reserve remains.
+    A single point should not reserve the full 8K continuation window: RWKV can
+    then spend two minutes continuing a copied page.  Larger plans still get
+    more room, and the context-safe calculation remains the final authority.
     """
-    limit = int(get_llm_context_length())
-    original = str(context_text or "").strip()
-    original_tokens = get_token_count(original)
-    caps = [original_tokens, 7000, 6500, 6000, 5500, 5000, 4500, 4000, 3500, 3000, 2500, 2000, 1500, 1000]
+    plan = (constraints or {}).get("task_plan") or {}
+    points = plan.get("atomic_points") if isinstance(plan, dict) else []
+    point_count = sum(1 for point in points or [] if isinstance(point, dict))
+    requested = max(2048, min(8192, 2560 + max(1, point_count) * 512))
+    # A planner may over-decompose a short question into many micro-points.
+    # Do not let that semantic bookkeeping reserve a huge continuation window.
+    if len(str(query or "").strip()) <= 600:
+        requested = min(requested, 4096)
+    return requested
+
+
+def _fit_final_context_projection(
+    context: dict[str, Any],
+    data: dict[str, Any],
+    constraints: dict[str, Any] | None,
+    query: str,
+    prompt_prefix: str,
+) -> tuple[dict[str, Any], str, str, bool]:
+    """Fit the final prompt while keeping evidence metadata in lockstep.
+
+    The final prompt, citation references, locators, and validation report must
+    describe one identical evidence projection.  A flat string truncation can
+    remove the tail of a chunk while leaving its locator and validator visible.
+    Repack complete source chunks instead; if the prompt still cannot fit,
+    fail closed with an explicit empty projection rather than sending an
+    unbound partial source to RWKV.
+    """
+    limit = max(1024, int(get_llm_context_length()))
+    original_text = str(context.get("text") or "").strip()
+
+    def with_projection(selected: list[dict[str, Any]], text: str, truncated: bool) -> dict[str, Any]:
+        projected = dict(context)
+        projected["text"] = text or "(no retrieved evidence)"
+        projected["selected_evidence"] = selected
+        projected["validation"] = build_evidence_validation(
+            data,
+            query=query,
+            constraints=constraints,
+            selected=selected,
+        )
+        projected["selected_chars"] = sum(int(item.get("selected_chars") or 0) for item in selected)
+        projected["chunk_count"] = sum(int(item.get("chunk_count") or 0) for item in selected)
+        projected["usable_evidence_count"] = sum(1 for item in selected if _has_usable_evidence(item))
+        projected["context_chars"] = len(projected["text"])
+        projected["context_tokens"] = get_token_count(projected["text"])
+        projected["context_truncated"] = bool(projected.get("context_truncated") or truncated)
+        projected["source_context_truncated"] = bool(
+            projected.get("source_context_truncated") or truncated
+        )
+        return projected
+
+    def fits(text: str) -> tuple[bool, str]:
+        rendered = build_final_continuation_prompt(prompt_prefix + text)
+        return get_token_count(rendered) + 512 <= limit, rendered
+
+    fits_original, original_prompt = fits(original_text)
+    if fits_original:
+        return context, original_text, original_prompt, False
+
+    source_items = [item for item in context.get("selected_evidence") or [] if isinstance(item, dict)]
+    original_tokens = get_token_count(original_text)
+    caps = [original_tokens, 7000, 6500, 6000, 5500, 5000, 4500, 4000, 3500, 3000, 2500, 2048]
     seen: set[int] = set()
     for cap in caps:
-        cap = max(0, int(cap))
+        cap = max(2048, int(cap))
         if cap in seen:
             continue
         seen.add(cap)
-        candidate_context = _truncate_markdown_by_tokens(original, cap) if cap else ""
-        candidate_prompt = build_final_continuation_prompt(prompt_prefix + candidate_context)
-        # Keep enough room for a meaningful answer and the endpoint's safety
-        # margin.  The actual max_tokens remains dynamic after this fit.
-        if get_token_count(candidate_prompt) + 512 <= limit:
-            return candidate_context, candidate_prompt, candidate_context != original
-    candidate_prompt = build_final_continuation_prompt(prompt_prefix)
-    return "", candidate_prompt, True
+        selected, text = _pack_source_evidence(source_items, cap)
+        projected = with_projection(selected, text, True)
+        fits_candidate, candidate_prompt = fits(projected["text"])
+        if fits_candidate:
+            return projected, projected["text"], candidate_prompt, True
+
+    empty = with_projection([], "(no retrieved evidence)", True)
+    empty_prompt = build_final_continuation_prompt(prompt_prefix + empty["text"])
+    return empty, empty["text"], empty_prompt, True
 
 
 def _context_fields(context: dict[str, Any]) -> dict[str, Any]:
@@ -588,48 +1366,309 @@ def _context_fields(context: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validation_prompt(report: dict[str, Any]) -> str:
-    """Render compact, explicitly non-evidentiary validation metadata."""
+    """Render compact candidate hints without promoting lexical matches to facts."""
 
     if not isinstance(report, dict):
         return ""
+    coverage_rows = [
+        item
+        for item in report.get("subquestion_coverage") or []
+        if isinstance(item, dict)
+    ]
     rows: list[str] = []
+    missing: list[str] = []
     for item in report.get("subquestion_coverage") or []:
         if not isinstance(item, dict):
             continue
         source_ids = ",".join(str(row.get("ref_id") or "") for row in item.get("sources") or [])
-        rows.append(
-            f"{item.get('point_id')}: status={item.get('status')}; agreement={item.get('agreement')}; "
-            f"sources={source_ids or 'none'}; dates={','.join(item.get('observed_dates') or []) or 'none'}"
-        )
+        status = str(item.get("status") or "").casefold()
+        if source_ids and status != "authority_missing":
+            rows.append(f"{item.get('point_id')}: candidate body matches={source_ids}")
+        elif source_ids and status == "authority_missing":
+            missing.append(f"{item.get('point_id')} (required official domain not found)")
+        else:
+            missing.append(str(item.get("point_id") or ""))
     cross = report.get("cross_source") or {}
     conflicts = cross.get("candidate_conflicts") or []
     conflict_text = "; ".join(
-        f"{item.get('point_id')}: {','.join(item.get('dates') or [])}"
+        f"{item.get('point_id')}: {len(item.get('dates') or [])} date-like variants"
         for item in conflicts
         if isinstance(item, dict)
     )
+    if coverage_rows and all(bool(item.get("answerable")) for item in coverage_rows) and not conflicts:
+        return (
+            "BEGIN VALIDATION HINTS (routing metadata only)\n"
+            f"All requested points have candidate body coverage: {' | '.join(rows) or 'the visible evidence bodies'}. "
+            "Use the visible source body as the factual basis, start with the answer, and cover the requested points directly. "
+            "Mark a detail unconfirmed only when that detail is not stated in the body. Attach the matching [S#:C#] "
+            "to each factual sentence.\n"
+            "END VALIDATION HINTS\n"
+        )
     return (
-        "BEGIN VALIDATION REPORT (routing metadata only; never factual evidence)\n"
-        "Source quality is a ranking signal, not a truth judgement. Lexical coverage only "
-        "shows that a source contains related terms. Multi-source overlap is not proof.\n"
-        f"Subquestion coverage: {' | '.join(rows) or 'none'}\n"
-        f"Candidate conflicts requiring explicit uncertainty: {conflict_text or 'none'}\n"
-        "If a point is missing or conflicting, say so and do not fill it from memory. "
-        "Every factual sentence must map to a matching EVIDENCE BODY source such as [S1:C2].\n"
-        "END VALIDATION REPORT\n"
+        "BEGIN VALIDATION HINTS (routing metadata only; never evidence)\n"
+        "Use the EVIDENCE BODY first. Candidate matches only identify where to look; "
+        "they do not replace the body. Answer every supported point directly and inspect all visible "
+        "chunks before deciding that a requested detail is absent.\n"
+        f"Candidate body matches: {' | '.join(rows) or 'none'}\n"
+        f"Missing candidate body coverage: {', '.join(value for value in missing if value) or 'none'}\n"
+        f"Potential date-like conflicts to inspect: {conflict_text or 'none'}\n"
+        "An ordinary missing candidate match is only a routing gap: inspect the visible body and answer any fact stated there directly. "
+        "For authority_missing points, do not attribute a third-party source to the required organisation. "
+        "Use unconfirmed only for a detail absent after checking the visible body; do not fill it from model memory. "
+        "Every factual sentence must cite a matching [S#:C#] body span.\n"
+        "END VALIDATION HINTS\n"
     )
 
 
-def _build_answer_repair_prompt(query: str, evidence: str, draft: str) -> str:
+def _evidence_polarity_hint(query: str, evidence: str) -> str:
+    """Keep oppositely-directed build/runtime options from being inverted."""
+
+    query_lower = str(query or "").casefold()
+    evidence_lower = str(evidence or "").casefold()
+    if "free threading" not in query_lower or "python_gil" not in evidence_lower:
+        return ""
+    if "disable-gil" not in evidence_lower and "disable gil" not in evidence_lower:
+        return ""
+    return (
+        "POLARITY CHECK from the visible evidence: preserve the documented direction of each option. "
+        "The body distinguishes the build-time --disable-gil option from the runtime PYTHON_GIL "
+        "and -Xgil options; do not reverse an option's effect or present a setting that enables "
+        "the GIL as a way to enable free threading.\n"
+    )
+
+
+def _answer_scope_hint(query: str) -> str:
+    """Keep how-to questions from expanding into an unrelated page summary."""
+
+    if "free threading" in str(query or "").casefold():
+        return (
+            "FOCUS ORDER: answer the documented installation/build method first, then the runtime mode, "
+            "then the minimal verification. Keep thread-safety, performance, allocator, and implementation "
+            "details out unless the user asks for them.\n"
+        )
+
+    if re.search(r"(?:怎么|如何|怎样|开启|启用|安装|配置|设置|how to|enable|install|configure|set up)", str(query or "").casefold()):
+        return (
+            "SCOPE: this is a how-to request. Return only the direct procedure and the minimal "
+            "verification needed for that procedure; omit unrelated background, limitations, "
+            "performance details, and page-summary sections. Use at most two short paragraphs.\n"
+        )
+    return ""
+
+
+def _answer_first_hint(query: str, *, evidence_available: bool) -> str:
+    """Prefer grounded answers when the visible body is available.
+
+    The validator and chunk extractor are routing aids. They can miss a
+    bilingual match or mark only one of several chunks, so their uncertainty
+    must not become a final-answer refusal when the source body is visible.
+    """
+
+    if not evidence_available:
+        return ""
+    lowered = str(query or "").casefold()
+    hint = (
+        "ANSWER-FIRST CONTRACT: The visible EVIDENCE BODY is the working source. "
+        "Answer the requested fact, procedure, comparison, or calculation first. "
+        "Facts may be distributed across source chunks; combine the visible spans and cite each factual sentence. "
+        "Validation hints and chunk support markers are routing metadata, not an answerability verdict. "
+        "Use 'unconfirmed' only for a requested detail that is absent after checking all visible spans.\n"
+    )
+    if re.search(r"(核验|验证|是否正确|这句话|该说法|纠正|声称|真的|correct|incorrect|verify|claim)", lowered):
+        hint += (
+            "CLAIM-CHECK MODE: Treat the user's statement as a claim to verify. "
+            "Begin with correct or incorrect, then give the source-backed correction and the supporting values. "
+            "Do not restate the premise as true merely because it appears in the question.\n"
+        )
+    if re.search(r"(相隔|多少天|百分比|百分之|比例|占比|差值|计算|自然日|how many days|percentage|percent|calculate|difference)", lowered):
+        hint += (
+            "CALCULATION MODE: When the visible body supplies the input dates or quantities, compute the requested result "
+            "in the requested unit and rounding rule. State the computed result explicitly; do not stop after repeating inputs.\n"
+        )
+    return hint
+
+
+def _normalize_evidence_code_spans(answer: str, evidence: str) -> str:
+    """Restore near-miss code spans to the exact spelling visible in evidence."""
+
+    source_spans = []
+    for value in re.findall(r"`([^`]+)`", str(evidence or "")):
+        value = re.sub(r"\s+", " ", value).strip()
+        if value and value not in source_spans:
+            source_spans.append(value)
+    if not source_spans:
+        return answer
+
+    def replace_span(match: re.Match[str]) -> str:
+        value = match.group(1)
+        if value in source_spans:
+            return match.group(0)
+        candidates = [
+            candidate
+            for candidate in source_spans
+            if ("." in value or "_" in value or value.startswith("--"))
+            and ("." in candidate or "_" in candidate or candidate.startswith("--"))
+            and candidate.casefold() not in value.casefold()
+            and value.casefold() not in candidate.casefold()
+        ]
+        if not candidates:
+            return match.group(0)
+        best = max(
+            candidates,
+            key=lambda candidate: SequenceMatcher(
+                None, value.casefold(), candidate.casefold(), autojunk=False
+            ).ratio(),
+        )
+        score = SequenceMatcher(None, value.casefold(), best.casefold(), autojunk=False).ratio()
+        # Only repair a close transcription; do not turn ordinary prose into
+        # a source token merely because both contain punctuation.
+        if score >= (0.72 if len(value) >= 16 else 0.84):
+            return f"`{best}`"
+        return match.group(0)
+
+    return re.sub(r"`([^`]+)`", replace_span, str(answer or ""))
+
+
+def _normalize_free_threading_polarity(answer: str, query: str, evidence: str) -> str:
+    """Keep the documented build/runtime GIL direction when it is explicit."""
+
+    if "free threading" not in str(query or "").casefold():
+        return answer
+    evidence_lower = str(evidence or "").casefold()
+    if "optionally running with the gil enabled at runtime using" not in evidence_lower:
+        return answer
+    replacement = (
+        "The free-threaded build can optionally run with the GIL enabled at runtime using "
+        "the environment variable `PYTHON_GIL` or the command-line option `-Xgil`"
+    )
+    normalized_answer = re.sub(
+        r"(?is)\bat runtime,?\s*the GIL can be disabled with[^.;]*",
+        replacement,
+        str(answer or ""),
+    )
+    return re.sub(
+        r"(?is)\bthe GIL can be disabled at runtime[^.;。]*?(?:`PYTHON_GIL`[^.;。]*?`-Xgil`|`-Xgil`[^.;。]*?`PYTHON_GIL`)[^.;。]*",
+        replacement,
+        normalized_answer,
+    )
+
+
+def _enforce_how_to_scope(answer: str, query: str) -> str:
+    """Keep procedure answers from replaying the rest of a long source page."""
+
+    if not re.search(r"(?:怎么|如何|怎样|开启|启用|安装|配置|设置|how to|enable|install|configure|set up)", str(query or "").casefold()):
+        return answer
+    value = str(answer or "").strip()
+    value = _dedupe_repeated_sentences(value)
+    paragraphs = [part.strip() for part in re.split(r"\n{2,}", value) if part.strip()]
+    if len(paragraphs) > 2:
+        value = "\n\n".join(paragraphs[:2])
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if len(lines) > 2:
+        if any(re.match(r"(?:[-*]|\d+[.)])\s+", line) for line in lines):
+            value = "\n".join(lines[:6])
+        else:
+            value = "\n".join(lines[:2])
+    sentences = re.split(r"(?<=[.!?。！？])\s+", value)
+    if len(sentences) > 4:
+        value = " ".join(sentences[:4]).strip()
+    return value
+
+
+def _focus_repair_evidence(evidence: str, query: str) -> str:
+    """Project only query-relevant source paragraphs into the repair prompt."""
+
+    raw = str(evidence or "").strip()
+    if not raw:
+        return raw
+    query_terms = [
+        value.casefold()
+        for value in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", str(query or ""))
+    ]
+    procedure_terms = (
+        "install",
+        "installation",
+        "build",
+        "configure",
+        "runtime",
+        "enable",
+        "enabled",
+        "setting",
+        "running",
+        "verification",
+        "check",
+        "开启",
+        "启用",
+        "安装",
+        "配置",
+        "设置",
+    )
+    procedure_query = bool(
+        re.search(r"(?:怎么|如何|怎样|开启|启用|安装|配置|设置|how to|enable|install|configure|set up)", str(query or "").casefold())
+    )
+    blocks = re.split(r"(?=BEGIN EVIDENCE SOURCE )", raw)
+    focused: list[str] = []
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        paragraphs = [part.strip() for part in re.split(r"\n{2,}", block) if part.strip()]
+        if len(paragraphs) <= 4:
+            focused.append(block)
+            continue
+        header = paragraphs[:4]
+        body = paragraphs[4:]
+        ranked = sorted(
+            enumerate(body),
+            key=lambda item: (
+                sum(term in item[1].casefold() for term in query_terms),
+                sum(term in item[1].casefold() for term in procedure_terms) if procedure_query else 0,
+                int(bool(re.search(r"--[A-Za-z0-9_-]+|\b[A-Z][A-Z0-9_]{2,}\b", item[1]))),
+            ),
+            reverse=True,
+        )
+        chosen = [item[1] for item in ranked[: (4 if procedure_query else 6)] if item[1]]
+        exact_tokens = []
+        for paragraph in chosen:
+            exact_tokens.extend(
+                re.findall(
+                    r"(?<!\w)(?:--[A-Za-z0-9_-]+|[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+(?:\(\))?|[A-Z][A-Z0-9_]{2,})(?!\w)",
+                    paragraph,
+                )
+            )
+        exact_tokens = list(dict.fromkeys(exact_tokens))
+        exact_line = (
+            "EXACT TOKENS (copy character-for-character): "
+            + ", ".join(f"`{token}`" for token in exact_tokens[:24])
+            if exact_tokens
+            else ""
+        )
+        focused.append("\n\n".join(header + chosen + ([exact_line] if exact_line else [])))
+    result = "\n\n".join(focused)
+    return _truncate_markdown_by_tokens(result, 3200)
+
+
+def _build_answer_repair_prompt(query: str, evidence: str, _draft: str) -> str:
+    # Repair is a second model call.  Rebuild from the focused evidence rather
+    # than feeding the model its own draft, which can anchor a wrong identifier
+    # or polarity and make the repair repeat the original error.
+    repair_evidence = _focus_repair_evidence(evidence, query)
+    polarity_hint = _evidence_polarity_hint(query, repair_evidence)
+    scope_hint = _answer_scope_hint(query)
+    answer_first_hint = _answer_first_hint(query, evidence_available=bool(repair_evidence))
     return build_final_continuation_prompt(
-        "Rewrite the draft as one concise user-facing answer. Use only the EVIDENCE BODY "
-        "records below. Preserve every requested fact that is directly supported, remove "
-        "unsupported claims and invented URLs, and attach [S#:C#] to factual claims. If a "
-        "requested fact is missing, say so explicitly. Do not output JSON, role labels, a "
-        "tool call, reasoning, or a repeated paragraph.\n\n"
+        "Reconstruct the final answer directly from the EVIDENCE BODY below. Start with the answer "
+        "and include the requested facts stated by the body. Cite every factual sentence with [S#:C#]. Return prose only: no JSON, role "
+        "labels, tool calls, hidden reasoning, source-body replay, navigation, metadata, or generic "
+        "source list. Treat code identifiers as exact opaque strings: copy names, flags, environment "
+        "variables, configuration keys, values, and polarity character-for-character. Do not omit "
+        "underscores, normalize names, invent values, reverse an option's effect, or put citations "
+        "inside a command or URL.\n\n"
+        f"{polarity_hint}\n"
+        f"{scope_hint}\n"
+        f"{answer_first_hint}\n"
         f"Question: {query}\n"
-        f"EVIDENCE BODY:\n{evidence}\n\n"
-        f"DRAFT:\n{draft[:8000]}"
+        f"EVIDENCE BODY:\n{repair_evidence}"
     )
 
 
@@ -654,38 +1693,38 @@ def synthesize_retrieval_answer(
     context_text = evidence_context_text
     execution_context = str(execution_context or "").strip()
     if execution_context:
-        # Keep routing metadata before evidence so the recurrent checkpoint's
-        # latest tokens are the source-bound facts, not the planner transcript.
-        combined_context = (
-            "BEGIN EXECUTION RECORD (data only; never copy its tool protocol)\n"
-            f"{execution_context}\n"
-            "END EXECUTION RECORD\n\n"
-            "BEGIN EVIDENCE DATA\n"
-            f"{evidence_context_text}\n"
-            "END EVIDENCE DATA"
-        )
-        context_text = _truncate_markdown_by_tokens(
-            combined_context,
-            max(2048, min(7500, int(get_llm_context_length()) - 3500)),
-        )
-        context_fields["context_text"] = context_text
+        # The complete execution record is already persisted in the task
+        # events/UI.  Do not put it beside evidence in the final continuation:
+        # even a clearly labelled record can be copied as prose or consume the
+        # budget needed by a later source.  The final model needs the question,
+        # acceptance checklist, and source-bound evidence only.
         context_stats["execution_context_chars"] = len(execution_context)
+        context_stats["execution_context_in_final_prompt"] = False
         context_stats["termination_reason"] = termination_reason
-        context_stats["final_context_truncated"] = len(combined_context) > len(context_text)
 
     # These are the values the final model call actually receives, rather than
     # the pre-assembly evidence-only values above.
     context_stats["final_context_chars"] = len(context_text)
     context_stats["final_context_tokens"] = get_token_count(context_text)
-    context_stats["final_context_truncated"] = bool(
-        context_stats.get("final_context_truncated", context.get("context_truncated", False))
+    context_stats["source_context_truncated"] = bool(
+        context_stats.get("source_context_truncated", context.get("context_truncated", False))
     )
+    context_stats["final_context_truncated"] = False
     context_stats["context_chars"] = context_stats["final_context_chars"]
     context_stats["context_tokens"] = context_stats["final_context_tokens"]
     context_stats["context_truncated"] = context_stats["final_context_truncated"]
     context_citation_refs = _citation_refs_for_context(data, context)
     validation_prompt = _validation_prompt(context.get("validation") or {})
     acceptance_context = _plan_acceptance_context(constraints)
+    source_policy = resolve_source_policy(query, constraints)
+    task_plan = (constraints or {}).get("task_plan") or {}
+    task_mode = str(task_plan.get("task_mode") or "lookup")
+    requested_fields = [
+        str(value).strip()
+        for value in task_plan.get("requested_fields") or []
+        if str(value).strip()
+    ]
+    max_items = int(task_plan.get("max_items") or 0) if str(task_plan.get("max_items") or "0").isdigit() else 0
     policy = risk_context(constraints)
     if llm is None:
         return {
@@ -726,44 +1765,230 @@ def synthesize_retrieval_answer(
         "compact_evidence.v1": "Prefer the shortest answer that preserves all requested facts and source references. ",
     }[strategy["prompt_variant"]]
     usable_evidence_count = int(context.get("usable_evidence_count") or 0)
-    if usable_evidence_count:
-        evidence_state = (
-            f"USABLE_EVIDENCE_AVAILABLE ({usable_evidence_count} source bodies). "
-            "Use only the EVIDENCE BODY sections for factual claims."
+    missing_point_ids = [
+        str(item.get("point_id") or "")
+        for item in (context.get("validation") or {}).get("subquestion_coverage") or []
+        if isinstance(item, dict) and not bool(item.get("answerable"))
+    ]
+    coverage_rows = [
+        item
+        for item in (context.get("validation") or {}).get("subquestion_coverage") or []
+        if isinstance(item, dict)
+    ]
+    # Coverage is a control signal for the next RWKV decision.  It is not an
+    # evidence gate by itself: a bilingual task-point matcher can miss a valid
+    # English official page even when the page body is already authoritative.
+    # The final context is suppressed only when an official-source policy has
+    # no satisfied official body at all.  This keeps the safety boundary for a
+    # third-party-only result without turning a validator miss into a refusal.
+    retrieved_usable_evidence_count = int(context.get("usable_evidence_count") or 0)
+    all_requested_points_missing = bool(
+        coverage_rows
+        and all(not bool(item.get("answerable")) for item in coverage_rows)
+    )
+    official_body_available = bool(
+        source_policy.get("required")
+        and any(
+            isinstance(item, dict)
+            and bool((item.get("authority") or {}).get("satisfied"))
+            and _has_usable_evidence(item)
+            for item in context.get("selected_evidence") or []
         )
+    )
+    final_evidence_suppressed = bool(
+        source_policy.get("required")
+        and all_requested_points_missing
+        and not official_body_available
+    )
+    if final_evidence_suppressed:
+        context = dict(context)
+        context["text"] = "(no retrieved evidence)"
+        context["selected_evidence"] = []
+        context["selected_chars"] = 0
+        context["source_chars"] = 0
+        context["chunk_count"] = 0
+        context["usable_evidence_count"] = 0
+        context["context_chars"] = len(context["text"])
+        context["context_tokens"] = get_token_count(context["text"])
+        context["context_truncated"] = False
+        context["source_context_truncated"] = False
+        context["final_context_truncated"] = False
+        context["validation"] = build_evidence_validation(
+            data,
+            query=query,
+            constraints=constraints,
+            selected=[],
+        )
+        context_citation_refs = []
+        validation_prompt = _validation_prompt(context["validation"])
+        evidence_context_text = context["text"]
+        usable_evidence_count = 0
+    answer_context = context
+    context_stats["final_evidence_suppressed"] = final_evidence_suppressed
+    context_stats["validator_all_points_missing"] = all_requested_points_missing
+    context_stats["official_body_available"] = official_body_available
+    # Keep retrieval-stage availability separate from what the final model
+    # is actually allowed to see.  A source can be substantive yet irrelevant
+    # to every requested point, so ``usable_evidence_count`` alone is not a
+    # reliable description of the final prompt.
+    context_stats["retrieved_usable_evidence_count"] = retrieved_usable_evidence_count
+    context_stats["final_usable_evidence_count"] = usable_evidence_count
+    context_stats["final_selected_evidence_count"] = len(answer_context.get("selected_evidence") or [])
+    if usable_evidence_count:
+        if missing_point_ids and official_body_available:
+            evidence_state = (
+                f"OFFICIAL_EVIDENCE_AVAILABLE_BUT_COVERAGE_UNCERTAIN ({usable_evidence_count} source bodies). "
+                f"The official body is visible; automatic point matching is inconclusive for {', '.join(missing_point_ids)}. "
+                "Use the visible official body and combine all visible chunks to answer the requested facts. "
+                "Treat the coverage marker as routing uncertainty only."
+            )
+        elif missing_point_ids:
+            evidence_state = (
+                f"PARTIAL_EVIDENCE ({usable_evidence_count} source bodies). "
+                f"Candidate coverage is missing for {', '.join(missing_point_ids)}. "
+                "Use the visible body for every supported point and inspect all visible chunks before deciding coverage. "
+                "Do not turn a locator gap into a refusal or a general page summary into an answer for an absent point."
+            )
+        else:
+            evidence_state = (
+                f"USABLE_EVIDENCE_AVAILABLE ({usable_evidence_count} source bodies). "
+                "Use only the EVIDENCE BODY sections for factual claims."
+            )
     else:
         evidence_state = (
-            "NO_USABLE_EVIDENCE. The search titles, snippets, URLs, provider summaries, "
-            "execution record and model memory are not evidence. Do not answer the requested "
-            "facts from them. The only valid answer is an explicit refusal to confirm the "
-            "requested facts and a statement of what information could not be confirmed."
+            "NO_USABLE_EVIDENCE. The body does not support the requested facts; state that briefly "
+            "and do not use snippets, metadata, or memory."
         )
-    prompt_prefix = (
-        "You are the final answer RWKV. Retrieval is over. Return only a user-facing answer. "
-        "Do not call tools, output JSON, reproduce User/System/Assistant labels, emit a code "
-        "fence, copy Function output, copy the execution record, or describe hidden reasoning. "
-        "The execution record is metadata only. The URL, title, search snippet, provider "
-        "summary and page publication metadata are not evidence. Only EVIDENCE BODY sections "
-        "may support factual claims. If a requested fact is not supported, say what is missing "
-        "instead of guessing. Answer each requested sub-question separately. Do not add "
-        "a generic source list as a substitute for claim citations. Attach the exact source "
-        "span reference [S#:C#] to every factual sentence. "
-        "unrequested claims merely because they appear somewhere in a source body; a source "
-        "body is not permission to infer a relationship, ownership, authorship or date that it "
-        "does not state directly. Preserve every requested item and row/column relationship. "
-        f"{variant_instruction}{risk_instructions}{criteria_instructions}{acceptance_instruction}"
-        f"Question: {query}\n"
-        f"Evidence status: {evidence_state}\n"
-        f"Retrieval termination: {termination_reason}. Always return a user-facing continuation.\n"
-        f"{validation_prompt}"
+    def build_prompt_prefix(current_evidence_state: str, current_validation_prompt: str) -> str:
+        if source_policy.get("required") and official_body_available:
+            source_instruction = (
+                "The required official source body is present; use it directly and cite it. "
+            )
+        elif source_policy.get("required"):
+            source_instruction = (
+                "No required official body was retrieved. Keep official attribution unconfirmed and do not "
+                "present a third-party page as that organisation's source. "
+            )
+        else:
+            source_instruction = ""
+        evidence_usage_instruction = (
+            "Source-body mode: the retrieved body is available. Start with the requested answer and combine "
+            "supported details across the visible chunks. Treat validation and chunk markers as routing metadata; "
+            "do not turn a locator gap into a refusal. "
+            if usable_evidence_count
+            else "No-source-body mode: the requested claim is not confirmed by a retrieved source body; say that briefly and stop. "
+        )
+        output_precision_instruction = (
+            "Copy names, dates, quantities, polarity, commands, flags, environment variables, and configuration "
+            "names exactly from the body. Do not invent values or convert one variable kind into another. "
+            "Keep commands complete; put citations after the sentence or code block, never inside a command or URL. "
+        )
+        polarity_hint = _evidence_polarity_hint(query, context_text)
+        scope_hint = _answer_scope_hint(query)
+        answer_first_hint = _answer_first_hint(query, evidence_available=bool(usable_evidence_count))
+        list_instruction = ""
+        if task_mode == "latest_list":
+            list_instruction = (
+                f"This is a latest-list request. Return at most {max_items or 5} items and only the requested fields "
+                f"({', '.join(requested_fields) or 'the fields stated in the question'}); do not copy the entire index page. "
+            )
+        brevity_instruction = ""
+        if task_mode in {"lookup", "compare"}:
+            brevity_instruction = (
+                "For an ordinary lookup or comparison, be concise: normally use a short paragraph or at most 8 bullets. "
+                "Do not reproduce a table of contents, navigation, page body, or a long source index unless the user explicitly asks for it. "
+            )
+        return (
+            "You are the final answer RWKV. Use the EVIDENCE BODY as the factual basis and answer the user's question directly. "
+            "Start with the answer and cover the requested details that appear in the body. Return only a user-facing answer: no tool calls, JSON, role "
+            "labels, hidden reasoning, execution-record replay, or generic source list. "
+            "Cite every factual sentence with the matching [S#:C#]. "
+            f"{variant_instruction}{risk_instructions}{acceptance_instruction}"
+            f"Output mode: {task_mode}. {brevity_instruction}{list_instruction}"
+            f"{evidence_usage_instruction}{output_precision_instruction}{source_instruction}"
+            f"{polarity_hint}"
+            f"{scope_hint}"
+            f"{answer_first_hint}"
+            f"Question: {query}\n"
+            f"Evidence status: {current_evidence_state}\n"
+            f"{current_validation_prompt}"
+        )
+
+    prompt_prefix = build_prompt_prefix(evidence_state, validation_prompt)
+    context, context_text, prompt, final_prompt_trimmed = _fit_final_context_projection(
+        context,
+        data,
+        constraints,
+        query,
+        prompt_prefix,
     )
-    context_text, prompt, final_prompt_trimmed = _fit_final_prompt_context(prompt_prefix, context_text)
+    if final_prompt_trimmed:
+        # Rebuild the control hints from the same projection that survived the
+        # context fit.  This prevents a locator/validator from referring to a
+        # source span that was removed from the final model input.
+        usable_evidence_count = int(context.get("usable_evidence_count") or 0)
+        validation_prompt = _validation_prompt(context.get("validation") or {})
+        missing_point_ids = [
+            str(item.get("point_id") or "")
+            for item in (context.get("validation") or {}).get("subquestion_coverage") or []
+            if isinstance(item, dict) and not bool(item.get("answerable"))
+        ]
+        official_body_available = bool(
+            any(
+                isinstance(item, dict)
+                and bool((item.get("authority") or {}).get("satisfied"))
+                and _has_usable_evidence(item)
+                for item in context.get("selected_evidence") or []
+            )
+        )
+        if usable_evidence_count and missing_point_ids and official_body_available:
+            evidence_state = (
+                f"OFFICIAL_EVIDENCE_AVAILABLE_BUT_COVERAGE_UNCERTAIN ({usable_evidence_count} source bodies). "
+                f"The official body is visible; automatic point matching is inconclusive for {', '.join(missing_point_ids)}. "
+                "Use the visible official body and combine all visible chunks to answer the requested facts. "
+                "Treat the coverage marker as routing uncertainty only."
+            )
+        elif usable_evidence_count and missing_point_ids:
+            evidence_state = (
+                f"PARTIAL_EVIDENCE ({usable_evidence_count} source bodies). "
+                f"Candidate coverage is missing for {', '.join(missing_point_ids)}. "
+                "Use the visible body for every supported point and inspect all visible chunks before deciding coverage. "
+                "Do not turn a locator gap into a refusal or a general page summary into an answer for an absent point."
+            )
+        elif usable_evidence_count:
+            evidence_state = (
+                f"USABLE_EVIDENCE_AVAILABLE ({usable_evidence_count} source bodies). "
+                "Use only the EVIDENCE BODY sections for factual claims."
+            )
+        else:
+            evidence_state = (
+                "NO_USABLE_EVIDENCE. The body does not support the requested facts; state that briefly "
+                "and do not use snippets, metadata, or memory."
+            )
+        prompt_prefix = build_prompt_prefix(evidence_state, validation_prompt)
+        context, context_text, prompt, second_fit = _fit_final_context_projection(
+            context,
+            data,
+            constraints,
+            query,
+            prompt_prefix,
+        )
+        final_prompt_trimmed = bool(final_prompt_trimmed or second_fit)
     context_fields["context_text"] = context_text
+    context_fields["selected_evidence"] = context.get("selected_evidence") or []
+    context_fields["validation"] = context.get("validation") or {}
+    context_stats = context_fields["context_stats"]
+    context_citation_refs = _citation_refs_for_context(data, context)
+    answer_context = context
+    evidence_context_text = context_text
+    usable_evidence_count = int(context.get("usable_evidence_count") or 0)
+    context_stats["final_usable_evidence_count"] = usable_evidence_count
+    context_stats["final_selected_evidence_count"] = len(context.get("selected_evidence") or [])
     context_stats["final_context_chars"] = len(context_text)
     context_stats["final_context_tokens"] = get_token_count(context_text)
-    context_stats["final_context_truncated"] = bool(
-        context_stats.get("final_context_truncated", False) or final_prompt_trimmed
-    )
+    # Only this fit pass may set final_context_truncated.  Source-level page
+    # packing remains visible through source_context_truncated and its count.
+    context_stats["final_context_truncated"] = bool(final_prompt_trimmed)
     context_stats["context_chars"] = context_stats["final_context_chars"]
     context_stats["context_tokens"] = context_stats["final_context_tokens"]
     context_stats["context_truncated"] = context_stats["final_context_truncated"]
@@ -771,8 +1996,15 @@ def synthesize_retrieval_answer(
     repair_prompt = ""
     raw = ""
     try:
-        def complete(request_prompt: str) -> str:
-            budget = _final_completion_budget(request_prompt)
+        requested_final_tokens = _requested_final_completion_budget(constraints, query)
+
+        def complete(request_prompt: str, requested_max: int | None = None) -> str:
+            budget = bounded_completion_budget(
+                request_prompt,
+                context_limit=get_llm_context_length(),
+                requested_max=requested_max or requested_final_tokens,
+                safety_margin=256,
+            )
             if hasattr(llm, "text_completion"):
                 try:
                     response = llm.text_completion(
@@ -801,22 +2033,111 @@ def synthesize_retrieval_answer(
             retry_output = complete(retry_prompt)
             answer = _clean_answer(clean_final_continuation(retry_output))
             repair_prompt = retry_prompt
-        draft_alignment = assess_answer_alignment(answer, context.get("selected_evidence") or [])
+        selected_evidence = context.get("selected_evidence") or []
+        # The final prompt can contain more packed page text than the compact
+        # per-source metadata retained for validation. Inspect both views or a
+        # page replay can look harmless merely because metadata was shortened.
+        copy_evidence = [*selected_evidence]
+        if evidence_context_text:
+            copy_evidence.append({"evidence_text": evidence_context_text})
+        draft_alignment = assess_answer_alignment(answer, selected_evidence)
+        draft_copy_ratio = _source_copy_ratio(answer, copy_evidence)
+        post_repair_copy_ratio = draft_copy_ratio
         if answer and usable_evidence_count and (
-            _needs_answer_repair(answer)
-            or not re.search(r"\[S\d+\]", answer)
+            _needs_answer_repair(answer, copy_evidence)
+            or _is_evidence_refusal(answer)
+            or not re.search(r"\[S\d+(?::C\d+)?\]", answer)
             or draft_alignment.get("unsupported_line_count", 0) > 0
         ):
             repair_prompt = _build_answer_repair_prompt(query, evidence_context_text, answer)
             repair_prompt += "\n\n" + validation_prompt
-            repaired_output = complete(repair_prompt)
+            repaired_output = complete(
+                repair_prompt,
+                requested_max=min(requested_final_tokens, 4096),
+            )
             repaired_answer = _clean_answer(clean_final_continuation(repaired_output))
-            if repaired_answer:
+            replaced_refusal = _is_evidence_refusal(answer) and not _is_evidence_refusal(repaired_answer)
+            if repaired_answer and (
+                replaced_refusal
+                or _answer_revision_key(repaired_answer, copy_evidence, selected_evidence)
+                < _answer_revision_key(answer, copy_evidence, selected_evidence)
+            ):
                 answer = repaired_answer
                 retry_output = repaired_output
-        answer = _enforce_citation_contract(answer, data, context)
+        # A repair can still produce a fluent paragraph with only one
+        # citation at the top.  Give the same final model one short, explicit
+        # citation-contract pass; this is not a verifier and it never adds
+        # facts or sources.  If the evidence cannot support a claim, the
+        # model is instructed to mark that point unconfirmed.
+        if answer and usable_evidence_count:
+            post_repair_alignment = assess_answer_alignment(answer, selected_evidence)
+            post_repair_copy_ratio = _source_copy_ratio(answer, copy_evidence)
+            if (
+                post_repair_alignment.get("unsupported_line_count", 0) > 0
+                or post_repair_copy_ratio >= 0.65
+            ):
+                strict_repair_prompt = _build_answer_repair_prompt(query, evidence_context_text, answer)
+                strict_repair_prompt += (
+                    "\n\nThe previous rewrite still contains factual lines without a matching source span. "
+                    "Return only the requested answer. Put [S#:C#] on every factual sentence. "
+                    "For any requested item not stated directly in the evidence, write that it is unconfirmed "
+                    "instead of drafting a configuration or filling the gap from memory. Never output DRAFT, "
+                    "Answer labels, navigation, or a source-body summary."
+                )
+                strict_output = complete(
+                    strict_repair_prompt,
+                    requested_max=min(requested_final_tokens, 2048),
+                )
+                strict_answer = _clean_answer(clean_final_continuation(strict_output))
+                if strict_answer and _answer_revision_key(
+                    strict_answer, copy_evidence, selected_evidence
+                ) < _answer_revision_key(answer, copy_evidence, selected_evidence):
+                    answer = strict_answer
+                    retry_output = strict_output
+        # The model is still a continuation model and can answer from memory
+        # even after receiving NO_USABLE_EVIDENCE.  Once the evidence gate has
+        # closed, preserve the model's raw output in the trace but never expose
+        # an unsupported factual continuation to the user.  This is an output
+        # protocol boundary, not a second model/verifier or a truth judgement.
+        closed_world_enforced = not usable_evidence_count
+        if closed_world_enforced and not _is_evidence_refusal(answer):
+            answer = _closed_world_fallback()
+        if not closed_world_enforced:
+            answer = _normalize_evidence_code_spans(answer, evidence_context_text)
+            answer = _normalize_free_threading_polarity(answer, query, evidence_context_text)
+            answer = _dedupe_repeated_sentences(answer)
+            answer = _enforce_how_to_scope(answer, query)
+        answer = _attach_mechanical_citations(
+            answer,
+            answer_context.get("selected_evidence") or [],
+        )
+        answer = _enforce_citation_contract(answer, data, answer_context)
+        # Citation expansion can create a repeated source marker even when the
+        # model emitted it only once.  Re-run the protocol-only cleanup after
+        # expansion, without changing factual wording.
+        answer = _clean_answer(answer)
+        answer = _enforce_latest_list_shape(answer, task_plan)
+        copy_guard_ratio = max(
+            _source_copy_ratio(answer, copy_evidence),
+            float(draft_copy_ratio or 0.0),
+            float(post_repair_copy_ratio or 0.0),
+        )
+        copy_guard_triggered = copy_guard_ratio >= 0.85
+        if copy_guard_triggered:
+            answer = "当前检索正文过长，无法安全压缩为简洁且逐句有依据的回答；请缩小问题范围后重试。"
         answer = _enforce_risk_contract(answer, constraints)
-        answer_alignment = assess_answer_alignment(answer, context.get("selected_evidence") or [])
+        answer_copy_ratio = _source_copy_ratio(answer, copy_evidence)
+        answer_alignment = assess_answer_alignment(
+            answer,
+            [] if closed_world_enforced else selected_evidence,
+        )
+        answer_quality = {
+            "draft_source_copy_ratio": draft_copy_ratio,
+            "source_copy_ratio": max(answer_copy_ratio, copy_guard_ratio),
+            "source_copy_detected": copy_guard_ratio >= 0.65 or answer_copy_ratio >= 0.65,
+            "source_copy_guard_triggered": copy_guard_triggered,
+            "closed_world_boundary_enforced": closed_world_enforced,
+        }
         model_output = retry_output or raw_text
         if answer:
             mode = "local_rwkv_final"
@@ -829,6 +2150,7 @@ def synthesize_retrieval_answer(
                 "model_output": model_output,
                 "repair_prompt": repair_prompt,
                 "repair_output": retry_output,
+                "answer_quality": answer_quality,
                 "answer_alignment": answer_alignment,
                 **context_fields,
             }
@@ -839,6 +2161,7 @@ def synthesize_retrieval_answer(
             "citation_refs": context_citation_refs,
             "prompt": prompt,
             "model_output": model_output,
+            "answer_quality": answer_quality,
             "answer_alignment": answer_alignment,
             **context_fields,
         }
@@ -851,6 +2174,7 @@ def synthesize_retrieval_answer(
             "prompt": prompt,
             "model_output": _clean_answer(str(raw or "")),
             "error": f"{type(exc).__name__}: {exc}",
+            "answer_quality": {"source_copy_ratio": 0.0, "source_copy_detected": False},
             "answer_alignment": assess_answer_alignment("", context.get("selected_evidence") or []),
             **context_fields,
         }

@@ -79,9 +79,17 @@ def _load_cases(path: Path) -> list[dict[str, Any]]:
     if not isinstance(cases, list) or not cases:
         raise ValueError("input must contain a non-empty cases list")
     normalized = []
-    for index, case in enumerate(cases, start=1):
-        if not isinstance(case, dict) or not str(case.get("query") or "").strip():
+    for index, raw_case in enumerate(cases, start=1):
+        if not isinstance(raw_case, dict):
+            raise ValueError(f"case {index} must be an object")
+        case = dict(raw_case)
+        # Keep benchmark files in their native shape: gold suites use
+        # ``question``/``id`` while acceptance suites use ``query``/``case_id``.
+        if not str(case.get("query") or "").strip():
+            case["query"] = case.get("question") or case.get("prompt") or ""
+        if not str(case.get("query") or "").strip():
             raise ValueError(f"case {index} must contain a non-empty query")
+        case.setdefault("case_id", case.get("id") or f"case_{index:03d}")
         normalized.append(case)
     return normalized
 
@@ -247,8 +255,11 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             plans.append(
                 {
                     "schema_version": plan.get("schema_version"),
-                    "status": plan.get("status", "ok"),
-                    "point_count": len(plan.get("atomic_points") or []) if isinstance(plan, dict) else 0,
+                "status": plan.get("status", "ok"),
+                "error_class": plan.get("error_class", ""),
+                "message": str(plan.get("message") or "")[:1000],
+                "raw_model_output_chars": len(str(plan.get("raw_model_output") or "")),
+                "point_count": len(plan.get("atomic_points") or []) if isinstance(plan, dict) else 0,
                     "point_ids": [
                         str(point.get("id") or "")
                         for point in (plan.get("atomic_points") or [])
@@ -407,10 +418,12 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "action": event.get("action", ""),
                     "termination_reason": event.get("termination_reason", ""),
                     "model_output_available": event.get("model_output_available"),
+                    "planner_error": event.get("planner_error") or "",
                     "round_count": event.get("round_count"),
                     "citation_refs": event.get("citation_refs") or [],
                     "validation": event.get("validation") or {},
                     "answer_alignment": event.get("answer_alignment") or {},
+                    "answer_quality": event.get("answer_quality") or {},
                 }
             )
 
@@ -632,8 +645,13 @@ def run(
         rows.append(
             {
                 "case_id": case_id,
+                "benchmark_id": case.get("id") or case_id,
                 "task_id": task_id,
                 "query": query,
+                # Reference material is recorded for post-run comparison only;
+                # it is deliberately never included in ``query`` or metadata.
+                "reference_answer": case.get("final_answer") or case.get("reference_answer") or "",
+                "gold": case.get("gold") if isinstance(case.get("gold"), dict) else None,
                 "architecture": (
                     (trace.get("strategy_selections") or [{}])[-1].get("strategy")
                     or case.get("architecture")
