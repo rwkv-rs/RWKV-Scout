@@ -9,10 +9,6 @@ import statistics
 import sys
 from pathlib import Path
 
-from utils.answer_similarity import SIMILARITY_VERSION, score_answer_similarity
-
-
-DEFAULT_SIMILARITY_THRESHOLD = 0.90
 
 def norm(value: object) -> str:
     text = str(value or "").casefold()
@@ -59,17 +55,9 @@ def load_run_rows(path: Path) -> list[dict]:
     return normalized
 
 
-def score(
-    name: str,
-    path: Path,
-    gold: dict[str, dict],
-    *,
-    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
-) -> dict:
+def score(name: str, path: Path, gold: dict[str, dict]) -> dict:
     rows = load_run_rows(path)
     passed = 0
-    similarity_passed = 0
-    similarity_scores: list[float] = []
     nonempty = 0
     body = 0
     forbidden = 0
@@ -84,22 +72,8 @@ def score(
         has_required = bool(required) and all(item in answer for item in required)
         has_forbidden = any(item and item in answer for item in forbidden_facts)
         strict = has_required and not has_forbidden
-        similarity = score_answer_similarity(
-            case.get("final_answer", ""),
-            answer_text(row),
-            required_facts=(case.get("gold") or {}).get("required_facts", []),
-            forbidden_facts=(case.get("gold") or {}).get("forbidden_facts", []),
-            fact_aliases=(case.get("gold") or {}).get("fact_aliases", {}),
-        )
-        similarity_scores.append(float(similarity["score"]))
-        similarity_pass = bool(
-            similarity["score"] >= similarity_threshold
-            and not similarity.get("forbidden_fact_matches")
-        )
         if strict:
             passed += 1
-        if similarity_pass:
-            similarity_passed += 1
         if answer:
             nonempty += 1
         local_report = row.get("report") or {}
@@ -117,13 +91,9 @@ def score(
         if has_forbidden:
             forbidden += 1
         durations.append(float(row.get("duration_ms") or 0))
-        bucket = category.setdefault(
-            case.get("category", "unknown"),
-            {"n": 0, "strict": 0, "similarity": 0, "body": 0},
-        )
+        bucket = category.setdefault(case.get("category", "unknown"), {"n": 0, "strict": 0, "body": 0})
         bucket["n"] += 1
         bucket["strict"] += int(strict)
-        bucket["similarity"] += int(similarity_pass)
         bucket["body"] += int(has_body)
         details.append(
             {
@@ -134,8 +104,6 @@ def score(
                 "required_facts": (case.get("gold") or {}).get("required_facts", []),
                 "forbidden_facts": forbidden_facts,
                 "strict_pass": strict,
-                "similarity_pass": similarity_pass,
-                "similarity": similarity,
                 "forbidden_fact_hit": has_forbidden,
                 "status": row.get("status", ""),
             }
@@ -147,11 +115,6 @@ def score(
         "completed": sum(row.get("status") == "completed" for row in rows),
         "strict_pass": passed,
         "strict_pass_rate": round(100 * passed / len(rows), 2) if rows else 0,
-        "similarity_version": SIMILARITY_VERSION,
-        "similarity_threshold": similarity_threshold,
-        "similarity_pass": similarity_passed,
-        "similarity_pass_rate": round(100 * similarity_passed / len(rows), 2) if rows else 0,
-        "average_similarity": round(100 * statistics.mean(similarity_scores), 2) if similarity_scores else 0,
         "answer_nonempty": nonempty,
         "usable_body": body,
         "usable_body_rate": round(100 * body / len(rows), 2) if rows else 0,
@@ -168,26 +131,16 @@ def main() -> int:
         raise SystemExit("usage: python scripts/evaluate_gold_runs.py <gold.jsonl> <name=run.json> ...")
     gold = load_gold(Path(sys.argv[1]))
     output_path = None
-    similarity_threshold = DEFAULT_SIMILARITY_THRESHOLD
     specs = []
     for argument in sys.argv[2:]:
         if argument.startswith("--output="):
             output_path = Path(argument.split("=", 1)[1])
-        elif argument.startswith("--similarity-threshold="):
-            similarity_threshold = float(argument.split("=", 1)[1])
-            if not 0 <= similarity_threshold <= 1:
-                raise SystemExit("--similarity-threshold must be between 0 and 1")
         else:
             specs.append(argument)
     report = {}
     for spec in specs:
         name, raw_path = spec.split("=", 1)
-        report[name] = score(
-            name,
-            Path(raw_path),
-            gold,
-            similarity_threshold=similarity_threshold,
-        )
+        report[name] = score(name, Path(raw_path), gold)
     if output_path is not None:
         report["_artifact"] = str(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
