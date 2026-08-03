@@ -43,9 +43,9 @@ class RetrievalSynthesisTests(unittest.TestCase):
             },
             llm=llm,
         )
-        self.assertIn("ANSWER-FIRST CONTRACT", llm.calls[0][0])
-        self.assertIn("CLAIM-CHECK MODE", llm.calls[0][0])
-        self.assertIn("CALCULATION MODE", llm.calls[0][0])
+        self.assertIn("ANSWER FIRST", llm.calls[0][0])
+        self.assertIn("CLAIM CHECK", llm.calls[0][0])
+        self.assertIn("CALCULATION:", llm.calls[0][0])
         self.assertIn("routing metadata", llm.calls[0][0])
         self.assertTrue(result["context_stats"]["final_usable_evidence_count"])
 
@@ -160,6 +160,7 @@ class RetrievalSynthesisTests(unittest.TestCase):
             llm=llm,
             constraints={
                 "task_plan": {
+                    "task_mode": "latest_list",
                     "atomic_points": [
                         {
                             "id": "P1",

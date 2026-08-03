@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 from config import DATA_PIPELINE, get_llm_context_length
 from utils.chunker import get_token_count, semantic_chunk_text
 from utils.context_budget import evidence_tokens
+from utils.calculation_check import build_calculation_check
 from utils.model_budget import bounded_completion_budget
 from utils.evidence_quality import (
     date_mentions,
@@ -1395,28 +1396,14 @@ def _validation_prompt(report: dict[str, Any]) -> str:
         for item in conflicts
         if isinstance(item, dict)
     )
-    if coverage_rows and all(bool(item.get("answerable")) for item in coverage_rows) and not conflicts:
-        return (
-            "BEGIN VALIDATION HINTS (routing metadata only)\n"
-            f"All requested points have candidate body coverage: {' | '.join(rows) or 'the visible evidence bodies'}. "
-            "Use the visible source body as the factual basis, start with the answer, and cover the requested points directly. "
-            "Mark a detail unconfirmed only when that detail is not stated in the body. Attach the matching [S#:C#] "
-            "to each factual sentence.\n"
-            "END VALIDATION HINTS\n"
-        )
+    coverage = ", ".join(rows) or "visible source bodies"
+    missing_text = ", ".join(value for value in missing if value)
+    conflict_suffix = f" Check date variants: {conflict_text}." if conflict_text else ""
+    missing_suffix = f" Missing locator points: {missing_text}." if missing_text else ""
     return (
-        "BEGIN VALIDATION HINTS (routing metadata only; never evidence)\n"
-        "Use the EVIDENCE BODY first. Candidate matches only identify where to look; "
-        "they do not replace the body. Answer every supported point directly and inspect all visible "
-        "chunks before deciding that a requested detail is absent.\n"
-        f"Candidate body matches: {' | '.join(rows) or 'none'}\n"
-        f"Missing candidate body coverage: {', '.join(value for value in missing if value) or 'none'}\n"
-        f"Potential date-like conflicts to inspect: {conflict_text or 'none'}\n"
-        "An ordinary missing candidate match is only a routing gap: inspect the visible body and answer any fact stated there directly. "
-        "For authority_missing points, do not attribute a third-party source to the required organisation. "
-        "Use unconfirmed only for a detail absent after checking the visible body; do not fill it from model memory. "
-        "Every factual sentence must cite a matching [S#:C#] body span.\n"
-        "END VALIDATION HINTS\n"
+        "ROUTING NOTE (not evidence): inspect the visible EVIDENCE BODY directly; "
+        f"candidate coverage={coverage}.{missing_suffix}{conflict_suffix} "
+        "Do not turn a locator miss into a refusal, and do not use facts absent from the body.\n"
     )
 
 
@@ -1468,22 +1455,16 @@ def _answer_first_hint(query: str, *, evidence_available: bool) -> str:
         return ""
     lowered = str(query or "").casefold()
     hint = (
-        "ANSWER-FIRST CONTRACT: The visible EVIDENCE BODY is the working source. "
-        "Answer the requested fact, procedure, comparison, or calculation first. "
-        "Facts may be distributed across source chunks; combine the visible spans and cite each factual sentence. "
-        "Validation hints and chunk support markers are routing metadata, not an answerability verdict. "
-        "Use 'unconfirmed' only for a requested detail that is absent after checking all visible spans.\n"
+        "ANSWER FIRST: use only the visible EVIDENCE BODY, combine relevant spans, and cite factual sentences. "
+        "Say unconfirmed only when the requested detail is absent from all visible spans.\n"
     )
     if re.search(r"(核验|验证|是否正确|这句话|该说法|纠正|声称|真的|correct|incorrect|verify|claim)", lowered):
         hint += (
-            "CLAIM-CHECK MODE: Treat the user's statement as a claim to verify. "
-            "Begin with correct or incorrect, then give the source-backed correction and the supporting values. "
-            "Do not restate the premise as true merely because it appears in the question.\n"
+            "CLAIM CHECK: begin with correct or incorrect, then give the source-backed correction and requested values.\n"
         )
     if re.search(r"(相隔|多少天|百分比|百分之|比例|占比|差值|计算|自然日|how many days|percentage|percent|calculate|difference)", lowered):
         hint += (
-            "CALCULATION MODE: When the visible body supplies the input dates or quantities, compute the requested result "
-            "in the requested unit and rounding rule. State the computed result explicitly; do not stop after repeating inputs.\n"
+            "CALCULATION: identify the operands, show the date/number expression, and state the computed result in the requested unit.\n"
         )
     return hint
 
@@ -1657,13 +1638,7 @@ def _build_answer_repair_prompt(query: str, evidence: str, _draft: str) -> str:
     scope_hint = _answer_scope_hint(query)
     answer_first_hint = _answer_first_hint(query, evidence_available=bool(repair_evidence))
     return build_final_continuation_prompt(
-        "Reconstruct the final answer directly from the EVIDENCE BODY below. Start with the answer "
-        "and include the requested facts stated by the body. Cite every factual sentence with [S#:C#]. Return prose only: no JSON, role "
-        "labels, tool calls, hidden reasoning, source-body replay, navigation, metadata, or generic "
-        "source list. Treat code identifiers as exact opaque strings: copy names, flags, environment "
-        "variables, configuration keys, values, and polarity character-for-character. Do not omit "
-        "underscores, normalize names, invent values, reverse an option's effect, or put citations "
-        "inside a command or URL.\n\n"
+        "Rewrite the answer from the visible EVIDENCE BODY. Start with the answer, preserve exact names, dates, numbers, and polarity, and cite factual sentences with [S#:C#]. Return concise prose only; do not output instructions, JSON, tool calls, or a source-body replay.\n\n"
         f"{polarity_hint}\n"
         f"{scope_hint}\n"
         f"{answer_first_hint}\n"
@@ -1756,7 +1731,7 @@ def synthesize_retrieval_answer(
         )
     acceptance_instruction = (
         f"Acceptance checklist from the model-generated task plan:\n{acceptance_context}\n\n"
-        if acceptance_context
+        if acceptance_context and task_mode in {"latest_list", "deep_research"}
         else ""
     )
     variant_instruction = {
@@ -1879,13 +1854,16 @@ def synthesize_retrieval_answer(
             else "No-source-body mode: the requested claim is not confirmed by a retrieved source body; say that briefly and stop. "
         )
         output_precision_instruction = (
-            "Copy names, dates, quantities, polarity, commands, flags, environment variables, and configuration "
-            "names exactly from the body. Do not invent values or convert one variable kind into another. "
-            "Keep commands complete; put citations after the sentence or code block, never inside a command or URL. "
+            "Copy names, dates, quantities, polarity, commands, and flags exactly from the body; do not invent or reverse them. "
+            "Put citations after the sentence or code block. "
         )
         polarity_hint = _evidence_polarity_hint(query, context_text)
         scope_hint = _answer_scope_hint(query)
         answer_first_hint = _answer_first_hint(query, evidence_available=bool(usable_evidence_count))
+        calculation_hint = build_calculation_check(
+            query,
+            context.get("selected_evidence") or context_text,
+        )
         list_instruction = ""
         if task_mode == "latest_list":
             list_instruction = (
@@ -1899,16 +1877,14 @@ def synthesize_retrieval_answer(
                 "Do not reproduce a table of contents, navigation, page body, or a long source index unless the user explicitly asks for it. "
             )
         return (
-            "You are the final answer RWKV. Use the EVIDENCE BODY as the factual basis and answer the user's question directly. "
-            "Start with the answer and cover the requested details that appear in the body. Return only a user-facing answer: no tool calls, JSON, role "
-            "labels, hidden reasoning, execution-record replay, or generic source list. "
-            "Cite every factual sentence with the matching [S#:C#]. "
+            "You are the final answer RWKV. Answer the QUESTION from the EVIDENCE BODY. Start with the answer, cover the requested details, and cite factual sentences with [S#:C#]. Return concise user-facing prose only; no instructions, JSON, tool calls, hidden reasoning, or source-body replay. "
             f"{variant_instruction}{risk_instructions}{acceptance_instruction}"
             f"Output mode: {task_mode}. {brevity_instruction}{list_instruction}"
             f"{evidence_usage_instruction}{output_precision_instruction}{source_instruction}"
             f"{polarity_hint}"
             f"{scope_hint}"
             f"{answer_first_hint}"
+            f"{calculation_hint}"
             f"Question: {query}\n"
             f"Evidence status: {current_evidence_state}\n"
             f"{current_validation_prompt}"

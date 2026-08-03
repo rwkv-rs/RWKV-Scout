@@ -23,6 +23,7 @@ from config import get_experiment_max_parallel_cases
 ROOT = Path(__file__).resolve().parents[1]
 UV = Path("/home/chase/.local/bin/uv")
 RUNNER = ROOT / "scripts" / "run_json_acceptance.py"
+DEFAULT_CASE_TIMEOUT_SECONDS = 600.0
 
 
 def load_cases(path: Path) -> list[dict[str, Any]]:
@@ -54,11 +55,35 @@ def write_part(path: Path, cases: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps({"cases": cases}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def run_part(label: str, part: int, input_path: Path, output_path: Path, log_path: Path) -> int:
+def build_part_command(
+    input_path: Path,
+    output_path: Path,
+    *,
+    case_timeout_seconds: float | None,
+) -> list[str]:
     command = [
         str(UV), "run", "--project", str(ROOT), "python", str(RUNNER),
         "--input", str(input_path), "--output", str(output_path),
     ]
+    if case_timeout_seconds is not None:
+        command.extend(["--case-timeout-seconds", str(case_timeout_seconds)])
+    return command
+
+
+def run_part(
+    label: str,
+    part: int,
+    input_path: Path,
+    output_path: Path,
+    log_path: Path,
+    *,
+    case_timeout_seconds: float | None,
+) -> int:
+    command = build_part_command(
+        input_path,
+        output_path,
+        case_timeout_seconds=case_timeout_seconds,
+    )
     with log_path.open("w", encoding="utf-8") as log:
         log.write(f"START {label} part={part} {datetime.now().isoformat(timespec='seconds')}\n")
         log.flush()
@@ -97,7 +122,14 @@ def merge_parts(label: str, parts: list[Path], output_path: Path, input_path: Pa
     return report
 
 
-def run_dataset(label: str, input_path: Path, out_dir: Path, workers: int) -> dict[str, Any]:
+def run_dataset(
+    label: str,
+    input_path: Path,
+    out_dir: Path,
+    workers: int,
+    *,
+    case_timeout_seconds: float | None,
+) -> dict[str, Any]:
     cases = load_cases(input_path)
     effective_workers = min(max(1, int(workers)), len(cases))
     dataset_dir = out_dir / label
@@ -116,7 +148,15 @@ def run_dataset(label: str, input_path: Path, out_dir: Path, workers: int) -> di
         log_paths.append(part_log)
     with ThreadPoolExecutor(max_workers=effective_workers) as pool:
         futures = [
-            pool.submit(run_part, label, index + 1, part_paths[index], output_paths[index], log_paths[index])
+            pool.submit(
+                run_part,
+                label,
+                index + 1,
+                part_paths[index],
+                output_paths[index],
+                log_paths[index],
+                case_timeout_seconds=case_timeout_seconds,
+            )
             for index in range(effective_workers)
         ]
         return_codes = [future.result() for future in futures]
@@ -145,7 +185,15 @@ def main() -> int:
         default="fixed_probe",
         help="Label for --input output and queue records.",
     )
+    parser.add_argument(
+        "--case-timeout-seconds",
+        type=float,
+        default=DEFAULT_CASE_TIMEOUT_SECONDS,
+        help="Hard wall-clock limit for each case; default 600 seconds.",
+    )
     args = parser.parse_args()
+    if args.case_timeout_seconds <= 0:
+        raise SystemExit("--case-timeout-seconds must be positive")
     workers = get_experiment_max_parallel_cases() if args.workers is None else args.workers
     if workers < 1:
         raise SystemExit("--workers must be positive")
@@ -165,7 +213,13 @@ def main() -> int:
         source = "config.json" if args.workers is None else "--workers override"
         log.write(f"START concurrent suite workers={workers} source={source} {datetime.now().isoformat(timespec='seconds')}\n")
     for label, input_path in datasets:
-        report = run_dataset(label, input_path, args.output_dir, workers)
+        report = run_dataset(
+            label,
+            input_path,
+            args.output_dir,
+            workers,
+            case_timeout_seconds=args.case_timeout_seconds,
+        )
         with queue_log.open("a", encoding="utf-8") as log:
             log.write(f"DONE {label} completed={report['completed_cases']} total={report['total_cases']} status={report['status']} {datetime.now().isoformat(timespec='seconds')}\n")
     with queue_log.open("a", encoding="utf-8") as log:
