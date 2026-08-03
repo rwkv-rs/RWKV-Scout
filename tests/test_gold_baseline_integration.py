@@ -72,6 +72,7 @@ class GoldBaselineIntegrationTests(unittest.TestCase):
 
         self.assertEqual(report["n"], 1)
         self.assertEqual(report["strict_pass"], 1)
+        self.assertIn("similarity", report["details"][0])
         self.assertEqual(report["details"][0]["reference_answer"], "标准答案")
 
 
