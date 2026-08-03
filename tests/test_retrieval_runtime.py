@@ -184,6 +184,47 @@ class RetrievalRuntimeTests(unittest.TestCase):
         ]
         self.assertEqual(len(blocked_results), 1)
 
+    def test_duplicate_after_empty_search_leaves_a_recovery_turn(self):
+        orchestrator = Orchestrator()
+        orchestrator.state.task_id = "EMPTY_DUPLICATE_RECOVERY_TEST"
+        orchestrator.state.run_metadata = {"max_replan_attempts": 0}
+        orchestrator.planner.plan_next_action = Mock(
+            side_effect=[
+                {"action": "web_search", "args": {"query": "same query"}},
+                {"action": "web_search", "args": {"query": "same query"}},
+                {"action": "finish_task", "args": {}},
+            ]
+        )
+        orchestrator.planner.observe_tool_result = Mock()
+        orchestrator._complete_model_tool_loop = Mock(return_value="done")
+        task_plan = {
+            "atomic_points": [
+                {"id": "P1", "evidence_needed": ["official evidence"]},
+            ]
+        }
+        empty_result = json.dumps(
+            {
+                "status": "no_evidence",
+                "results": [],
+                "evidence_ready": False,
+                "candidate_urls": [{"url": "https://example.com/fact"}],
+            }
+        )
+
+        with patch("agent.orchestrator.ToolRegistry.execute", return_value=empty_result) as execute:
+            with patch("agent.orchestrator.append_task_event") as append_event:
+                result = orchestrator._run_single_loop("goal", {}, task_plan, max_steps=3)
+
+        self.assertEqual(result, "done")
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(orchestrator.planner.plan_next_action.call_count, 3)
+        duplicate_events = [
+            call
+            for call in append_event.call_args_list
+            if call.args[1] == "retrieval_duplicate_blocked"
+        ]
+        self.assertEqual(len(duplicate_events), 1)
+
     def test_discovery_and_evidence_roles_are_phase_gated(self):
         self.assertTrue(ToolRegistry.can_execute("search_web_tavily", "DISCOVERY"))
         self.assertTrue(ToolRegistry.can_execute("search_web_keyless", "DISCOVERY"))

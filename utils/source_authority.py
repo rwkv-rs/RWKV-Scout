@@ -25,6 +25,15 @@ _DOMAIN_HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("kubernetes cve", "kubernetes cv", "kubernetes security"), ("kubernetes.io", "kubernetes.dev", "cisa.gov", "nvd.nist.gov")),
 )
 
+# Official projects may retain historical or alternate hostnames in
+# model-generated task plans. These are exact project-specific aliases; they
+# do not turn arbitrary third-party domains into official sources.
+_OFFICIAL_DOMAIN_ALIASES: dict[str, str] = {
+    "golang.org": "go.dev",
+    "swe-bench.com": "swebench.com",
+    "curl.haxx.se": "curl.se",
+}
+
 
 def hostname(url: Any) -> str:
     try:
@@ -35,8 +44,8 @@ def hostname(url: Any) -> str:
 
 
 def domain_matches(url: Any, domain: str) -> bool:
-    host = hostname(url)
-    expected = str(domain or "").casefold().strip().removeprefix("www.").rstrip(".")
+    host = _canonical_domain(hostname(url))
+    expected = _canonical_domain(domain)
     return bool(host and expected and (host == expected or host.endswith("." + expected)))
 
 
@@ -45,11 +54,17 @@ def _normalise_domains(values: Any) -> list[str]:
         values = [values]
     if not isinstance(values, (list, tuple, set)):
         return []
-    return list(dict.fromkeys(
-        str(value).casefold().strip().removeprefix("www.").rstrip(".")
-        for value in values
-        if str(value).strip()
-    ))
+    normalized: list[str] = []
+    for value in values:
+        domain = _canonical_domain(value)
+        if domain and domain not in normalized:
+            normalized.append(domain)
+    return normalized
+
+
+def _canonical_domain(value: Any) -> str:
+    domain = str(value or "").casefold().strip().removeprefix("www.").rstrip(".")
+    return _OFFICIAL_DOMAIN_ALIASES.get(domain, domain)
 
 
 def resolve_source_policy(query: str, constraints: Mapping[str, Any] | None = None) -> dict[str, Any]:

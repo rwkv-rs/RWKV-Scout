@@ -1341,7 +1341,11 @@ class Orchestrator:
                 self.state.last_feedback = blocked["message"]
                 self.planner.observe_tool_result(blocked)
                 duplicate_recovery_turns += 1
-                no_progress_steps += 1
+                # A blocked duplicate is routing feedback, not a new failed
+                # retrieval attempt. Leave a recovery turn so RWKV can choose
+                # a materially different query or direction before the
+                # no-progress guard forces synthesis.
+                no_progress_steps = max(0, no_progress_steps - 1)
                 append_task_event(
                     self.state.task_id,
                     "retrieval_duplicate_blocked",

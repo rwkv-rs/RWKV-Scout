@@ -71,6 +71,26 @@ class SourceAuthorityTests(unittest.TestCase):
         self.assertTrue(authority["satisfied"])
         self.assertEqual(authority["label"], "official_required")
 
+    def test_known_official_hostname_alias_satisfies_policy(self):
+        for required_domain, official_url in (
+            ("swe-bench.com", "https://www.swebench.com/verified.html"),
+            ("golang.org", "https://go.dev/doc/go1.25"),
+            ("curl.haxx.se", "https://curl.se/docs/manpage.html"),
+        ):
+            with self.subTest(required_domain=required_domain):
+                authority = authority_for_url(
+                    official_url,
+                    "official project documentation",
+                    {
+                        "task_plan": {
+                            "source_policy": "official_required",
+                            "required_domains": [required_domain],
+                        }
+                    },
+                )
+                self.assertTrue(authority["satisfied"])
+                self.assertEqual(authority["label"], "official_required")
+
     def test_plan_keeps_task_scope_fields(self):
         plan = Planner._validate_task_plan(
             {

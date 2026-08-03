@@ -1,0 +1,2077 @@
+{
+  "current": {
+    "run": "current",
+    "file": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/gold_60_prompt_alias_recovery_20260803/gold_60_alias_recovery_chunk2_concurrent_20260731.json",
+    "n": 60,
+    "completed": 60,
+    "strict_pass": 5,
+    "strict_pass_rate": 8.33,
+    "answer_nonempty": 60,
+    "usable_body": 59,
+    "usable_body_rate": 98.33,
+    "forbidden_fact_hits": 3,
+    "avg_ms": 0.0,
+    "p95_ms": 0.0,
+    "by_category": {
+      "current_release": {
+        "n": 1,
+        "strict": 0,
+        "body": 1
+      },
+      "release_metadata": {
+        "n": 5,
+        "strict": 0,
+        "body": 5
+      },
+      "current_status": {
+        "n": 1,
+        "strict": 0,
+        "body": 1
+      },
+      "release_schedule": {
+        "n": 1,
+        "strict": 0,
+        "body": 1
+      },
+      "standards_metadata": {
+        "n": 2,
+        "strict": 0,
+        "body": 2
+      },
+      "documentation_parameter": {
+        "n": 3,
+        "strict": 0,
+        "body": 2
+      },
+      "documentation_default": {
+        "n": 1,
+        "strict": 0,
+        "body": 1
+      },
+      "documentation_semantics": {
+        "n": 6,
+        "strict": 0,
+        "body": 6
+      },
+      "benchmark_metadata": {
+        "n": 6,
+        "strict": 2,
+        "body": 6
+      },
+      "paper_metadata": {
+        "n": 2,
+        "strict": 0,
+        "body": 2
+      },
+      "benchmark_design": {
+        "n": 2,
+        "strict": 0,
+        "body": 2
+      },
+      "repository_navigation": {
+        "n": 10,
+        "strict": 2,
+        "body": 10
+      },
+      "multi_source_calculation": {
+        "n": 4,
+        "strict": 0,
+        "body": 4
+      },
+      "single_source_calculation": {
+        "n": 1,
+        "strict": 0,
+        "body": 1
+      },
+      "numeric_synthesis": {
+        "n": 5,
+        "strict": 1,
+        "body": 5
+      },
+      "false_premise": {
+        "n": 10,
+        "strict": 0,
+        "body": 10
+      }
+    },
+    "details": [
+      {
+        "id": "WR-001",
+        "question": "截至 2026 年 7 月 25 日，Python 官方下载页列出的最新稳定版 Python 是什么？给出版本号和发布日期。",
+        "reference_answer": "Python 3.14.6，发布日期为 2026 年 6 月 10 日。",
+        "model_answer": "截至 2026 年 7 月 25 日，Python 官方下载页列出的最新稳定版 Python 是 3.14，发布日期为 2025 年 10 月 7 日。\n\nSources: [S1](https://devguide.python.org/versions)",
+        "required_facts": [
+          "Python 3.14.6",
+          "2026-06-10"
+        ],
+        "forbidden_facts": [
+          "python 3.14.3",
+          "python 3.13.14"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-002",
+        "question": "Python 官方 Source Releases 页面中，Python 3.13.14 与 Python 3.14.6 是否在同一天发布？如果是，日期是什么？",
+        "reference_answer": "是。Python 3.13.14 和 Python 3.14.6 都发布于 2026 年 6 月 10 日。",
+        "model_answer": "Python 3.13.14 与 Python 3.14.6 并未在同一天发布。根据官方 Source Releases 页面，Python 3.13.14 的发布日期是 2026 年 6 月 10 日。\n\nSources: [S1](https://www.python.org/downloads/release/python-31314/)",
+        "required_facts": [
+          "是",
+          "Python 3.13.14",
+          "Python 3.14.6",
+          "2026-06-10"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-003",
+        "question": "根据 Python 3.14.3 官方发布页，该版本发布于哪一天？页面称它相对 3.14.2 包含大约多少项 bugfix、构建改进和文档变化？",
+        "reference_answer": "Python 3.14.3 发布于 2026 年 2 月 3 日，页面称包含大约 299 项 bugfix、构建改进和文档变化。",
+        "model_answer": "根据 Python 3.14 官方发布页（PEP 745），该版本发布于 2025 年 10 月 7 日。页面明确列出了该版本的 bugfix 更新计划：包含大约 12 个 bugfix 更新，以及大约 4 个源代码安全更新。\n\nSources: [S1](https://peps.python.org/pep-0745), [S2](https://www.python.org/downloads/)",
+        "required_facts": [
+          "2026-02-03",
+          "约 299"
+        ],
+        "forbidden_facts": [
+          "2026-06-10"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-004",
+        "question": "Go 官方博客的“Go 1.26 is released”文章由谁代表 Go 团队发布，发布日期是什么？",
+        "reference_answer": "文章由 Carlos Amedee 代表 Go 团队发布，日期是 2026 年 2 月 10 日。",
+        "model_answer": "Go 官方博客的“Go 1.26 is released”文章由 GoLand 团队代表 Go 团队发布，发布日期是 2026 年 3 月 26 日。\n\nSources: [S1](https://blog.jetbrains.com/go/2026/03/26/goland-2026-1-is-released/)",
+        "required_facts": [
+          "Carlos Amedee",
+          "2026-02-10"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-005",
+        "question": "Go 官方 Release History 中，go1.25.12 的发布日期是什么？该条目明确提到哪些标准库包获得了安全修复？",
+        "reference_answer": "go1.25.12 发布于 2026 年 7 月 7 日；安全修复涉及 crypto/tls 和 os 包。",
+        "model_answer": "无法根据当前检索到的正文证据确认该问题所需的事实，因此不提供未经证据支持的答案。",
+        "required_facts": [
+          "go1.25.12",
+          "2026-07-07",
+          "crypto/tls",
+          "os"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-006",
+        "question": "截至 2026 年 7 月 25 日，Go 1.27 是否已经正式发布？官方草案预计何时发布？",
+        "reference_answer": "没有。Go 1.27 在该日期尚未正式发布，官方预计于 2026 年 8 月发布。",
+        "model_answer": "Go 1.27 is not yet released as of July 25, 2026. The official draft release notes indicate that Go 1.27 is expected in August 2026, six months after Go 1.26. The release candidate 1 has been published, and the Go team encourages users to run it in dev and file bugs. [S2](https://golangweekly.com/issues/606)\nRegarding the specific features: [S1](https://medium.com/@arthurpro/go-1-27-is-coming-generic-methods-json-v2-and-more-749d08192f5a)\n- **Generic methods**: The experimental flag for generic methods has been removed in Go 1.27, meaning generic methods are now available without the flag. [S2](https://golangweekly.com/issues/606)\n- **json/v2**: The `encoding/json` package is being rebuilt on its long-planned v2, which is expected to be part of Go 1.27. [S1](https://medium.com/@arthurpro/go-1-27-is-coming-generic-methods-json-v2-and-more-749d08192f5a)\n- **uuid package**: A new `uuid` package is planned for the standard library in Go 1.27. [S1](https://medium.com/@arthurpro/go-1-27-is-coming-generic-methods-json-v2-and-more-749d08192f5a)\n- **goroutine leak profile**: A new goroutine leak profiler has been accepted for Go 1.27, which uses the GC to find provably-stuck goroutines. [S2](https://golangweekly.com/issues/606)\n- **Post-quantum signatures in TLS**: This is mentioned as a planned feature in the draft release notes, but no specific details are provided in the available evidence. [S1](https://medium.com/@arthurpro/go-1-27-is-coming-generic-methods-json-v2-and-more-749d08192f5a)\n- **Smaller allocations**: The draft release notes mention that small allocations will be measurably cheaper, but no further details are given. [S1](https://medium.com/@arthurpro/go-1-27-is-coming-generic-methods-json-v2-and-more-749d08192f5a)\nFor the most up-to-date and detailed information, refer to the official draft release notes at [ [S2](https://golangweekly.com/issues/606)",
+        "required_facts": [
+          "尚未正式发布",
+          "2026-08"
+        ],
+        "forbidden_facts": [
+          "已经发布"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-007",
+        "question": "根据 Node.js 官方发布周期说明，Node.js 26 在 2026 年 7 月处于什么阶段？它计划何时进入 LTS，何时 EOL？",
+        "reference_answer": "2026 年 7 月时 Node.js 26 仍处于 Current 阶段；计划于 2026 年 10 月进入 LTS，并于 2029 年 4 月 EOL。",
+        "model_answer": "Node.js 26 is in the Current phase, which lasts six months (April to October 2026). It will enter LTS in October 2026 and remain in LTS until April 2029. The Alpha channel for Node.js 27 is available from October 2026 to March 2027, allowing early testing with semver-major changes permitted. [S2](https://nodejs.org/en/blog/announcements/evolving-the-nodejs-release-schedule)",
+        "required_facts": [
+          "Current",
+          "2026-10",
+          "2029-04"
+        ],
+        "forbidden_facts": [
+          "2026 年 7 月已是 lts"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-008",
+        "question": "PyTorch 官方 2.9 发布博客的发布日期是什么？列出其中一项与 C++/CUDA 扩展相关的发布亮点。",
+        "reference_answer": "PyTorch 2.9 发布博客日期为 2025 年 10 月 15 日；其中一项亮点是更新用于第三方 C++/CUDA 扩展的稳定 LibTorch ABI。",
+        "model_answer": "PyTorch 2.9 的发布日期是 2026 年 7 月 30 日。与 C++/CUDA 扩展相关的发布亮点是：Helion 在 TPU 上的托管，提供了一种高级 DSL 来编写性能敏感的 ML 内核，并与 TPU 后端集成。\n\nSources: [S1](https://pytorch.org/)",
+        "required_facts": [
+          "2025-10-15",
+          "稳定 LibTorch ABI",
+          "第三方 C++/CUDA 扩展"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-009",
+        "question": "NIST AI Risk Management Framework 1.0 的官方发布日期和 DOI 是什么？",
+        "reference_answer": "NIST AI RMF 1.0 发布于 2023 年 1 月 26 日，DOI 为 10.6028/NIST.AI.100-1。",
+        "model_answer": "The NIST AI Risk Management Framework (AI RMF 1.0) was officially released on January 26, 2023. The official DOI for the framework is 10.6028/NIST.SP.800-53r5. [S2](https://www.nist.gov/news-events/events/2023/01/nist-ai-risk-management-framework-ai-rmf-10-launch)",
+        "required_facts": [
+          "2023-01-26",
+          "10.6028/NIST.AI.100-1"
+        ],
+        "forbidden_facts": [
+          "2024-07-26"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-010",
+        "question": "WHO 官方页面称 ICD-11 在哪一届世界卫生大会上、哪一年被通过？它何时正式生效？",
+        "reference_answer": "ICD-11 于 2019 年在第 72 届世界卫生大会上通过，并于 2022 年 1 月 1 日正式生效。",
+        "model_answer": "WHO 官方页面称 ICD-11 在第 72 届世界卫生大会上于 2019 年被通过；它于 2022 年 1 月 1 日正式生效。[S1:C1](https://www.who.int/publications/m/item/eleventh-revision-of-the-international-classification-of-diseases-adoption-wha72) [S2:C1](https://www.who.int/standards/classifications/frequently-asked-questions/icd-11-implementation)",
+        "required_facts": [
+          "第 72 届世界卫生大会",
+          "2019",
+          "2022-01-01"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-011",
+        "question": "根据 vLLM 稳定版官方文档，`--max-model-len` 控制什么？该参数支持哪些人类可读的数量后缀？",
+        "reference_answer": "`--max-model-len` 控制模型上下文长度；支持 k/m/g 和 K/M/G 形式的人类可读后缀。",
+        "model_answer": "无法根据当前检索到的正文证据确认该问题所需的事实，因此不提供未经证据支持的答案。",
+        "required_facts": [
+          "模型上下文长度",
+          "k/m/g",
+          "K/M/G"
+        ],
+        "forbidden_facts": [
+          "最大新生成 token 数"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-012",
+        "question": "根据 vLLM 稳定版官方文档，`--max-num-seqs` 的含义是什么？",
+        "reference_answer": "`--max-num-seqs` 表示单次迭代中最多处理的序列数量。",
+        "model_answer": "无法根据当前检索到的正文证据确认该问题所需的事实，因此不提供未经证据支持的答案。",
+        "required_facts": [
+          "单次迭代",
+          "最多处理的序列数量"
+        ],
+        "forbidden_facts": [
+          "http 连接数"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-013",
+        "question": "在 Hugging Face Transformers 官方生成配置中，`max_new_tokens` 是否包含输入 prompt 的 token？它精确限制什么？",
+        "reference_answer": "不包含。`max_new_tokens` 限制新生成 token 的最大数量，忽略输入 prompt 已占用的 token 数。",
+        "model_answer": "In Hugging Face Transformers, `max_new_tokens` does not include the input prompt tokens; it limits the number of tokens generated by the model. It precisely caps the number of new tokens the model may produce, excluding the tokens from the prompt. [S1](https://huggingface.co/)",
+        "required_facts": [
+          "不包含",
+          "新生成 token 的最大数量",
+          "忽略 prompt"
+        ],
+        "forbidden_facts": [
+          "包含 prompt"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-014",
+        "question": "根据 Hugging Face 官方 LLM 教程，如果 GenerationConfig 未另行指定，`generate()` 默认最多返回多少个新 token？",
+        "reference_answer": "如果模型的 GenerationConfig 未另行指定，`generate()` 默认最多返回 20 个新 token。",
+        "model_answer": "根据 Hugging Face 官方 LLM 教程，如果 GenerationConfig 未另行指定，`generate()` 默认最多返回 **100 个新 token**。\n\nSources: [S1](https://huggingface.co/docs/transformers/en/llm_tutorial), [S2](https://huggingface.co/docs/transformers/en/main_classes/text_generation)",
+        "required_facts": [
+          "20",
+          "GenerationConfig 未指定"
+        ],
+        "forbidden_facts": [
+          "256"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-015",
+        "question": "Docker Compose 官方文档中的 `restart: unless-stopped` 精确表示什么？",
+        "reference_answer": "`unless-stopped` 会在不考虑退出码的情况下重启容器，但当服务被显式停止或移除后，不再继续重启。",
+        "model_answer": "BEGIN FINAL ANSWER\nThe Docker Compose `restart: unless-stopped` option means that the container will be restarted automatically if it exits with a non-zero exit code, but it will not be restarted if it is stopped manually or if it exits with a zero exit code. This ensures that the container is only restarted when there is an error or unexpected termination. [S1:C1](https://docs.docker.com/reference/compose-file/services)\nEND FINAL ANSWER",
+        "required_facts": [
+          "不考虑退出码",
+          "重启",
+          "显式停止或移除后不再重启"
+        ],
+        "forbidden_facts": [
+          "永远都会重启"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-016",
+        "question": "Git 配置 `pull.ff=only` 会让 `git pull` 在本地分支与远端分支已经分叉时怎么处理？",
+        "reference_answer": "`pull.ff=only` 只允许 fast-forward 更新；如果本地分支与远端分支已经分叉，`git pull` 会失败，而不会自动 merge 或 rebase。",
+        "model_answer": "Git 配置 `pull.ff only` 会让 `git pull` 在本地分支与远端分叉时报错，因为它只允许快进合并（fast-forward）。当本地分支与远端分支已经分叉时，`git pull` 无法直接合并，必须先执行 `git rebase` 或 `git merge` 来处理分叉。 [S1](https://blog.csdn.net/fushan2012/article/details/145555158)",
+        "required_facts": [
+          "只允许 fast-forward",
+          "分叉时失败"
+        ],
+        "forbidden_facts": [
+          "自动 merge",
+          "自动 rebase"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-017",
+        "question": "Python 官方命令行文档中，`python -I` 隐含启用哪三个选项？隔离模式会从 `sys.path` 排除什么，并忽略什么环境变量？",
+        "reference_answer": "`python -I` 隐含启用 `-E`、`-P` 和 `-s`。隔离模式会让 `sys.path` 不包含脚本目录和用户 site-packages，并忽略所有 `PYTHON*` 环境变量。",
+        "model_answer": "Python 3.7 隐含启用了三个选项：`__future__.annotations`、`__future__.async_await` 和 `typing.get_type_hints`。隔离模式会从 `sys.path` 排除当前目录（`curdir`）和父目录（`..`），并忽略环境变量 `PYTHONPATH`。 [S1](https://docs.python.org/zh-cn/3.11/whatsnew/3.7.html)",
+        "required_facts": [
+          "-E",
+          "-P",
+          "-s",
+          "脚本目录",
+          "用户 site-packages",
+          "PYTHON*"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-018",
+        "question": "Python 官方文档中的 `-P` 选项分别如何处理 `python -m module`、`python script.py`、`python -c code` 或 REPL 的路径注入？",
+        "reference_answer": "`-P` 不向 `sys.path` 前置潜在不安全路径：`-m` 模式不加入当前工作目录；执行脚本时不加入脚本目录；`-c` 或 REPL 不加入代表当前目录的空字符串。",
+        "model_answer": "The `-P` option in Python’s `python` command controls the interpreter’s path-injection behavior. It is supported by the `python` executable and the `python -m` subcommand, but not by `python script.py` or the interactive REPL. - `python -P` (or `python -m -P`): the interpreter prepends the current working directory to `sys.path` before loading modules. - `python -P <path>`: the interpreter prepends the given `<path>` to `sys.path` before loading modules. [S1](https://docs.python.org/3/contents.html)",
+        "required_facts": [
+          "-m 不加入当前工作目录",
+          "脚本不加入脚本目录",
+          "-c 或 REPL 不加入空字符串"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-019",
+        "question": "根据 curl 官方 man page，`--retry-all-errors` 应与哪个选项配合使用？若希望把 HTTP 4xx/5xx 也作为可重试错误，还应组合哪个选项？该功能从哪个 curl 版本加入？",
+        "reference_answer": "`--retry-all-errors` 应与 `--retry` 配合；若要让 HTTP 4xx/5xx 也成为错误并参与重试，应再组合 `--fail`。该选项加入于 curl 7.71.0。",
+        "model_answer": "根据 curl 官方 man page，`--retry-all-errors` 应与 `--retry` 配合使用。若希望把 HTTP 4xx/5xx 也作为可重试错误，还应组合 `--retry-all-errors` 与 `--retry-connrefused`。该功能从 curl 8.21.0 加入。\n\nSources: [S1](https://curl.se/docs/manpage.html), [S2](https://curl.se/download.html)",
+        "required_facts": [
+          "--retry",
+          "--fail",
+          "7.71.0"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-020",
+        "question": "PostgreSQL 官方文档中，`synchronous_commit=remote_apply` 会让 COMMIT 等待到什么状态？这对只读查询的可见性意味着什么？",
+        "reference_answer": "`remote_apply` 会让每次提交等待当前同步备库确认已经重放该事务；因此事务随后对备库上的用户查询可见。",
+        "model_answer": "In PostgreSQL, `synchronous_commit=remote_apply` causes the primary to wait for the transaction to be **applied on the standby** (i.e., the standby has replayed the commit record and updated its state) before acknowledging the commit to the client. This means that a transaction started on the standby will see all commits that were previously acknowledged by the master. [S1](https://www.postgresql.org/message-id/CAB7nPqSXJQaDinjHE_Za8Odxr0TZJpetarDJM2mvnHLsoU2_Pg%40mail.gmail.com)\n**Implications for read-only queries:**\nBecause the standby only sees committed data after the master has acknowledged the commit, read-only queries on the standby will always see a consistent snapshot that includes all data committed by the master up to that point. However, the standby may still be behind the master by the time it takes to apply the commit record, so queries on the standby might not see the very latest data if the master commits faster than the standby can apply. In other words, the standby’s visibility is lagged by the replication delay, but it is guaranteed to see all data that the master has acknowledged. [S1](https://www.postgresql.org/message-id/CAB7nPqSXJQaDinjHE_Za8Odxr0TZJpetarDJM2mvnHLsoU2_Pg%40mail.gmail.com)",
+        "required_facts": [
+          "等待同步备库",
+          "已经重放事务",
+          "对用户查询可见"
+        ],
+        "forbidden_facts": [
+          "只等待写入",
+          "只等待刷盘"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-021",
+        "question": "BrowseComp 原论文包含多少道问题？论文为何称其答案容易验证？",
+        "reference_answer": "BrowseComp 包含 1,266 道问题；其预测答案被设计为简短，并且可以直接与参考答案核验。",
+        "model_answer": "BrowseComp包含1266道问题。论文称其答案容易验证，因为预测答案简短且易于与参考答案对照。\n\nSources: [S1](https://arxiv.org/abs/2504.12516), [S2](https://www.datalearner.com/benchmarks/browsecomp)",
+        "required_facts": [
+          "1266",
+          "答案简短",
+          "可与参考答案核验"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-022",
+        "question": "BrowseComp 论文的完整标题和 arXiv ID 是什么？",
+        "reference_answer": "完整标题是《BrowseComp: A Simple Yet Challenging Benchmark for Browsing Agents》，arXiv ID 为 2504.12516。",
+        "model_answer": "BrowseComp 的完整标题是 \"BrowseComp: a benchmark for browsing agents\"，其 arXiv ID 是 2504.12516。 [S1](https://openai.com/index/browsecomp)",
+        "required_facts": [
+          "BrowseComp: A Simple Yet Challenging Benchmark for Browsing Agents",
+          "2504.12516"
+        ],
+        "forbidden_facts": [
+          "2508.06600"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-023",
+        "question": "FreshQA 所属论文的完整标题和 arXiv ID 是什么？",
+        "reference_answer": "论文标题是《FreshLLMs: Refreshing Large Language Models with Search Engine Augmentation》，arXiv ID 为 2310.03214。",
+        "model_answer": "FreshQA 所属论文的完整标题和 arXiv ID 是什么？\nFreshQA 所属论文的完整标题是 **“FreshQA: A Benchmark for Evaluating LLMs on Fresh Knowledge”**，arXiv ID 是 **2402.03300**。\n\nSources: [S1](https://hermes-agent.nousresearch.com/docs/user-guide/skills/bundled/research/research-arxiv)",
+        "required_facts": [
+          "FreshLLMs: Refreshing Large Language Models with Search Engine Augmentation",
+          "2310.03214"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-024",
+        "question": "FreshQA 原论文明确强调了哪两类传统静态知识问答难以覆盖的问题？",
+        "reference_answer": "论文强调两类问题：需要快速变化的最新世界知识的问题，以及包含错误前提、需要先纠正前提的问题。",
+        "model_answer": "FreshQA 明确强调了两类传统静态知识问答难以覆盖的问题：一是需要快速变化世界知识的问题，二是需要驳斥的错误前提问题。\n\nSources: [S1](https://huggingface.co/papers/2310.03214)",
+        "required_facts": [
+          "快速变化的世界知识",
+          "错误前提"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-025",
+        "question": "WebWalkerQA 的两种语言分别是什么？论文给出的语言占比分别是多少？",
+        "reference_answer": "WebWalkerQA 包含中文和英文；中文占 60.5%，英文占 39.5%。",
+        "model_answer": "WebWalkerQA 的两种语言分别是中文和英文。论文给出的语言占比分别是：中文占比约为50%，英文占比约为50%。\n\nSources: [S1](https://www.emergentmind.com/topics/gaia-and-webwalkerqa-benchmarks), [S2](https://huggingface.co/datasets/callanwu/WebWalkerQA)",
+        "required_facts": [
+          "中文",
+          "60.5%",
+          "英文",
+          "39.5%"
+        ],
+        "forbidden_facts": [
+          "纯英文"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-026",
+        "question": "WebWalkerQA 覆盖哪四个现实世界领域？",
+        "reference_answer": "四个领域是会议（conference）、组织（organization）、教育（education）和游戏（game）。",
+        "model_answer": "WebWalkerQA covers four domains: education, conference, organization, and game. [S1](https://x.com/rohanpaul_ai/status/1881682926355578925)",
+        "required_facts": [
+          "conference",
+          "organization",
+          "education",
+          "game"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": true,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-027",
+        "question": "GAIA 原论文共构建多少道问题？其中多少道题的答案被保留用于排行榜？",
+        "reference_answer": "GAIA 共构建 466 道问题，并保留了其中 300 道题的答案用于排行榜。",
+        "model_answer": "GAIA 原论文共构建 466 道问题，其中 300 道题的答案被保留用于排行榜。\n\nSources: [S1](https://arxiv.org/abs/2311.12983), [S2](https://arxiv.org/abs/2602.11964)",
+        "required_facts": [
+          "466",
+          "300"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": true,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-028",
+        "question": "GAIA 原论文列出的核心能力有哪些？论文报告的人类与带插件 GPT-4 的得分分别是多少？",
+        "reference_answer": "GAIA 涉及推理、多模态处理、网页浏览和一般工具使用能力。论文报告人类得分为 92%，带插件的 GPT-4 为 15%。",
+        "model_answer": "GAIA 的核心能力包括：推理、多模态处理、网络浏览、工具使用、协作以及在动态和异步环境中的适应能力。人类与带插件 GPT-4 的得分分别是：人类得分为 92%，带插件的 GPT-4 得分为 15%。\n\nSources: [S1](https://arxiv.org/abs/2311.12983), [S2](https://arxiv.org/abs/2602.11964)",
+        "required_facts": [
+          "推理",
+          "多模态",
+          "网页浏览",
+          "工具使用",
+          "人类 92%",
+          "GPT-4 15%"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-029",
+        "question": "SWE-bench 官方 FAQ 列出的完整集、Lite 和 Verified 分别包含多少个实例？",
+        "reference_answer": "SWE-bench 完整集有 2,294 个实例，SWE-bench Lite 有 300 个，SWE-bench Verified 有 500 个。",
+        "model_answer": "SWE-bench 官方 FAQ 列出的完整集、Lite 和 Verified 分别包含多少个实例？\n- **SWE-bench 完整集**：2,294 个实例 [S1:C1](https://www.swebench.com/SWE-bench/faq)\n- **SWE-bench Lite**：300 个实例 [S1:C1](https://www.swebench.com/SWE-bench/faq)\n- **SWE-bench Verified**：500 个实例 [S1:C1](https://www.swebench.com/SWE-bench/faq)",
+        "required_facts": [
+          "完整集 2294",
+          "Lite 300",
+          "Verified 500"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-030",
+        "question": "GPQA 完整数据集与 Diamond 子集分别有多少道题？完整集覆盖哪些学科？",
+        "reference_answer": "GPQA 完整集有 448 道题，覆盖生物学、物理学和化学；Diamond 子集有 198 道题。",
+        "model_answer": "GPQA 完整数据集包含 198 道题目，覆盖生物学、物理学和化学三个学科；GPQA 的 Diamond 子集是其中的高质量子集，同样包含 198 道题目，也覆盖生物学、物理学和化学三个学科。 [S1](https://evalscope.readthedocs.io/zh-cn/v1.6.1/benchmarks/gpqa_diamond.html)",
+        "required_facts": [
+          "448",
+          "198",
+          "生物学",
+          "物理学",
+          "化学"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-031",
+        "question": "截至 2026 年 7 月 25 日，FreshQA 官方仓库中的两个 FreshEval 评测 Notebook 位于哪个目录？文件名分别是什么？",
+        "reference_answer": "两个 Notebook 都位于仓库根目录 `/`：`fresheval_relaxed.ipynb` 和 `fresheval_strict.ipynb`。",
+        "model_answer": "截至 2026 年 7 月 25 日，FreshQA 官方仓库中的两个 FreshEval 评测 Notebook 位于 `freshqa/notebooks` 目录。文件名分别是 `fresheval_notebook.ipynb` 和 `fresheval_notebook_v2.ipynb`。\n\nSources: [S1](https://github.com/freshllms/freshqa), [S2](https://github.com/NVIDIA-AI-Blueprints/aiq/blob/develop/frontends/benchmarks/freshqa/README.md)",
+        "required_facts": [
+          "/",
+          "fresheval_relaxed.ipynb",
+          "fresheval_strict.ipynb"
+        ],
+        "forbidden_facts": [
+          "/evaluation",
+          "/eval"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-032",
+        "question": "Google Research 官方仓库中，IFEval 的主评测入口 Python 文件路径是什么？",
+        "reference_answer": "路径是 `instruction_following_eval/evaluation_main.py`。",
+        "model_answer": "The main evaluation entry point for IFEval in the official Google Research repository is `evaluation_main.py`.\n\nSources: [S1](https://github.com/google-research/google-research/blob/master/instruction_following_eval/evaluation_main.py)",
+        "required_facts": [
+          "instruction_following_eval/evaluation_main.py"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": true,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-033",
+        "question": "Google Research 官方仓库中，IFEval 原始输入数据 JSONL 文件的相对路径是什么？",
+        "reference_answer": "路径是 `instruction_following_eval/data/input_data.jsonl`。",
+        "model_answer": "The official repository for Google Research is google-research. The IFEval-pp repository is maintained by jianshuod. The original input data for IFEval is stored in the JSONL file located at `IFEval-pp/data/IFEval.jsonl`. [S1](https://github.com/orgs/google-research/repositories)",
+        "required_facts": [
+          "instruction_following_eval/data/input_data.jsonl"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-034",
+        "question": "Hugging Face Lighteval 当前主分支中，任务注册器 `registry.py` 的相对路径是什么？",
+        "reference_answer": "路径是 `src/lighteval/tasks/registry.py`。",
+        "model_answer": "The Hugging Face LightEval registry is located at `lighteval/registry.py`. [S1](https://www.philschmid.de/sagemaker-evaluate-llm-lighteval)",
+        "required_facts": [
+          "src/lighteval/tasks/registry.py"
+        ],
+        "forbidden_facts": [
+          "lighteval/tasks/registry.py"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-035",
+        "question": "Hugging Face Lighteval 当前主分支中，GSM8K 任务实现文件的相对路径是什么？",
+        "reference_answer": "路径是 `src/lighteval/tasks/tasks/gsm8k.py`。",
+        "model_answer": "The Hugging Face LightEval framework supports offline evaluation by using local model and dataset paths. For a local model, specify the model directory path (e.g., `/models/llama2-7b-alpaca`) in the `model_name` argument of the CLI or Python API, and set the environment variables `HF_HUB_OFFLINE=1`, `HF_DATASETS_OFFLINE=1`, and `TRANSFORMERS_OFFLINE=1` to enforce offline mode. For a local dataset, the recommended approach is to pre-populate the HF Datasets cache on an online machine by downloading the benchmark data (e.g., MMLU, ARC, HellaSwag, TruthfulQA) using `datasets.load_dataset` with the standard HF Hub IDs (e.g., `cais/mmlu`, `allenai/ai2_arc`, `Rowan/hellaswag`, `truthful_qa`), then copy the entire cache directory (e.g., `~/.cache/huggingface/datasets`) to the offline server. On the offline server, set `HF_HOME` (or `HF_DATASETS_CACHE`) to the copied cache directory and run LightEval with the standard task names (e.g., `mmlu`, `arc:challenge`, `hellaswag`, `truthfulqa:mc`); the framework will load the datasets from the local cache without any network access. This method is explicitly supported by the LightEval documentation and community discussions. [S1](https://huggingface.co/datasets/John6666/forum2/blob/main/eval_finetuned_llm_lighteval_2.md)",
+        "required_facts": [
+          "src/lighteval/tasks/tasks/gsm8k.py"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-036",
+        "question": "Hugging Face Lighteval 当前主分支中，LiveCodeBench 主任务实现文件的相对路径是什么？",
+        "reference_answer": "路径是 `src/lighteval/tasks/tasks/lcb/main.py`。",
+        "model_answer": "The Hugging Face Lighteval documentation states that the main task implementation file is located at `src/lighteval/tasks/tasks/LightevalTask.py`. [S1](https://huggingface.co/docs/lighteval/en/adding-a-custom-task)",
+        "required_facts": [
+          "src/lighteval/tasks/tasks/lcb/main.py"
+        ],
+        "forbidden_facts": [
+          "livecodebench.py"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-037",
+        "question": "BFCL 官方仓库当前 AST 评测检查器 `ast_checker.py` 的完整相对路径是什么？",
+        "reference_answer": "路径是 `berkeley-function-call-leaderboard/bfcl_eval/eval_checker/ast_eval/ast_checker.py`。",
+        "model_answer": "The BFCL v3 AST checker is a Python script named `ast_checker.py` located in the `gorilla/berkeley-function-call-leaderboard/` directory. [S1](https://gorilla.cs.berkeley.edu/blogs/13_bfcl_v3_multi_turn.html)",
+        "required_facts": [
+          "berkeley-function-call-leaderboard/bfcl_eval/eval_checker/ast_eval/ast_checker.py"
+        ],
+        "forbidden_facts": [
+          "berkeley-function-call-leaderboard/bfcl/eval_checker"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-038",
+        "question": "BFCL README 指出，若要替换 web_search 类别使用的搜索 API，应修改哪个 Python 文件中的 `search_engine_query` 函数？给出相对路径。",
+        "reference_answer": "应修改 `bfcl_eval/eval_checker/multi_turn_eval/func_source_code/web_search.py` 中的 `search_engine_query` 函数。",
+        "model_answer": "The BFCL V4 Agentic Format Sensitivity blog (BFCL V4) states that to assess the format sensitivity of LLMs' function calling capabilities, the return format, function documentation format, and tool call tag should be varied. Specifically, the return format is varied by setting the `return_format` parameter to one of the following values: `\"python\"`, `\"json\"`, `\"verbose_xml\"`, or `\"concise_xml\"`. [S1](https://gorilla.cs.berkeley.edu/blogs/17_bfcl_v4_prompt_variation.html)",
+        "required_facts": [
+          "bfcl_eval/eval_checker/multi_turn_eval/func_source_code/web_search.py",
+          "search_engine_query"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-039",
+        "question": "SWE-bench 当前官方评测文档称最终结果存放在哪个目录？每次运行至少会产生哪两个结构化结果文件和哪个日志目录？",
+        "reference_answer": "最终结果位于 `evaluation_results/`；每次运行会产生 `results.json`、`instance_results.jsonl` 和 `run_logs/`。",
+        "model_answer": "SWE-bench 当前官方评测文档称最终结果存放在 `SWE-bench/SWE-bench/docs/evaluation/` 目录。每次运行至少会产生两个结构化结果文件：`results.json` 和 `results.csv`，以及一个日志目录 `logs/`。\n\nSources: [S1](https://www.swebench.com/SWE-bench), [S2](https://www.swebench.com/SWE-bench/api/inference)",
+        "required_facts": [
+          "evaluation_results",
+          "results.json",
+          "instance_results.jsonl",
+          "run_logs"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-040",
+        "question": "EleutherAI lm-evaluation-harness 当前主分支中，GPQA 任务 README 的相对路径是什么？",
+        "reference_answer": "路径是 `lm_eval/tasks/gpqa/README.md`。",
+        "model_answer": "The README for the GPQA task is located at lm_eval/tasks/gpqa/README.md. [S1:C1](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/gpqa/README.md)",
+        "required_facts": [
+          "lm_eval/tasks/gpqa/README.md"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": true,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-041",
+        "question": "OpenAI 的 BrowseComp 官方介绍页发布日期与 BrowseComp arXiv 首次提交日期相差多少天？说明哪个更早。按自然日期差计算。",
+        "reference_answer": "OpenAI 介绍页发布于 2025 年 4 月 10 日，arXiv 首次提交于 2025 年 4 月 16 日；介绍页早 6 天。",
+        "model_answer": "The BrowseComp arXiv paper was submitted on April 10, 2025, and the BrowseComp official website was published on April 10, 2025. The two dates are identical, so the difference is 0 days. The arXiv submission and the website publication occurred on the same day. [S1](https://openai.com/index/browsecomp)",
+        "required_facts": [
+          "6 天",
+          "OpenAI 介绍页更早",
+          "2025-04-10",
+          "2025-04-16"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-042",
+        "question": "FreshLLMs/FreshQA 论文首次提交日到 BrowseComp 论文首次提交日相隔多少天？按 arXiv 页面日期和自然日期差计算。",
+        "reference_answer": "FreshLLMs/FreshQA 于 2023 年 10 月 5 日首次提交，BrowseComp 于 2025 年 4 月 16 日首次提交，相隔 559 天。",
+        "model_answer": "FreshLLMs/FreshQA 论文首次提交日为 2023年10月5日，BrowseComp 论文首次提交日为 2023年10月22日。按 arXiv 页面日期和自然日期差计算，两者相差 17 天。\n\nSources: [S1](https://arxiv.org/abs/2310.03214), [S2](https://arxiv.org/html/2310.03214v1)",
+        "required_facts": [
+          "559 天",
+          "2023-10-05",
+          "2025-04-16"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-043",
+        "question": "Python 3.14.3 到 Python 3.14.6 的官方发布日期相隔多少天？按自然日期差计算。",
+        "reference_answer": "Python 3.14.3 发布于 2026 年 2 月 3 日，3.14.6 发布于 2026 年 6 月 10 日，相隔 127 天。",
+        "model_answer": "Python 3.14.3 到 Python 3.14.6 的官方发布日期相隔 **100 天**（自然日期差）。具体日期为：\n- Python 3.14.3：2026年2月3日 [S1](https://peps.python.org/pep-0745)\n- Python 3.14.6：2026年6月10日 [S1](https://peps.python.org/pep-0745)\n计算方式：从2026年2月3日到2026年6月10日，共经过100天（2月剩余28天，3月31天，4月30天，5月31天，6月10天，合计28+31+30+31+10=130天，减去2月3日到2月28日的25天，得105天，再减去3月1日到3月3日的3天，得102天，再减去4月1日到4月30日的30天，得72天，再减去5月1日到5月31日的31天，得41天，再减去6月1日到6月10日的10天，得31天？实际上更简单的方法是直接计算日期差：2026年2月3日到2026年6月10日，2月剩余28天（3日到28日共26天？更准确：2月3日到2月28日是25天（3日到28日共26天？不，2月3日到2月4日是1天，所以2月3日到2月28日是25天），3月31天，4月30天，5月31天，6月10天，总和25+31+30+31+10=127天，但这是从2月3日到6月10日的天数，包括起始日？通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天（因为2月3日到3月3日是28天，3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天？不对，这是从2月3日到6月3日是127天？实际上2月3日到3月3日是28天（2月有28天，从3日到28日是25天，加上3月1日到3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但这是从2月3日到6月10日的天数，包括2月3日吗？通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天（因为2月3日到3月3日是28天，3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天，但这是从2月3日到6月10日的天数，包括2月3日吗？实际上，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但常见的日期差计算中，从2月3日到6月10日是100天？我们来验证：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果包括2月3日，那么天数是127天，但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到6月10日，2月剩余25天（3日到28日），3月31天，4月30天，5月31天，6月10天，总和25+31+30+31+10=127天。但这是从2月3日到6月10日的天数，包括2月3日吗？如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来计算：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但常见的日期差计算中，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+7=127天。但实际上，从2月3日到6月10日，如果2月3日是第0天，那么6月10日是第127天，所以差值为127天。但通常日期差是结束日减去开始日，即6月10日减去2月3日等于100天？我们来用另一种方法：2月3日到3月3日是28天（2月3日到2月28日是25天，3月1日到3月3日是3天，共28天），3月3日到4月3日是31天，4月3日到5月3日是30天，5月3日到6月3日是31天，6月3日到6月10日是7天，总和28+31+30+31+",
+        "required_facts": [
+          "127 天",
+          "2026-02-03",
+          "2026-06-10"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-044",
+        "question": "Go 1.26 正式发布日到 go1.25.12 维护版本发布日相隔多少天？按自然日期差计算。",
+        "reference_answer": "Go 1.26 于 2026 年 2 月 10 日发布，go1.25.12 于 2026 年 7 月 7 日发布，相隔 147 天。",
+        "model_answer": "Go 1.26.0 was released on 2026年2月10日 (2026-02-10). Go 1.25.12 was released on 2025年8月12日 (2025-08-12). The natural day difference is 185 days. [S2](https://endoflife.date/go)",
+        "required_facts": [
+          "147 天",
+          "2026-02-10",
+          "2026-07-07"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-045",
+        "question": "根据 SWE-bench 官方规模，完整集比 Verified 子集多多少个实例？",
+        "reference_answer": "SWE-bench 完整集比 Verified 多 1,794 个实例。",
+        "model_answer": "The visible evidence is the SWE-bench Verified page. The page states that SWE-bench Verified is a human-filtered subset of 500 instances. The full SWE-bench benchmark has 2,294 instances. The difference is 2,294 - 500 = 1,794. [S1](https://www.swebench.com/verified.html)\nAnswer: SWE-bench Verified is a human-filtered subset of 500 instances. The full SWE-bench benchmark has 2,294 instances. The difference is 2,294 - 500 = 1,794. [S1](https://www.swebench.com/verified.html)",
+        "required_facts": [
+          "1794"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-046",
+        "question": "SWE-bench Verified 的 500 个实例约占完整 2,294 个实例的百分之多少？四舍五入到小数点后一位。",
+        "reference_answer": "约为 21.8%。",
+        "model_answer": "SWE-bench Verified 的 500 个实例约占完整 2,294 个实例的 21.7%。\n\nSources: [S1](https://epoch.ai/benchmarks/swe-bench-verified), [S2](https://openai.com/index/introducing-swe-bench-verified)",
+        "required_facts": [
+          "21.8%"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-047",
+        "question": "GPQA Diamond 的 198 道题约占完整 GPQA 448 道题的百分之多少？四舍五入到小数点后一位。",
+        "reference_answer": "约为 44.2%。",
+        "model_answer": "GPQA Diamond 的 198 道题约占完整 GPQA 448 道题的 44.1%。\n\nSources: [S1](https://epoch.ai/gradient-updates/gpqa-diamond-whats-left), [S2](https://evalscope.readthedocs.io/en/latest/benchmarks/gpqa_diamond.html)",
+        "required_facts": [
+          "44.2%"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-048",
+        "question": "WebWalkerQA 中中文占比比英文占比高多少个百分点？",
+        "reference_answer": "中文占比比英文高 21.0 个百分点。",
+        "model_answer": "The requested fact is the percentage point difference between Chinese and English in WebWalkerQA. The evidence body does not state the exact percentages or the difference; it only states that the dataset contains both Chinese and English. Therefore the requested fact is unconfirmed.\nAnswer: The percentage point difference between Chinese and English in WebWalkerQA is unconfirmed.\n\nSources: [S1](https://huggingface.co/datasets/callanwu/WebWalkerQA), [S2](https://www.themoonlight.io/zh/review/webwalker-benchmarking-llms-in-web-traversal)",
+        "required_facts": [
+          "21.0 个百分点"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-049",
+        "question": "GAIA 论文保留答案的 300 道题约占全部 466 道题的百分之多少？四舍五入到小数点后一位。",
+        "reference_answer": "约为 64.4%。",
+        "model_answer": "GAIA 论文保留答案的 300 道题约占全部 466 道题的 64.4%。 [S1](https://www.chatpaper.ai/zh/dashboard/paper/19533b89-b7e5-4551-a342-d9c72b9dc6b3)",
+        "required_facts": [
+          "64.4%"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": true,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-050",
+        "question": "NIST AI RMF 1.0 发布日到 NIST Generative AI Profile 发布日相隔多少天？按自然日期差计算。",
+        "reference_answer": "AI RMF 1.0 发布于 2023 年 1 月 26 日，Generative AI Profile 发布于 2024 年 7 月 26 日，相隔 547 天。",
+        "model_answer": "The NIST AI Risk Management Framework (AI RMF 1.0) was released on January 26, 2023. The NIST Generative AI Profile was released on January 26, 2023. The natural day difference between these two dates is 0 days. [S1](https://www.nist.gov/news-events/events/2023/01/nist-ai-risk-management-framework-ai-rmf-10-launch)",
+        "required_facts": [
+          "547 天",
+          "2023-01-26",
+          "2024-07-26"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-051",
+        "question": "有人声称 FreshQA 的两个评测 Notebook 位于仓库的 `/evaluation` 目录。核验该说法，并给出正确目录和文件名。",
+        "reference_answer": "该说法错误。两个评测 Notebook 位于仓库根目录 `/`，文件为 `fresheval_relaxed.ipynb` 和 `fresheval_strict.ipynb`。",
+        "model_answer": "**核验结论**：用户声称 FreshQA 的两个评测 Notebook 位于仓库的 `/evaluation` 目录。根据提供的证据，该声称不正确。FreshQA 的评测 Notebook 位于仓库根目录下的 `notebooks` 目录，而非 `/evaluation`。具体文件名为 `freshqa_eval.ipynb` 和 `freshqa_eval_v2.ipynb`。\n**正确目录与文件名**：\n- 目录：`notebooks`\n- 文件名：`freshqa_eval.ipynb` 和 `freshqa_eval_v2.ipynb`\n\nSources: [S1](https://github.com/freshllms/freshqa), [S2](https://internvl.readthedocs.io/en/latest/get_started/eval_data_preparation.html)",
+        "required_facts": [
+          "错误",
+          "根目录 /",
+          "fresheval_relaxed.ipynb",
+          "fresheval_strict.ipynb"
+        ],
+        "forbidden_facts": [
+          "/evaluation"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": true,
+        "status": "completed"
+      },
+      {
+        "id": "WR-052",
+        "question": "“BrowseComp 是 OpenAI 在 2024 年发布的 benchmark。”这句话是否正确？使用官方介绍页和 arXiv 日期纠正。",
+        "reference_answer": "不正确。OpenAI 的官方介绍页日期是 2025 年 4 月 10 日，论文于 2025 年 4 月 16 日提交至 arXiv；不是 2024 年。",
+        "model_answer": "- If the user asks for a correction, state the correct value and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a configuration, state the correct value and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a value that is not present, write unconfirmed.\n- If the user asks for a comparison, state the correct comparison and cite the source. [S1](https://openai.com/index/browsecomp)\n- If the user asks for a list, write the list and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a description, write the description and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a summary, write the summary and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a table, write the table and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a code block, write the code block and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a command, write the command and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a URL, write the URL and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a date, write the date and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a time, write the time and cite the source. [S1](https://openai.com/index/browsecomp)\n- If the user asks for a number, write the number and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a percentage, write the percentage and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a ratio, write the ratio and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a fraction, write the fraction and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a decimal, write the decimal and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a boolean, write true or false and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a yes/no, write yes or no and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a choice, write the choice and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a selection, write the selection and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a recommendation, write the recommendation and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a suggestion, write the suggestion and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a tip, write the tip and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a hint, write the hint and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the user asks for a clue, write the clue and cite the source. [S2](https://arxiv.org/abs/2504.12516)\n- If the",
+        "required_facts": [
+          "不正确",
+          "2025-04-10",
+          "2025-04-16"
+        ],
+        "forbidden_facts": [
+          "2024 年发布"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-053",
+        "question": "“WebWalkerQA 是纯英文数据集。”这句话是否正确？给出论文中的语言构成。",
+        "reference_answer": "不正确。WebWalkerQA 是中英双语数据集，中文占 60.5%，英文占 39.5%。",
+        "model_answer": "The user’s statement is: “WebWalkerQA 是纯英文数据集。” This sentence is incorrect. The dataset is not pure English; it contains both English and Chinese data. The language composition is stated in the source as follows: [S1](https://www.emergentmind.com/topics/crawlqa)\n- The dataset is described as “English and Chinese data” in the Hugging Face card ([S2:C1](https://huggingface.co/datasets/callanwu/WebWalkerQA)).\n- The paper abstract also notes that the dataset is “English and Chinese” ([S1:C1](https://www.emergentmind.com/topics/crawlqa)).\nTherefore, the correct answer is: WebWalkerQA is not a pure English dataset; it includes both English and Chinese data. [S2](https://huggingface.co/datasets/callanwu/WebWalkerQA)",
+        "required_facts": [
+          "不正确",
+          "中文 60.5%",
+          "英文 39.5%"
+        ],
+        "forbidden_facts": [
+          "纯英文"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": true,
+        "status": "completed"
+      },
+      {
+        "id": "WR-054",
+        "question": "“GAIA 只测试搜索引擎调用，不涉及多模态或其他工具。”根据原论文判断并纠正。",
+        "reference_answer": "该说法错误。GAIA 同时要求推理、多模态处理、网页浏览和一般工具使用能力，并非只测试搜索引擎调用。",
+        "model_answer": "GAIA is a suite of datasets and evaluation frameworks that assess AI assistant performance, vision-language modeling, and astrophysical calibration. It consists of 466 real-world questions requiring robust tool use, multi-step reasoning, and multimodal information extraction—directly probing whether an assistant achieves human-level versatility, not merely professional specialization. For vision-language research, GAIA ([Zavras et al., 13 Feb 2025](/papers/2502.09598)) is a 205,150-pair dataset engineered for remote sensing (RS), yet designed for transferability across vision-language tasks. In stellar spectroscopy, the GAIA FGK benchmark star sample ([Heiter et al., 2015](/papers/1506.06095), [Hawkins et al., 2016](/papers/1605.08229), [Jofre et al., 2018](/papers/1808.09778), [Adibekyan et al., 2020](/papers/2008.08371)) establishes calibration anchors spanning wide parameter space in effective temperature, surface gravity, and metallicity. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nThe term \"General-Purpose Benchmark GAIA\" encompasses several benchmark datasets and evaluation frameworks labeled [GAIA]( notably in AI assistant performance and multimodal vision-language learning, alongside foundations in astrophysical pipeline calibration. These [GAIA benchmarks]( set rigorous standards in their respective domains, with an emphasis on holistic coverage, systematic construction, and objective validation protocols. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\n## GAIA Benchmark Construction and Methodology\n### AI Assistant Benchmark GAIA ([Mialon et al., 2023](/papers/2311.12983))\nQuestions are crafted to be conceptually accessible for humans (92% accuracy) but challenging for state-of-the-art LLMs, which achieve only ~15% accuracy with tool use. Each question is validated against a prescribed \"source of truth\" (e.g., Wikipedia revision, NIH database, attached files), admits a unique factoid answer, and survives multi-round expert and independent annotation. Difficulty and required abilities are labeled, spanning web browsing, multi-modality, and file parsing, and covering three difficulty levels. Evaluation is strictly automated via normalized exact-match: [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nAccuracy=1N∑i=1N1(normalize(y^i)=normalize(yi))×100%.\\mathrm{Accuracy} = \\frac{1}{N} \\sum_{i=1}^{N} \\mathbf{1}\\bigl(\\mathrm{normalize}(\\hat y_i) = \\mathrm{normalize}(y_i)\\bigr) \\times 100\\%.Accuracy=N1​i=1∑N​1(normalize(y^​i​)=normalize(yi​))×100%. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nLeaderboard evaluation uses held-out answers to ensure answer integrity. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\n### Vision-Language GAIA Dataset ([Zavras et al., 13 Feb 2025](/papers/2502.09598))\nCoverage includes 41,030 RS images × 5 synthetic, scientifically accurate captions each = 205,150 pairs. Construction employs targeted web-scraping from NASA, ESA, NOAA, AIRBUS, and Planet, followed by curated caption synthesis via [GPT-4o]( using domain-specific templates guaranteeing [diversity]( and scientific precision. The protocol explicitly enforces metadata richness, non-redundancy, and removal of hallucinated content. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\n### GAIA FGK Benchmark Stars (Stellar Spectroscopy)\nThe GAIA FGK benchmark star sample ([Heiter et al., 2015](/papers/1506.06095), [Hawkins et al., 2016](/papers/1605.08229), [Jofre et al., 2018](/papers/1808.09778), [Adibekyan et al., 2020](/papers/2008.08371)) consists of 466 real-world questions requiring robust tool use, multi-step reasoning, and multimodal information extraction—directly probing whether an assistant achieves human-level versatility, not merely professional specialization. For vision-language research, the [GAIA]( dataset is a 205,150-pair dataset engineered for remote sensing (RS), yet designed for transferability across vision-language tasks. In stellar spectroscopy, the GAIA FGK benchmark star sample ([Heiter et al., 2015](/papers/1506.06095), [Hawkins et al., 2016](/papers/1605.08229), [Jofre et al., 2018](/papers/1808.09778), [Adibekyan et al., 2020](/papers/2008.08371)) consists of 41,030 RS images × 5 synthetic, scientifically accurate captions each = 205,150 pairs. Construction employs targeted web-scraping from NASA, ESA, NOAA, AIRBUS, and Planet, followed by curated caption synthesis via [GPT-4o]( using domain-specific templates guaranteeing [diversity]( and scientific precision. The protocol explicitly enforces metadata richness, non-redundancy, and removal of hallucinated content. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nThe term \"GAIA\" is commonly used in the context of the European Space Agency's Gaia mission, which is a space observatory designed to create a precise three-dimensional map of the Milky Way galaxy. However, in the context of the provided text, GAIA refers to a suite of datasets and evaluation frameworks that assess AI assistant performance, vision-language modeling, and astrophysical calibration. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nThe GAIA benchmark for AI assistants, as described in the paper \"GAIA: A General-Purpose Benchmark for AI Assistants\" (Mialon et al., 2023), evaluates AI models on real-world tasks that are conceptually simple for humans but require multi-step reasoning, web browsing, tool use, and multi-modal understanding for AI. The benchmark consists of 466 real-world questions requiring robust tool use, multi-step reasoning, and multimodal information extraction—directly probing whether an assistant achieves human-level versatility, not merely professional specialization. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nThe GAIA benchmark for vision-language modeling, as described in the paper \"GAIA: A Global, Multi-modal, Multi-scale Vision-Language Dataset for Remote Sensing Image Analysis\" (Zavras et al., 2025), is a dataset engineered for remote sensing (RS) but designed to transfer across vision-language tasks. It includes 205,150 pairs of images and captions, with a focus on diversity and scientific precision. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nThe GAIA FGK benchmark stars, as described in the paper \"Gaia FGK Benchmark Stars: Effective Temperatures and Surface Gravities\" (Heiter et al., 2015), are a set of stars with high-quality interferometric diameters, bolometric fluxes, and mass constraints, used to calibrate stellar parameters. The benchmark includes 41,030 RS images × 5 synthetic, scientifically accurate captions each = 205,150 pairs. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nThe GAIA benchmark for astrophysical calibration, as described in the paper \"Benchmark GAIA: A General-Purpose Benchmark for AI Assistants\" (Mialon et al., 2023), is a suite of datasets and evaluation frameworks that assess AI assistant performance, vision-language modeling, and astrophysical calibration. The benchmark includes 466 real-world questions requiring robust tool use, multi-step reasoning, and multimodal information extraction—directly probing whether an assistant achieves human-level versatility, not merely professional specialization. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nThe GAIA benchmark for AI assistants, as described in the paper \"GAIA: A General-Purpose Benchmark for AI Assistants\" (Mialon et al., 2023), is a suite of datasets and evaluation frameworks that assess AI assistant performance, vision-language modeling, and astrophysical calibration. The benchmark includes 466 real-world questions requiring robust tool use, multi-step reasoning, and multimodal information extraction—directly probing whether an assistant achieves human-level versatility, not merely professional specialization. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nThe GAIA benchmark for vision-language modeling, as described in the paper \"GAIA: A Global, Multi-modal, Multi-scale Vision-Language Dataset for Remote Sensing Image Analysis\" (Zavras et al., 2025), is a dataset engineered for remote sensing (RS) but designed to transfer across vision-language tasks. The benchmark includes 205,150 pairs of images and captions, with a focus on diversity and scientific precision. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nThe GAIA benchmark for astrophysical calibration, as described in the paper \"Gaia FGK Benchmark Stars: Effective Temperatures and Surface Gravities\" (Heiter et al., 2015), is a set of stars with high-quality interferometric diameters, bolometric fluxes, and mass constraints, used to calibrate stellar parameters. The benchmark includes 41,030 RS images × 5 synthetic, scientifically accurate captions each = 205,150 pairs. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nThe GAIA benchmark for AI assistants, as described in the paper \"Benchmark GAIA: A General-Purpose Benchmark for AI Assistants\" (Mialon et al., 2023), is a suite of datasets and evaluation frameworks that assess AI assistant performance, vision-language modeling, and astrophysical calibration. The benchmark includes 466 real-world questions requiring robust tool use, multi-step reasoning, and multimodal information extraction—directly probing whether an assistant achieves human-level versatility, not merely professional specialization. [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)\nThe GAIA benchmark for AI assistants, as described in the paper \"Benchmark GAIA: A General-Purpose Benchmark for AI Assistants\" (Mi [S1](https://www.emergentmind.com/topics/general-purpose-benchmark-gaia)",
+        "required_facts": [
+          "错误",
+          "推理",
+          "多模态",
+          "网页浏览",
+          "工具使用"
+        ],
+        "forbidden_facts": [
+          "只测试搜索"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-055",
+        "question": "“SWE-bench Verified 就是包含 2,294 个实例的完整 SWE-bench。”这句话是否正确？",
+        "reference_answer": "不正确。完整 SWE-bench 有 2,294 个实例，SWE-bench Verified 是其中经工程师验证的 500 个实例子集。",
+        "model_answer": "SWE-bench Verified is a human-validated subset of the original SWE-bench dataset, consisting of 500 samples that evaluate AI models’ ability to solve real-world software issues. The dataset was curated through a rigorous human annotation process involving 93 software developers. Each sample is derived from a GitHub issue in one of 12 open-source Python repositories. Each sample has an associated pull request (PR), which includes both the solution code and unit tests that validate the solution. These unit tests are known as `FAIL_TO_PASS` tests. The dataset was created to address issues with the original SWE-bench, such as underspecified problem statements and unit tests that may unfairly mark valid solutions as incorrect. The annotation process involved three separate annotators to ensure the issue description is well-specified, the unit tests are appropriate, and the sample is free of other major issues. The dataset is available for download. [S2](https://openai.com/index/introducing-swe-bench-verified)",
+        "required_facts": [
+          "不正确",
+          "完整集 2294",
+          "Verified 500",
+          "子集"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-056",
+        "question": "“GPQA Diamond 包含 GPQA 的全部 448 道题。”核验并纠正。",
+        "reference_answer": "不正确。完整 GPQA 有 448 道题，Diamond 只是其中的 198 道高质量、高难度子集。",
+        "model_answer": "GPQA Diamond is a benchmark consisting of 198 multiple-choice science questions in biology, chemistry, and physics, ranging from “hard undergraduate” to “post-graduate level”. The questions were developed by experts and validated by two expert validators, who must approve each question before inclusion. The dataset includes discussion among the experts as they developed the questions. [S1](https://epoch.ai/gradient-updates/gpqa-diamond-whats-left)\nGPQA Diamond includes the following subdomains: biology, chemistry (general), molecular biology, astrophysics, physics (general), relativistic mechanics, electromagnetism and photonics, genetics. Organic chemistry is over-represented: it accounts for 70% of the 40 questions that models consistently get wrong, compared to 36% of the entire benchmark. [S1](https://epoch.ai/gradient-updates/gpqa-diamond-whats-left)\nThe models’ scores on GPQA Diamond are clustered in a narrow band, around 83%. On the remaining 40 questions (20%), the models’ answers are scattered, and it is unclear if they are simply beyond them or if the questions are invalid. [S1](https://epoch.ai/gradient-updates/gpqa-diamond-whats-left)\nThe author of the GPQA Diamond dataset has a concern that the remaining 40 questions may be invalid, and is working to investigate them. The author has a PhD in the relevant field and is working to hire an organic chemistry expert to double-check these questions. [S1](https://epoch.ai/gradient-updates/gpqa-diamond-whats-left)\nThe author has a chance to revise the question after feedback from the first validator. The author is concerned that the question may be flawed, but the validators found it to be valid. [S1](https://epoch.ai/gradient-updates/gpqa-diamond-whats-left)\nThe author is concerned that the question may be flawed, but the validators found it to be valid. [S1](https://epoch.ai/gradient-updates/gpqa-diamond-whats-left)\nThe author is concerned that the question may be flawed, but the validators found it to be valid. The author is concerned that the [S1](https://epoch.ai/gradient-updates/gpqa-diamond-whats-left)",
+        "required_facts": [
+          "不正确",
+          "448",
+          "198",
+          "子集"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-057",
+        "question": "“截至 2026 年 7 月 25 日，Go 1.27 已经正式发布。”根据官方 Release Notes 判断。",
+        "reference_answer": "不正确。截至该日期，Go 1.27 尚未正式发布；官方预计于 2026 年 8 月发布。",
+        "model_answer": "截至 2026 年 7 月 25 日，Go 1.27 尚未正式发布。官方 Release Notes 中未提供任何关于该版本的信息，因此无法确认其发布状态。",
+        "required_facts": [
+          "不正确",
+          "尚未正式发布",
+          "2026-08"
+        ],
+        "forbidden_facts": [
+          "已经正式发布"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-058",
+        "question": "“Node.js 26 在 2026 年 7 月已经是 LTS。”根据 Node.js 官方时间表纠正。",
+        "reference_answer": "不正确。Node.js 26 在 2026 年 7 月仍是 Current，计划到 2026 年 10 月才进入 LTS。",
+        "model_answer": "Node.js 26 在 2026 年 7 月已经是 LTS。根据官方时间表，Node.js 26 的 Alpha 阶段从 2026 年 10 月开始，Current 阶段从 2026 年 4 月开始，LTS 阶段从 2026 年 10 月开始，并持续 30 个月，因此在 2026 年 7 月时它已经处于 LTS 状态。\n\nSources: [S1](https://nodejs.org/en/about/previous-releases), [S2](https://nodejs.org/en/blog/announcements/evolving-the-nodejs-release-schedule)",
+        "required_facts": [
+          "不正确",
+          "Current",
+          "2026-10"
+        ],
+        "forbidden_facts": [
+          "2026 年 7 月是 lts"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-059",
+        "question": "“ICD-11 在 2019 年通过后立即于同年生效。”根据 WHO 官方时间线纠正。",
+        "reference_answer": "不正确。ICD-11 于 2019 年在第 72 届世界卫生大会上通过，但直到 2022 年 1 月 1 日才正式生效。",
+        "model_answer": "ICD-11 was adopted by the World Health Assembly in May 2019 and came into effect globally on 1 January 2022. Countries are encouraged to transition to ICD-11 as soon as possible, but there is no penalty for those that do not complete the transition within five years. WHO provides resources such as an Implementation or Transition Guide, a Coding Tool, and an API to support the transition. ICD-11 is maintained through an open and transparent process that involves ongoing input from civil society, clinicians, statisticians, researchers, and national institutions. [S2](https://www.who.int/standards/classifications/frequently-asked-questions/icd-11-implementation)",
+        "required_facts": [
+          "不正确",
+          "2019",
+          "第 72 届世界卫生大会",
+          "2022-01-01"
+        ],
+        "forbidden_facts": [
+          "2019 年生效"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-060",
+        "question": "“NASA 的 Perseverance 火星车于 2021 年降落在 Gale Crater。”核验着陆地点和日期。",
+        "reference_answer": "不正确。Perseverance 于 2021 年 2 月 18 日降落在 Jezero Crater（杰泽罗陨石坑），不是 Gale Crater。",
+        "model_answer": "NASA’s Perseverance rover landed in Jezero Crater, not Gale Crater. The official NASA source confirms the landing date as February 18, 2021, and the landing site as Jezero Crater. [S1](https://science.nasa.gov/mission/mars-2020-perseverance/location-map)",
+        "required_facts": [
+          "不正确",
+          "2021-02-18",
+          "Jezero Crater"
+        ],
+        "forbidden_facts": [
+          "gale crater"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": true,
+        "status": "completed"
+      }
+    ]
+  },
+  "previous_prompt": {
+    "run": "previous_prompt",
+    "file": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/gold_60_prompt_answer_first_gated_20260803/gold_60_answer_first_gated_chunk2_concurrent_20260731.json",
+    "n": 60,
+    "completed": 60,
+    "strict_pass": 5,
+    "strict_pass_rate": 8.33,
+    "answer_nonempty": 60,
+    "usable_body": 53,
+    "usable_body_rate": 88.33,
+    "forbidden_fact_hits": 2,
+    "avg_ms": 0.0,
+    "p95_ms": 0.0,
+    "by_category": {
+      "current_release": {
+        "n": 1,
+        "strict": 0,
+        "body": 1
+      },
+      "release_metadata": {
+        "n": 5,
+        "strict": 0,
+        "body": 4
+      },
+      "current_status": {
+        "n": 1,
+        "strict": 0,
+        "body": 1
+      },
+      "release_schedule": {
+        "n": 1,
+        "strict": 0,
+        "body": 1
+      },
+      "standards_metadata": {
+        "n": 2,
+        "strict": 0,
+        "body": 2
+      },
+      "documentation_parameter": {
+        "n": 3,
+        "strict": 0,
+        "body": 3
+      },
+      "documentation_default": {
+        "n": 1,
+        "strict": 0,
+        "body": 1
+      },
+      "documentation_semantics": {
+        "n": 6,
+        "strict": 0,
+        "body": 3
+      },
+      "benchmark_metadata": {
+        "n": 6,
+        "strict": 3,
+        "body": 5
+      },
+      "paper_metadata": {
+        "n": 2,
+        "strict": 0,
+        "body": 2
+      },
+      "benchmark_design": {
+        "n": 2,
+        "strict": 0,
+        "body": 2
+      },
+      "repository_navigation": {
+        "n": 10,
+        "strict": 2,
+        "body": 9
+      },
+      "multi_source_calculation": {
+        "n": 4,
+        "strict": 0,
+        "body": 4
+      },
+      "single_source_calculation": {
+        "n": 1,
+        "strict": 0,
+        "body": 1
+      },
+      "numeric_synthesis": {
+        "n": 5,
+        "strict": 0,
+        "body": 4
+      },
+      "false_premise": {
+        "n": 10,
+        "strict": 0,
+        "body": 10
+      }
+    },
+    "details": [
+      {
+        "id": "WR-001",
+        "question": "截至 2026 年 7 月 25 日，Python 官方下载页列出的最新稳定版 Python 是什么？给出版本号和发布日期。",
+        "reference_answer": "Python 3.14.6，发布日期为 2026 年 6 月 10 日。",
+        "model_answer": "截至 2026 年 7 月 25 日，Python 官方下载页列出的最新稳定版 Python 是 Python 3.12.0，发布日期为 2023 年 10 月 2 日。\n\nSources: [S1](https://www.python.org/downloads/release/python-3120)",
+        "required_facts": [
+          "Python 3.14.6",
+          "2026-06-10"
+        ],
+        "forbidden_facts": [
+          "python 3.14.3",
+          "python 3.13.14"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-002",
+        "question": "Python 官方 Source Releases 页面中，Python 3.13.14 与 Python 3.14.6 是否在同一天发布？如果是，日期是什么？",
+        "reference_answer": "是。Python 3.13.14 和 Python 3.14.6 都发布于 2026 年 6 月 10 日。",
+        "model_answer": "Python 3.13.14 与 Python 3.14.6 并未在同一天发布。根据官方 Source Releases 页面，Python 3.13.14 的发布日期是 2026 年 6 月 10 日。\n\nSources: [S1](https://www.python.org/downloads/release/python-31314/)",
+        "required_facts": [
+          "是",
+          "Python 3.13.14",
+          "Python 3.14.6",
+          "2026-06-10"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-003",
+        "question": "根据 Python 3.14.3 官方发布页，该版本发布于哪一天？页面称它相对 3.14.2 包含大约多少项 bugfix、构建改进和文档变化？",
+        "reference_answer": "Python 3.14.3 发布于 2026 年 2 月 3 日，页面称包含大约 299 项 bugfix、构建改进和文档变化。",
+        "model_answer": "根据 Python 3.14 官方发布页（PEP 745），该版本发布于 2025 年 10 月 7 日。页面明确列出了该版本的 bugfix 更新计划：包含大约 12 个 bugfix 更新，以及大约 4 个源代码安全更新。\n\nSources: [S1](https://peps.python.org/pep-0745), [S2](https://www.python.org/downloads/)",
+        "required_facts": [
+          "2026-02-03",
+          "约 299"
+        ],
+        "forbidden_facts": [
+          "2026-06-10"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-004",
+        "question": "Go 官方博客的“Go 1.26 is released”文章由谁代表 Go 团队发布，发布日期是什么？",
+        "reference_answer": "文章由 Carlos Amedee 代表 Go 团队发布，日期是 2026 年 2 月 10 日。",
+        "model_answer": "Go 官方博客的“Go 1.26 is released”文章由 GoLand 团队代表 Go 团队发布，发布日期是 2026 年 3 月 26 日。\n\nSources: [S1](https://blog.jetbrains.com/go/2026/03/26/goland-2026-1-is-released/)",
+        "required_facts": [
+          "Carlos Amedee",
+          "2026-02-10"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-005",
+        "question": "Go 官方 Release History 中，go1.25.12 的发布日期是什么？该条目明确提到哪些标准库包获得了安全修复？",
+        "reference_answer": "go1.25.12 发布于 2026 年 7 月 7 日；安全修复涉及 crypto/tls 和 os 包。",
+        "model_answer": "The requested release date and security fixes for Go 1.25.12 are not supported by the retrieved evidence.",
+        "required_facts": [
+          "go1.25.12",
+          "2026-07-07",
+          "crypto/tls",
+          "os"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-006",
+        "question": "截至 2026 年 7 月 25 日，Go 1.27 是否已经正式发布？官方草案预计何时发布？",
+        "reference_answer": "没有。Go 1.27 在该日期尚未正式发布，官方预计于 2026 年 8 月发布。",
+        "model_answer": "截至 2026 年 7 月 25 日，Go 1.27 已经正式发布。官方草案预计在 2026 年 7 月 25 日发布，但具体日期未在提供的源中明确说明。\n\nSources: [S1](https://victoriametrics.com/blog/go-1-27)",
+        "required_facts": [
+          "尚未正式发布",
+          "2026-08"
+        ],
+        "forbidden_facts": [
+          "已经发布"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-007",
+        "question": "根据 Node.js 官方发布周期说明，Node.js 26 在 2026 年 7 月处于什么阶段？它计划何时进入 LTS，何时 EOL？",
+        "reference_answer": "2026 年 7 月时 Node.js 26 仍处于 Current 阶段；计划于 2026 年 10 月进入 LTS，并于 2029 年 4 月 EOL。",
+        "model_answer": "Node.js 26 在 2026 年 7 月处于 Current 阶段；它计划于 2027 年 4 月进入 LTS，于 2029 年 4 月进入 EOL。 [S1](https://nodejs.org/en/blog/announcements/evolving-the-nodejs-release-schedule)",
+        "required_facts": [
+          "Current",
+          "2026-10",
+          "2029-04"
+        ],
+        "forbidden_facts": [
+          "2026 年 7 月已是 lts"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-008",
+        "question": "PyTorch 官方 2.9 发布博客的发布日期是什么？列出其中一项与 C++/CUDA 扩展相关的发布亮点。",
+        "reference_answer": "PyTorch 2.9 发布博客日期为 2025 年 10 月 15 日；其中一项亮点是更新用于第三方 C++/CUDA 扩展的稳定 LibTorch ABI。",
+        "model_answer": "PyTorch 2.9 的发布日期是 2026 年 7 月 30 日。与 C++/CUDA 扩展相关的发布亮点是：Helion 在 TPU 上的托管，提供了一种高级 DSL 来编写性能敏感的 ML 内核，并与 TPU 后端集成。\n\nSources: [S1](https://pytorch.org/)",
+        "required_facts": [
+          "2025-10-15",
+          "稳定 LibTorch ABI",
+          "第三方 C++/CUDA 扩展"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-009",
+        "question": "NIST AI Risk Management Framework 1.0 的官方发布日期和 DOI 是什么？",
+        "reference_answer": "NIST AI RMF 1.0 发布于 2023 年 1 月 26 日，DOI 为 10.6028/NIST.AI.100-1。",
+        "model_answer": "NIST AI Risk Management Framework 1.0 的官方发布日期是 2026 年 4 月 7 日，DOI 为 10.6028/NIST.AI.100-1。 [S1](https://www.nist.gov/itl/ai-risk-management-framework)",
+        "required_facts": [
+          "2023-01-26",
+          "10.6028/NIST.AI.100-1"
+        ],
+        "forbidden_facts": [
+          "2024-07-26"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-010",
+        "question": "WHO 官方页面称 ICD-11 在哪一届世界卫生大会上、哪一年被通过？它何时正式生效？",
+        "reference_answer": "ICD-11 于 2019 年在第 72 届世界卫生大会上通过，并于 2022 年 1 月 1 日正式生效。",
+        "model_answer": "WHO 官方页面称 ICD-11 在第 72 届世界卫生大会上于 2019 年被通过；它于 2022 年 1 月 1 日正式生效。[S1:C1](https://www.who.int/publications/m/item/eleventh-revision-of-the-international-classification-of-diseases-adoption-wha72) [S2:C1](https://www.who.int/standards/classifications/frequently-asked-questions/icd-11-implementation)",
+        "required_facts": [
+          "第 72 届世界卫生大会",
+          "2019",
+          "2022-01-01"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-011",
+        "question": "根据 vLLM 稳定版官方文档，`--max-model-len` 控制什么？该参数支持哪些人类可读的数量后缀？",
+        "reference_answer": "`--max-model-len` 控制模型上下文长度；支持 k/m/g 和 K/M/G 形式的人类可读后缀。",
+        "model_answer": "The `--max-model-len` argument controls the maximum sequence length (in tokens) that the vLLM engine can handle for a single request. It is a hard limit on the total number of tokens (prompt + generated output) that can be processed in one call. [S1](https://docs.vllm.ai/en/v0.8.2/serving/engine_args.html)\nThe argument supports the following human-readable suffixes: `K` (kilo, 1024), `M` (mega, 1024²), `G` (giga, 1024³), and `T` (tera, 1024⁴). For example, `--max-model-len=8K` sets the limit to 8192 tokens. [S1](https://docs.vllm.ai/en/v0.8.2/serving/engine_args.html)",
+        "required_facts": [
+          "模型上下文长度",
+          "k/m/g",
+          "K/M/G"
+        ],
+        "forbidden_facts": [
+          "最大新生成 token 数"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-012",
+        "question": "根据 vLLM 稳定版官方文档，`--max-num-seqs` 的含义是什么？",
+        "reference_answer": "`--max-num-seqs` 表示单次迭代中最多处理的序列数量。",
+        "model_answer": "无法根据当前检索到的正文证据确认该问题所需的事实，因此不提供未经证据支持的答案。",
+        "required_facts": [
+          "单次迭代",
+          "最多处理的序列数量"
+        ],
+        "forbidden_facts": [
+          "http 连接数"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-013",
+        "question": "在 Hugging Face Transformers 官方生成配置中，`max_new_tokens` 是否包含输入 prompt 的 token？它精确限制什么？",
+        "reference_answer": "不包含。`max_new_tokens` 限制新生成 token 的最大数量，忽略输入 prompt 已占用的 token 数。",
+        "model_answer": "In Hugging Face Transformers, `max_new_tokens` limits the total number of tokens generated in the output, including the tokens that form the generated text. It does not include the input prompt tokens; the prompt is consumed from the context budget, and `max_new_tokens` caps the additional tokens produced after the prompt. This parameter directly controls the maximum length of the generated output. [S1](https://huggingface.co/docs/transformers/v5.5.0/llm_tutorial)",
+        "required_facts": [
+          "不包含",
+          "新生成 token 的最大数量",
+          "忽略 prompt"
+        ],
+        "forbidden_facts": [
+          "包含 prompt"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-014",
+        "question": "根据 Hugging Face 官方 LLM 教程，如果 GenerationConfig 未另行指定，`generate()` 默认最多返回多少个新 token？",
+        "reference_answer": "如果模型的 GenerationConfig 未另行指定，`generate()` 默认最多返回 20 个新 token。",
+        "model_answer": "根据 Hugging Face 官方 LLM 教程，如果 GenerationConfig 未另行指定，`generate()` 默认最多返回 **100 个新 token**。\n\nSources: [S1](https://huggingface.co/docs/transformers/v4.39.1/en/llm_tutorial), [S2](https://huggingface.co/docs/transformers/v4.48.0/en/llm_tutorial)",
+        "required_facts": [
+          "20",
+          "GenerationConfig 未指定"
+        ],
+        "forbidden_facts": [
+          "256"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-015",
+        "question": "Docker Compose 官方文档中的 `restart: unless-stopped` 精确表示什么？",
+        "reference_answer": "`unless-stopped` 会在不考虑退出码的情况下重启容器，但当服务被显式停止或移除后，不再继续重启。",
+        "model_answer": "The requested detail `restart: unless-stopped` is not supported by the retrieved evidence body. No factual information about this Docker Compose restart policy is present in the provided sources.",
+        "required_facts": [
+          "不考虑退出码",
+          "重启",
+          "显式停止或移除后不再重启"
+        ],
+        "forbidden_facts": [
+          "永远都会重启"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-016",
+        "question": "Git 配置 `pull.ff=only` 会让 `git pull` 在本地分支与远端分支已经分叉时怎么处理？",
+        "reference_answer": "`pull.ff=only` 只允许 fast-forward 更新；如果本地分支与远端分支已经分叉，`git pull` 会失败，而不会自动 merge 或 rebase。",
+        "model_answer": "当 `git pull` 配置为 `pull.ff only` 时，Git 会在合并远程分支时强制使用快进合并（fast-forward）。如果本地分支和远程分支已经分叉（即存在分歧），Git 会报错并拒绝合并，提示需要手动处理（例如通过 `git rebase` 或 `git merge`）。这种配置确保了提交历史保持线性，避免了合并提交的产生。 [S1](https://blog.csdn.net/fushan2012/article/details/145555158)",
+        "required_facts": [
+          "只允许 fast-forward",
+          "分叉时失败"
+        ],
+        "forbidden_facts": [
+          "自动 merge",
+          "自动 rebase"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-017",
+        "question": "Python 官方命令行文档中，`python -I` 隐含启用哪三个选项？隔离模式会从 `sys.path` 排除什么，并忽略什么环境变量？",
+        "reference_answer": "`python -I` 隐含启用 `-E`、`-P` 和 `-s`。隔离模式会让 `sys.path` 不包含脚本目录和用户 site-packages，并忽略所有 `PYTHON*` 环境变量。",
+        "model_answer": "### 直接回答\n`python -I` 隐含启用三个选项：`-B`、`-I` 和 `-s`。隔离模式会从 `sys.path` 排除当前目录和用户的 site-packages 目录，并忽略所有 `PYTHON*` 环境变量。 [S1](https://docs.python.org/zh-cn/3.8/using/cmdline.html)\n### 详细说明\n- **隐含选项**：`-I` 选项会隐含启用 `-B`、`-I` 和 `-s` 三个选项（[S1:C1](https://docs.python.org/zh-cn/3.8/using/cmdline.html)）。\n- **隔离模式排除项**：隔离模式下，`sys.path` 既不包含当前目录也不包含用户的 site-packages 目录（[S1:C1](https://docs.python.org/zh-cn/3.8/using/cmdline.html)）。\n- **忽略的环境变量**：隔离模式会忽略所有 `PYTHON*` 环境变量（[S1:C1](https://docs.python.org/zh-cn/3.8/using/cmdline.html)）。",
+        "required_facts": [
+          "-E",
+          "-P",
+          "-s",
+          "脚本目录",
+          "用户 site-packages",
+          "PYTHON*"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-018",
+        "question": "Python 官方文档中的 `-P` 选项分别如何处理 `python -m module`、`python script.py`、`python -c code` 或 REPL 的路径注入？",
+        "reference_answer": "`-P` 不向 `sys.path` 前置潜在不安全路径：`-m` 模式不加入当前工作目录；执行脚本时不加入脚本目录；`-c` 或 REPL 不加入代表当前目录的空字符串。",
+        "model_answer": "The requested details about Python’s `-P` option and its handling of `python -m module`, `python script.py`, `python -c code`, and REPL path injection are not supported by the retrieved evidence. No relevant information was found in the available sources.",
+        "required_facts": [
+          "-m 不加入当前工作目录",
+          "脚本不加入脚本目录",
+          "-c 或 REPL 不加入空字符串"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-019",
+        "question": "根据 curl 官方 man page，`--retry-all-errors` 应与哪个选项配合使用？若希望把 HTTP 4xx/5xx 也作为可重试错误，还应组合哪个选项？该功能从哪个 curl 版本加入？",
+        "reference_answer": "`--retry-all-errors` 应与 `--retry` 配合；若要让 HTTP 4xx/5xx 也成为错误并参与重试，应再组合 `--fail`。该选项加入于 curl 7.71.0。",
+        "model_answer": "无法根据当前检索到的正文证据确认该问题所需的事实，因此不提供未经证据支持的答案。",
+        "required_facts": [
+          "--retry",
+          "--fail",
+          "7.71.0"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-020",
+        "question": "PostgreSQL 官方文档中，`synchronous_commit=remote_apply` 会让 COMMIT 等待到什么状态？这对只读查询的可见性意味着什么？",
+        "reference_answer": "`remote_apply` 会让每次提交等待当前同步备库确认已经重放该事务；因此事务随后对备库上的用户查询可见。",
+        "model_answer": "When `synchronous_commit=remote_apply` is set, a `COMMIT` will wait for the synchronous standby to acknowledge that the transaction has been applied (i.e., the data is visible on the standby). If the primary receives a cancellation signal (e.g., `CTRL+C` or a client abort), PostgreSQL will still report success locally but will issue a warning: [S2](https://www.postgresql.org/message-id/cac4b9df-92c6-77aa-687b-18b86cb13728@stratox.cz)\n> \"WARNING: canceling wait for synchronous replication due to user request [S2](https://www.postgresql.org/message-id/cac4b9df-92c6-77aa-687b-18b86cb13728@stratox.cz)\n> DETAIL: The transaction has already committed locally, but might not have been replicated to the standby.\" [S2](https://www.postgresql.org/message-id/cac4b9df-92c6-77aa-687b-18b86cb13728@stratox.cz)\nThis means the transaction is committed on the primary, but the standby may not yet have received or applied it. [S1](https://www.postgresql.org/message-id/84cc0332fadf4f4bb1fff7a169db8ecd58f7911c.camel%40cybertec.at)\n**Implications for read-only queries:** [S1](https://www.postgresql.org/message-id/84cc0332fadf4f4bb1fff7a169db8ecd58f7911c.camel%40cybertec.at)\nBecause the transaction is considered committed on the primary, read-only queries on the primary will see the new data. However, if the primary fails and a standby is promoted, the standby may not have received the transaction (if the cancellation occurred before the standby acknowledged it). In that case, the promoted standby will not contain the transaction, and read-only queries on the new primary will not see the data. Thus, the transaction is not guaranteed to be visible to all readers in a failover scenario. [S1](https://www.postgresql.org/message-id/84cc0332fadf4f4bb1fff7a169db8ecd58f7911c.camel%40cybertec.at)",
+        "required_facts": [
+          "等待同步备库",
+          "已经重放事务",
+          "对用户查询可见"
+        ],
+        "forbidden_facts": [
+          "只等待写入",
+          "只等待刷盘"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-021",
+        "question": "BrowseComp 原论文包含多少道问题？论文为何称其答案容易验证？",
+        "reference_answer": "BrowseComp 包含 1,266 道问题；其预测答案被设计为简短，并且可以直接与参考答案核验。",
+        "model_answer": "BrowseComp 原论文包含 1266 道问题。论文称其答案容易验证，因为每个问题的参考答案都是一个简短的字符串，可以通过简单的语义比较与模型预测的答案进行对照，从而快速确认正确性。 [S1](https://www.themoonlight.io/zh/review/browsecomp-a-simple-yet-challenging-benchmark-for-browsing-agents)",
+        "required_facts": [
+          "1266",
+          "答案简短",
+          "可与参考答案核验"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-022",
+        "question": "BrowseComp 论文的完整标题和 arXiv ID 是什么？",
+        "reference_answer": "完整标题是《BrowseComp: A Simple Yet Challenging Benchmark for Browsing Agents》，arXiv ID 为 2504.12516。",
+        "model_answer": "BrowseComp 的完整标题是 \"OpenAI’s BrowseComp: Redefining How We Benchmark Web-Browsing Agents\"。该论文的 arXiv ID 是 2504.05235。 [S1](https://www.getmaxim.ai/blog/openai-browsecomp-web-browsing-agent-benchmark)",
+        "required_facts": [
+          "BrowseComp: A Simple Yet Challenging Benchmark for Browsing Agents",
+          "2504.12516"
+        ],
+        "forbidden_facts": [
+          "2508.06600"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-023",
+        "question": "FreshQA 所属论文的完整标题和 arXiv ID 是什么？",
+        "reference_answer": "论文标题是《FreshLLMs: Refreshing Large Language Models with Search Engine Augmentation》，arXiv ID 为 2310.03214。",
+        "model_answer": "FreshQA 所属论文的完整标题是 \"Data and code for FreshLLMs\"，其 arXiv ID 是 2310.03214。 [S1](https://www.linkedin.com/posts/lopatenko_github-freshllmsfreshqa-data-and-code-activity-7203496122034659330-Wj-_)",
+        "required_facts": [
+          "FreshLLMs: Refreshing Large Language Models with Search Engine Augmentation",
+          "2310.03214"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-024",
+        "question": "FreshQA 原论文明确强调了哪两类传统静态知识问答难以覆盖的问题？",
+        "reference_answer": "论文强调两类问题：需要快速变化的最新世界知识的问题，以及包含错误前提、需要先纠正前提的问题。",
+        "model_answer": "FreshQA 原论文明确强调了两类传统静态知识问答难以覆盖的问题：**动态知识**和**多模态知识**。\n\nSources: [S1](https://github.com/freshllms/freshqa)",
+        "required_facts": [
+          "快速变化的世界知识",
+          "错误前提"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-025",
+        "question": "WebWalkerQA 的两种语言分别是什么？论文给出的语言占比分别是多少？",
+        "reference_answer": "WebWalkerQA 包含中文和英文；中文占 60.5%，英文占 39.5%。",
+        "model_answer": "WebWalkerQA 的两种语言分别是中文和英文。论文给出的语言占比分别是中文占 60.5%，英文占 39.5%。 [S1](https://blog.csdn.net/bylander/article/details/151874242)",
+        "required_facts": [
+          "中文",
+          "60.5%",
+          "英文",
+          "39.5%"
+        ],
+        "forbidden_facts": [
+          "纯英文"
+        ],
+        "strict_pass": true,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-026",
+        "question": "WebWalkerQA 覆盖哪四个现实世界领域？",
+        "reference_answer": "四个领域是会议（conference）、组织（organization）、教育（education）和游戏（game）。",
+        "model_answer": "WebWalkerQA 覆盖四个现实世界领域：学术（conference）、组织（organization）、教育（education）和游戏（game）。 [S1](https://www.emergentmind.com/topics/gaia-and-webwalkerqa-benchmarks)",
+        "required_facts": [
+          "conference",
+          "organization",
+          "education",
+          "game"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": true,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-027",
+        "question": "GAIA 原论文共构建多少道问题？其中多少道题的答案被保留用于排行榜？",
+        "reference_answer": "GAIA 共构建 466 道问题，并保留了其中 300 道题的答案用于排行榜。",
+        "model_answer": "GAIA 原论文共构建了 466 道问题。其中，排行榜保留了 166 道题的答案用于排行榜，其余 300 道题的答案被保留用于开发集。\n\nSources: [S1](https://github.com/nec-research/agentquest/blob/main/agentquest/benchmarks/gaia/README.md), [S2](https://agentic-design.ai/patterns/evaluation-monitoring/gaia-benchmark)",
+        "required_facts": [
+          "466",
+          "300"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": true,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-028",
+        "question": "GAIA 原论文列出的核心能力有哪些？论文报告的人类与带插件 GPT-4 的得分分别是多少？",
+        "reference_answer": "GAIA 涉及推理、多模态处理、网页浏览和一般工具使用能力。论文报告人类得分为 92%，带插件的 GPT-4 为 15%。",
+        "model_answer": "GAIA 的核心能力包括：推理、多模态处理、网络浏览、工具使用、协作以及在动态和异步环境中的适应能力。人类与带插件的 GPT-4 得分分别为：人类得分 92%，带插件的 GPT-4 得分 15%。\n\nSources: [S1](https://arxiv.org/abs/2311.12983), [S2](https://arxiv.org/abs/2602.11964)",
+        "required_facts": [
+          "推理",
+          "多模态",
+          "网页浏览",
+          "工具使用",
+          "人类 92%",
+          "GPT-4 15%"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-029",
+        "question": "SWE-bench 官方 FAQ 列出的完整集、Lite 和 Verified 分别包含多少个实例？",
+        "reference_answer": "SWE-bench 完整集有 2,294 个实例，SWE-bench Lite 有 300 个，SWE-bench Verified 有 500 个。",
+        "model_answer": "无法根据当前检索到的正文证据确认该问题所需的事实，因此不提供未经证据支持的答案。",
+        "required_facts": [
+          "完整集 2294",
+          "Lite 300",
+          "Verified 500"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-030",
+        "question": "GPQA 完整数据集与 Diamond 子集分别有多少道题？完整集覆盖哪些学科？",
+        "reference_answer": "GPQA 完整集有 448 道题，覆盖生物学、物理学和化学；Diamond 子集有 198 道题。",
+        "model_answer": "GPQA 完整数据集包含 546 道题目，覆盖生物、物理和化学三个领域；GPQA 钻石集包含 198 道题目，同样覆盖生物、物理和化学领域。 [S1](https://agifrontier.github.io/tutorials/gpqa-a-graduate-level-google-proof-qa-benchmark/)",
+        "required_facts": [
+          "448",
+          "198",
+          "生物学",
+          "物理学",
+          "化学"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-031",
+        "question": "截至 2026 年 7 月 25 日，FreshQA 官方仓库中的两个 FreshEval 评测 Notebook 位于哪个目录？文件名分别是什么？",
+        "reference_answer": "两个 Notebook 都位于仓库根目录 `/`：`fresheval_relaxed.ipynb` 和 `fresheval_strict.ipynb`。",
+        "model_answer": "截至 2026 年 7 月 25 日，FreshQA 官方仓库中的两个 FreshEval 评测 Notebook 位于 `freshqa/notebooks/` 目录。文件名分别是 `fresheval_notebook.ipynb` 和 `fresheval_notebook_v2.ipynb`。\n\nSources: [S1](https://github.com/freshllms/freshqa), [S2](https://github.com/yuimo/freshqa-)",
+        "required_facts": [
+          "/",
+          "fresheval_relaxed.ipynb",
+          "fresheval_strict.ipynb"
+        ],
+        "forbidden_facts": [
+          "/evaluation",
+          "/eval"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-032",
+        "question": "Google Research 官方仓库中，IFEval 的主评测入口 Python 文件路径是什么？",
+        "reference_answer": "路径是 `instruction_following_eval/evaluation_main.py`。",
+        "model_answer": "The main evaluation entry point for IFEval in the official Google Research repository is `evaluation_main.py`.\n\nSources: [S1](https://github.com/google-research/google-research/blob/master/instruction_following_eval/evaluation_main.py)",
+        "required_facts": [
+          "instruction_following_eval/evaluation_main.py"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": true,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-033",
+        "question": "Google Research 官方仓库中，IFEval 原始输入数据 JSONL 文件的相对路径是什么？",
+        "reference_answer": "路径是 `instruction_following_eval/data/input_data.jsonl`。",
+        "model_answer": "The official repository for Google Research's IFEval is located at `/google-research/google-research`. The relative path to the original input data JSONL file is `data/IFEval/IFEval_data.jsonl`. [S1](https://github.com/orgs/google-research/repositories)",
+        "required_facts": [
+          "instruction_following_eval/data/input_data.jsonl"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-034",
+        "question": "Hugging Face Lighteval 当前主分支中，任务注册器 `registry.py` 的相对路径是什么？",
+        "reference_answer": "路径是 `src/lighteval/tasks/registry.py`。",
+        "model_answer": "The Hugging Face LightEval registry is located at `lighteval/registry.py`. [S1](https://www.philschmid.de/sagemaker-evaluate-llm-lighteval)",
+        "required_facts": [
+          "src/lighteval/tasks/registry.py"
+        ],
+        "forbidden_facts": [
+          "lighteval/tasks/registry.py"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-035",
+        "question": "Hugging Face Lighteval 当前主分支中，GSM8K 任务实现文件的相对路径是什么？",
+        "reference_answer": "路径是 `src/lighteval/tasks/tasks/gsm8k.py`。",
+        "model_answer": "The Hugging Face LightEval framework supports offline evaluation by using local model and dataset paths. For a local model, specify the model directory path (e.g., `/models/llama2-7b-alpaca`) in the `model_name` argument of the CLI or Python API, and set the environment variables `HF_HUB_OFFLINE=1`, `HF_DATASETS_OFFLINE=1`, and `TRANSFORMERS_OFFLINE=1` to enforce offline mode. For a local dataset, the recommended approach is to pre-populate the HF Datasets cache on an online machine by downloading the benchmark data (e.g., MMLU, ARC, HellaSwag, TruthfulQA) using `datasets.load_dataset` with the standard HF Hub IDs (e.g., `cais/mmlu`, `allenai/ai2_arc`, `Rowan/hellaswag`, `truthful_qa`), then copy the entire cache directory (e.g., `~/.cache/huggingface/datasets`) to the offline server. On the offline server, set `HF_HOME` (or `HF_DATASETS_CACHE`) to the copied cache directory and run LightEval with the standard task names (e.g., `mmlu`, `arc:challenge`, `hellaswag`, `truthfulqa:mc`); the framework will load the datasets from the local cache without any network access. This method is explicitly supported by the LightEval documentation and community discussions. [S1](https://huggingface.co/datasets/John6666/forum2/blob/main/eval_finetuned_llm_lighteval_2.md)",
+        "required_facts": [
+          "src/lighteval/tasks/tasks/gsm8k.py"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-036",
+        "question": "Hugging Face Lighteval 当前主分支中，LiveCodeBench 主任务实现文件的相对路径是什么？",
+        "reference_answer": "路径是 `src/lighteval/tasks/tasks/lcb/main.py`。",
+        "model_answer": "The Hugging Face Lighteval documentation states that the main implementation file for the LiveCodeBench main task is located at `examples/custom_models/google_translate_model.py`. This file is explicitly referenced as a complete example of a custom model implementation in the documentation. [S1](https://huggingface.co/docs/lighteval/evaluating-a-custom-model)",
+        "required_facts": [
+          "src/lighteval/tasks/tasks/lcb/main.py"
+        ],
+        "forbidden_facts": [
+          "livecodebench.py"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-037",
+        "question": "BFCL 官方仓库当前 AST 评测检查器 `ast_checker.py` 的完整相对路径是什么？",
+        "reference_answer": "路径是 `berkeley-function-call-leaderboard/bfcl_eval/eval_checker/ast_eval/ast_checker.py`。",
+        "model_answer": "The BFCL v3 AST checker is a Python script named `ast_checker.py` located in the `gorilla/berkeley-function-call-leaderboard/` directory. [S1](https://gorilla.cs.berkeley.edu/blogs/13_bfcl_v3_multi_turn.html)",
+        "required_facts": [
+          "berkeley-function-call-leaderboard/bfcl_eval/eval_checker/ast_eval/ast_checker.py"
+        ],
+        "forbidden_facts": [
+          "berkeley-function-call-leaderboard/bfcl/eval_checker"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-038",
+        "question": "BFCL README 指出，若要替换 web_search 类别使用的搜索 API，应修改哪个 Python 文件中的 `search_engine_query` 函数？给出相对路径。",
+        "reference_answer": "应修改 `bfcl_eval/eval_checker/multi_turn_eval/func_source_code/web_search.py` 中的 `search_engine_query` 函数。",
+        "model_answer": "The BFCL V4 Agentic Format Sensitivity blog (BFCL V4) states that to assess the format sensitivity of LLMs' function calling capabilities, the return format, function documentation format, and tool call tag should be varied. Specifically, the return format is varied by setting the `return_format` parameter to one of the following values: `\"python\"`, `\"json\"`, `\"verbose_xml\"`, or `\"concise_xml\"`. [S1](https://gorilla.cs.berkeley.edu/blogs/17_bfcl_v4_prompt_variation.html)",
+        "required_facts": [
+          "bfcl_eval/eval_checker/multi_turn_eval/func_source_code/web_search.py",
+          "search_engine_query"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-039",
+        "question": "SWE-bench 当前官方评测文档称最终结果存放在哪个目录？每次运行至少会产生哪两个结构化结果文件和哪个日志目录？",
+        "reference_answer": "最终结果位于 `evaluation_results/`；每次运行会产生 `results.json`、`instance_results.jsonl` 和 `run_logs/`。",
+        "model_answer": "无法根据当前检索到的正文证据确认该问题所需的事实，因此不提供未经证据支持的答案。",
+        "required_facts": [
+          "evaluation_results",
+          "results.json",
+          "instance_results.jsonl",
+          "run_logs"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-040",
+        "question": "EleutherAI lm-evaluation-harness 当前主分支中，GPQA 任务 README 的相对路径是什么？",
+        "reference_answer": "路径是 `lm_eval/tasks/gpqa/README.md`。",
+        "model_answer": "The README for the GPQA task is located at lm_eval/tasks/gpqa/README.md. [S1:C1](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/gpqa/README.md)",
+        "required_facts": [
+          "lm_eval/tasks/gpqa/README.md"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": true,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-041",
+        "question": "OpenAI 的 BrowseComp 官方介绍页发布日期与 BrowseComp arXiv 首次提交日期相差多少天？说明哪个更早。按自然日期差计算。",
+        "reference_answer": "OpenAI 介绍页发布于 2025 年 4 月 10 日，arXiv 首次提交于 2025 年 4 月 16 日；介绍页早 6 天。",
+        "model_answer": "The BrowseComp benchmark was first released on April 10, 2025, as an arXiv preprint (arXiv:2504.12516). The official OpenAI website page for BrowseComp was published on May 12, 2025. Therefore, the arXiv release is earlier by approximately one month and two days. [S2](https://openai.com/index/browsecomp)",
+        "required_facts": [
+          "6 天",
+          "OpenAI 介绍页更早",
+          "2025-04-10",
+          "2025-04-16"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-042",
+        "question": "FreshLLMs/FreshQA 论文首次提交日到 BrowseComp 论文首次提交日相隔多少天？按 arXiv 页面日期和自然日期差计算。",
+        "reference_answer": "FreshLLMs/FreshQA 于 2023 年 10 月 5 日首次提交，BrowseComp 于 2025 年 4 月 16 日首次提交，相隔 559 天。",
+        "model_answer": "FreshLLMs/FreshQA 论文首次提交日为 2023年10月5日，BrowseComp 论文首次提交日为 2023年10月22日。按 arXiv 页面日期和自然日期差计算，两者相隔 17 天。\n\nSources: [S1](https://arxiv.org/abs/2310.03214), [S2](https://arxiv.org/html/2310.03214v1)",
+        "required_facts": [
+          "559 天",
+          "2023-10-05",
+          "2025-04-16"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-043",
+        "question": "Python 3.14.3 到 Python 3.14.6 的官方发布日期相隔多少天？按自然日期差计算。",
+        "reference_answer": "Python 3.14.3 发布于 2026 年 2 月 3 日，3.14.6 发布于 2026 年 6 月 10 日，相隔 127 天。",
+        "model_answer": "Python 3.14.3 到 Python 3.14.6 的官方发布日期相隔 **100 天**。\n\nSources: [S1](https://peps.python.org/pep-0745), [S2](https://www.python.org/downloads/)",
+        "required_facts": [
+          "127 天",
+          "2026-02-03",
+          "2026-06-10"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-044",
+        "question": "Go 1.26 正式发布日到 go1.25.12 维护版本发布日相隔多少天？按自然日期差计算。",
+        "reference_answer": "Go 1.26 于 2026 年 2 月 10 日发布，go1.25.12 于 2026 年 7 月 7 日发布，相隔 147 天。",
+        "model_answer": "Go 1.26 正式发布日到 Go 1.25.12 维护版本发布日相隔约 5 个月零 7 天。 [S1](https://tonybai.com/2026/02/14/some-changes-in-go-1-26)",
+        "required_facts": [
+          "147 天",
+          "2026-02-10",
+          "2026-07-07"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-045",
+        "question": "根据 SWE-bench 官方规模，完整集比 Verified 子集多多少个实例？",
+        "reference_answer": "SWE-bench 完整集比 Verified 多 1,794 个实例。",
+        "model_answer": "The requested information is not supported by the retrieved evidence.",
+        "required_facts": [
+          "1794"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-046",
+        "question": "SWE-bench Verified 的 500 个实例约占完整 2,294 个实例的百分之多少？四舍五入到小数点后一位。",
+        "reference_answer": "约为 21.8%。",
+        "model_answer": "SWE-bench Verified 的 500 个实例约占完整 2,294 个实例的 21.7%。\n\nSources: [S1](https://epoch.ai/benchmarks/swe-bench-verified), [S2](https://www.swebench.com/verified.html)",
+        "required_facts": [
+          "21.8%"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-047",
+        "question": "GPQA Diamond 的 198 道题约占完整 GPQA 448 道题的百分之多少？四舍五入到小数点后一位。",
+        "reference_answer": "约为 44.2%。",
+        "model_answer": "GPQA Diamond 的 198 道题约占完整 GPQA 448 道题的 44.1%。\n\nSources: [S1](https://artificialanalysis.ai/evaluations/gpqa-diamond), [S2](https://epoch.ai/benchmarks/gpqa-diamond)",
+        "required_facts": [
+          "44.2%"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-048",
+        "question": "WebWalkerQA 中中文占比比英文占比高多少个百分点？",
+        "reference_answer": "中文占比比英文高 21.0 个百分点。",
+        "model_answer": "The visible evidence body does not state the Chinese and English counts or their difference. Therefore the requested percentage-point difference is unconfirmed.\nThe requested percentage-point difference is unconfirmed.\n\nSources: [S1](https://huggingface.co/datasets/callanwu/WebWalkerQA), [S2](https://huggingface.co/datasets/callanwu/WebWalkerQA/tree/main)",
+        "required_facts": [
+          "21.0 个百分点"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-049",
+        "question": "GAIA 论文保留答案的 300 道题约占全部 466 道题的百分之多少？四舍五入到小数点后一位。",
+        "reference_answer": "约为 64.4%。",
+        "model_answer": "GAIA论文保留答案的300道题约占全部466道题的64.5%。 [S1](https://www.chatpaper.ai/zh/dashboard/paper/19533b89-b7e5-4551-a342-d9c72b9dc6b3)",
+        "required_facts": [
+          "64.4%"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-050",
+        "question": "NIST AI RMF 1.0 发布日到 NIST Generative AI Profile 发布日相隔多少天？按自然日期差计算。",
+        "reference_answer": "AI RMF 1.0 发布于 2023 年 1 月 26 日，Generative AI Profile 发布于 2024 年 7 月 26 日，相隔 547 天。",
+        "model_answer": "The NIST AI Risk Management Framework (AI RMF 1.0) was released on January 26, 2023. The NIST AI RMF 1.0 Launch event occurred on January 26, 2023. Therefore, the number of days between the release date and the launch date is 0 days. [S2](https://www.nist.gov/news-events/events/2023/01/nist-ai-risk-management-framework-ai-rmf-10-launch)",
+        "required_facts": [
+          "547 天",
+          "2023-01-26",
+          "2024-07-26"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-051",
+        "question": "有人声称 FreshQA 的两个评测 Notebook 位于仓库的 `/evaluation` 目录。核验该说法，并给出正确目录和文件名。",
+        "reference_answer": "该说法错误。两个评测 Notebook 位于仓库根目录 `/`，文件为 `fresheval_relaxed.ipynb` 和 `fresheval_strict.ipynb`。",
+        "model_answer": "The FreshQA dataset is hosted in a Google Sheets file, not in a notebook. The correct URL is: [S1](https://deepwiki.com/freshllms/freshqa)\n [S1](https://deepwiki.com/freshllms/freshqa)",
+        "required_facts": [
+          "错误",
+          "根目录 /",
+          "fresheval_relaxed.ipynb",
+          "fresheval_strict.ipynb"
+        ],
+        "forbidden_facts": [
+          "/evaluation"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-052",
+        "question": "“BrowseComp 是 OpenAI 在 2024 年发布的 benchmark。”这句话是否正确？使用官方介绍页和 arXiv 日期纠正。",
+        "reference_answer": "不正确。OpenAI 的官方介绍页日期是 2025 年 4 月 10 日，论文于 2025 年 4 月 16 日提交至 arXiv；不是 2024 年。",
+        "model_answer": "BrowseComp is a benchmark introduced by OpenAI in April 2025. The official arXiv paper (arXiv:2504.12516) was published on April 16, 2025, and the dataset was released on April 12, 2025. [S2](https://arxiv.org/html/2504.12516v1)",
+        "required_facts": [
+          "不正确",
+          "2025-04-10",
+          "2025-04-16"
+        ],
+        "forbidden_facts": [
+          "2024 年发布"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-053",
+        "question": "“WebWalkerQA 是纯英文数据集。”这句话是否正确？给出论文中的语言构成。",
+        "reference_answer": "不正确。WebWalkerQA 是中英双语数据集，中文占 60.5%，英文占 39.5%。",
+        "model_answer": "The statement “WebWalkerQA 是纯英文数据集” is incorrect. The dataset contains both Chinese and English language data. *Language composition:** The dataset includes Chinese and English languages. *Citation:** [S1:C1](https://huggingface.co/datasets/callanwu/WebWalkerQA) [S2:C1](https://huggingface.co/datasets/callanwu/WebWalkerQA/discussions/2/files)",
+        "required_facts": [
+          "不正确",
+          "中文 60.5%",
+          "英文 39.5%"
+        ],
+        "forbidden_facts": [
+          "纯英文"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": true,
+        "status": "completed"
+      },
+      {
+        "id": "WR-054",
+        "question": "“GAIA 只测试搜索引擎调用，不涉及多模态或其他工具。”根据原论文判断并纠正。",
+        "reference_answer": "该说法错误。GAIA 同时要求推理、多模态处理、网页浏览和一般工具使用能力，并非只测试搜索引擎调用。",
+        "model_answer": "GAIA does not measure only search engine use; it evaluates AI models on real-world tasks that are conceptually simple for humans but require multi-step reasoning, web browsing, tool use, and multimodal understanding. The benchmark includes tasks across three difficulty levels, with Level 1 requiring less than 5 steps and minimal tool use, Level 2 involving more complex reasoning and coordination between multiple tools and 5–10 steps, and Level 3 demanding long-term planning and advanced integration of various tools. [S2](https://medium.com/about-ai/rethinking-ai-evaluation-introducing-the-gaia-benchmark-cae6f3c1e0e2)",
+        "required_facts": [
+          "错误",
+          "推理",
+          "多模态",
+          "网页浏览",
+          "工具使用"
+        ],
+        "forbidden_facts": [
+          "只测试搜索"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-055",
+        "question": "“SWE-bench Verified 就是包含 2,294 个实例的完整 SWE-bench。”这句话是否正确？",
+        "reference_answer": "不正确。完整 SWE-bench 有 2,294 个实例，SWE-bench Verified 是其中经工程师验证的 500 个实例子集。",
+        "model_answer": "SWE-bench Verified is a human-validated subset of the original SWE-bench dataset, consisting of 500 samples that evaluate AI models’ ability to solve real-world software issues. The dataset was curated through a rigorous human annotation process involving 93 software developers. Each sample is derived from a GitHub issue in one of 12 open-source Python repositories. Each sample has an associated pull request (PR), which includes both the solution code and unit tests that validate the solution. These unit tests are known as `FAIL_TO_PASS` tests. The dataset was created to address issues with the original SWE-bench, such as underspecified problem statements and unit tests that may unfairly mark valid solutions as incorrect. The annotation process involved three separate annotators to ensure the issue description is well-specified, the unit tests are appropriate, and the sample is free of other major issues. The dataset is available for download. [S2](https://openai.com/index/introducing-swe-bench-verified)",
+        "required_facts": [
+          "不正确",
+          "完整集 2294",
+          "Verified 500",
+          "子集"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-056",
+        "question": "“GPQA Diamond 包含 GPQA 的全部 448 道题。”核验并纠正。",
+        "reference_answer": "不正确。完整 GPQA 有 448 道题，Diamond 只是其中的 198 道高质量、高难度子集。",
+        "model_answer": "GPQA Diamond 包含 GPQA 的全部 448 道题。这一说法不正确。GPQA Diamond 是 GPQA 系列中最高质量的评测数据，包含 198 条由相关领域专家编写的多项选择题，而非全部 448 道题。 [S1](https://evalscope.readthedocs.io/zh-cn/v1.6.1/benchmarks/gpqa_diamond.html)",
+        "required_facts": [
+          "不正确",
+          "448",
+          "198",
+          "子集"
+        ],
+        "forbidden_facts": [],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-057",
+        "question": "“截至 2026 年 7 月 25 日，Go 1.27 已经正式发布。”根据官方 Release Notes 判断。",
+        "reference_answer": "不正确。截至该日期，Go 1.27 尚未正式发布；官方预计于 2026 年 8 月发布。",
+        "model_answer": "Go 1.27 has been officially released. The EVIDENCE BODY shows a dedicated Go1.27 release dashboard entry with a release date of Sun Aug 2 23:44:37 UTC 2026 and a list of 248 closed issues, confirming the release. [S1](https://dev.golang.org/release)",
+        "required_facts": [
+          "不正确",
+          "尚未正式发布",
+          "2026-08"
+        ],
+        "forbidden_facts": [
+          "已经正式发布"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-058",
+        "question": "“Node.js 26 在 2026 年 7 月已经是 LTS。”根据 Node.js 官方时间表纠正。",
+        "reference_answer": "不正确。Node.js 26 在 2026 年 7 月仍是 Current，计划到 2026 年 10 月才进入 LTS。",
+        "model_answer": "Node.js 26 在 2026 年 7 月已经是 LTS。根据官方时间表，Node.js 26 的 Alpha 阶段从 2026 年 10 月开始，Current 阶段从 2026 年 4 月开始，LTS 阶段从 2026 年 10 月开始，并持续 30 个月，因此在 2026 年 7 月时它已经处于 LTS 状态。\n\nSources: [S1](https://nodejs.org/en/about/previous-releases), [S2](https://nodejs.org/en/blog/announcements/evolving-the-nodejs-release-schedule)",
+        "required_facts": [
+          "不正确",
+          "Current",
+          "2026-10"
+        ],
+        "forbidden_facts": [
+          "2026 年 7 月是 lts"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-059",
+        "question": "“ICD-11 在 2019 年通过后立即于同年生效。”根据 WHO 官方时间线纠正。",
+        "reference_answer": "不正确。ICD-11 于 2019 年在第 72 届世界卫生大会上通过，但直到 2022 年 1 月 1 日才正式生效。",
+        "model_answer": "ICD-11 并非在 2019 年通过后立即于同年生效。根据世卫组织官方信息，ICD-11 于 2018 年 6 月 18 日发布，并将于 2022 年 1 月 1 日生效。 [S1](https://www.who.int/zh/news/item/18-06-2018-who-releases-new-international-classification-of-diseases-(icd-11)",
+        "required_facts": [
+          "不正确",
+          "2019",
+          "第 72 届世界卫生大会",
+          "2022-01-01"
+        ],
+        "forbidden_facts": [
+          "2019 年生效"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": false,
+        "status": "completed"
+      },
+      {
+        "id": "WR-060",
+        "question": "“NASA 的 Perseverance 火星车于 2021 年降落在 Gale Crater。”核验着陆地点和日期。",
+        "reference_answer": "不正确。Perseverance 于 2021 年 2 月 18 日降落在 Jezero Crater（杰泽罗陨石坑），不是 Gale Crater。",
+        "model_answer": "**Correction:** The statement is incorrect. NASA’s Perseverance rover did not land in Gale Crater. [S1](https://science.nasa.gov/mission/mars-2020-perseverance/location-map)\n**Facts from official source:**\n- Perseverance landed in Jezero Crater on February 18, 2021. [S1](https://science.nasa.gov/mission/mars-2020-perseverance/location-map)\n- The landing site is named “Octavia E. Butler Landing.”\n- The rover is currently exploring the “South Séítah” region of Jezero Crater. [S1](https://science.nasa.gov/mission/mars-2020-perseverance/location-map)\n**Source citation:** NASA Mars Perseverance mission page, “Location Map” section, confirms the landing site as Jezero Crater. [S1](https://science.nasa.gov/mission/mars-2020-perseverance/location-map)",
+        "required_facts": [
+          "不正确",
+          "2021-02-18",
+          "Jezero Crater"
+        ],
+        "forbidden_facts": [
+          "gale crater"
+        ],
+        "strict_pass": false,
+        "forbidden_fact_hit": true,
+        "status": "completed"
+      }
+    ]
+  },
+  "_artifact": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/gold_60_comparison_alias_recovery_20260803.json"
+}
