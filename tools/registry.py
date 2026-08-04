@@ -79,12 +79,29 @@ class ToolRegistry:
             # capability plus the terminal actions. Provider adapters remain
             # registered for the backend transaction, never as model choices.
             name = str(meta.get("name") or "")
-            return name in {"web_search", "answer_user", "finish_task"} and meta.get("phase") != "LEGACY"
+            return name in {
+                "web_search",
+                "open_page",
+                "find_in_page",
+                "connector_lookup",
+                "calculator",
+                "current_time",
+                "date_diff",
+                "answer_user",
+                "finish_task",
+            } and meta.get("phase") != "LEGACY"
         if str(phase).upper() == "ALL":
             # Internal callers may execute any non-legacy registered tool in
             # this phase. Planner-facing visibility is handled separately by
             # model_visible metadata.
             return str(meta.get("phase") or "").upper() != "LEGACY"
+        if str(meta.get("name") or "") == "date_diff" and str(phase).upper() in {
+            "DISCOVERY",
+            "EXTRACTION",
+        }:
+            # Date arithmetic belongs after the model has selected source
+            # operands; it is not a discovery or page-extraction operation.
+            return False
         if meta.get("phase") not in {phase, "ALL"}:
             return False
         role = str(meta.get("retrieval_role") or "").strip().casefold()
@@ -104,18 +121,29 @@ class ToolRegistry:
 
     @classmethod
     def model_visible_names(cls, phase: str | None = None) -> list[str]:
-        """Return only the small public tool surface shown to the model.
+        """Return only the curated public tool surface shown to the model.
 
         Provider adapters and workflow helpers remain registered so the
         executor and compatibility tests can use them, but they are not
         model-facing choices. This prevents the model from treating Tavily,
         Bing, or a page fetcher as separate research strategies.
         """
-        return [
+        names = [
             name
             for name, meta in cls._tools.items()
             if meta.get("model_visible", False) and cls._phase_allows(meta, phase)
         ]
+        public_order = {
+            "finish_task": 0,
+            "web_search": 1,
+            "open_page": 2,
+            "find_in_page": 3,
+            "connector_lookup": 4,
+            "calculator": 5,
+            "date_diff": 6,
+            "current_time": 7,
+        }
+        return sorted(names, key=lambda name: (public_order.get(name, 99), name))
 
     @classmethod
     def get_json_catalog(
@@ -134,7 +162,20 @@ class ToolRegistry:
         concrete tool at execution time.
         """
         rows = []
-        for name, meta in cls._tools.items():
+        items = list(cls._tools.items())
+        if model_visible_only:
+            public_order = {
+                "finish_task": 0,
+                "web_search": 1,
+                "open_page": 2,
+                "find_in_page": 3,
+                "connector_lookup": 4,
+                "calculator": 5,
+                "date_diff": 6,
+                "current_time": 7,
+            }
+            items.sort(key=lambda item: (public_order.get(item[0], 99), item[0]))
+        for name, meta in items:
             if not cls._phase_allows(meta, phase):
                 continue
             if model_visible_only and not meta.get("model_visible", False):

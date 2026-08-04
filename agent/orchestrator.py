@@ -25,6 +25,7 @@ from config import (
     get_llm_provider,
 )
 from tools.registry import ToolRegistry
+from tools.date_calculator import extract_date_candidates
 from utils.task_manager import is_task_stopped, update_task_progress
 from utils.task_events import append_task_event
 from utils.citation_validator import validate_citations
@@ -35,6 +36,9 @@ from utils.time_budget import check_time_budget
 from tools.builtin import load_builtin_tools
 from retrieval_plugins import is_error, plugin_environment_snapshot
 from utils.retrieval_ledger import RetrievalLedger
+from utils.answer_fact_check import check_answer_facts
+from utils.freshness import build_freshness_policy
+from agent.tool_protocol import normalize_tool_result
 
 
 DEFAULT_MAX_TOOL_STEPS = 12
@@ -54,6 +58,7 @@ class Orchestrator:
         self.planner = Planner()
         self._task_plan: dict = {}
         self._retrieval_ledger = RetrievalLedger()
+        self._calculation_results: list[dict] = []
 
     def _retrieval_context(self) -> dict:
         return {
@@ -228,6 +233,28 @@ class Orchestrator:
                 digest = hashlib.sha256(body[:14000].encode("utf-8")).hexdigest()
             signatures.add((url, digest))
         return signatures
+
+    @staticmethod
+    def _attach_date_candidates(result: dict) -> dict:
+        """Expose deterministic date candidates without choosing their meaning."""
+
+        enriched = dict(result or {})
+        rows = []
+        for item in enriched.get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            body = "\n".join(
+                str(row.get(key) or "")
+                for key in ("source_excerpt", "page_excerpt", "content", "structured_evidence_text")
+            )
+            candidates = extract_date_candidates(body)
+            if candidates:
+                row["date_candidates"] = candidates[:32]
+            rows.append(row)
+        if rows:
+            enriched["results"] = rows
+        return enriched
 
     def _process_single_page_result(
         self,
@@ -694,6 +721,7 @@ class Orchestrator:
             "results": [],
             "citation_refs": [],
             "sources": [],
+            "calculation_results": list(self._calculation_results),
         }
         synthesis = synthesize_retrieval_answer(
             user_query,
@@ -704,6 +732,19 @@ class Orchestrator:
             termination_reason=termination_reason,
         )
         answer = str(synthesis.get("content") or "RWKV did not return a final summary.")
+        answer_fact_check = check_answer_facts(
+            answer,
+            evidence=[],
+            calculation_results=self._calculation_results,
+            freshness_policy=self.state.run_metadata.get("freshness_policy") or {},
+        )
+        append_task_event(
+            self.state.task_id,
+            "answer_fact_validation",
+            step=step,
+            phase="VALIDATION",
+            data=answer_fact_check,
+        )
         append_task_event(
             self.state.task_id,
             "context_build",
@@ -729,6 +770,7 @@ class Orchestrator:
                 validation=synthesis.get("validation") or {},
                 answer_alignment=synthesis.get("answer_alignment") or {},
                 answer_quality=synthesis.get("answer_quality") or {},
+                answer_fact_check=answer_fact_check,
                 prompt=synthesis.get("prompt", ""),
             model_output=synthesis.get("model_output", ""),
             context_text=synthesis.get("context_text", ""),
@@ -754,12 +796,13 @@ class Orchestrator:
             termination_reason=termination_reason,
             model_output_available=model_output_available,
             answer_quality=synthesis.get("answer_quality") or {},
+            answer_fact_check=answer_fact_check,
         )
         self._write_agentic_report(
             user_query,
             action,
             answer,
-            data=data,
+            data={**data, "answer_fact_check": answer_fact_check},
             mode=synthesis.get("mode") or "local_rwkv_final",
         )
         return answer
@@ -800,6 +843,9 @@ class Orchestrator:
                 rounds,
                 ranking_strategy=self._ranking_strategy(),
             )
+            if self._calculation_results:
+                merged = dict(merged)
+                merged["calculation_results"] = list(self._calculation_results)
             self._record_final_ranking(action, merged, step, stage="model_tool_loop_merge")
             synthesis = synthesize_retrieval_answer(
                 user_query,
@@ -815,6 +861,12 @@ class Orchestrator:
                 answer=answer,
                 evidence=substantive_evidence_items(merged.get("results") or []),
                 check_remote=get_citation_remote_validation(),
+            )
+            answer_fact_check = check_answer_facts(
+                answer,
+                evidence=substantive_evidence_items(merged.get("results") or []),
+                calculation_results=merged.get("calculation_results") or self._calculation_results,
+                freshness_policy=self.state.run_metadata.get("freshness_policy") or merged.get("freshness_policy") or {},
             )
             risk_validation = validate_risk_answer(answer, self.state.run_metadata)
             append_task_event(
@@ -854,6 +906,13 @@ class Orchestrator:
             )
             append_task_event(
                 self.state.task_id,
+                "answer_fact_validation",
+                step=step,
+                phase="VALIDATION",
+                data=answer_fact_check,
+            )
+            append_task_event(
+                self.state.task_id,
                 "synthesis",
                 step=step,
                 phase="SYNTHESIS",
@@ -864,6 +923,7 @@ class Orchestrator:
                 citation_refs=synthesis.get("citation_refs") or [],
                 citation_validation=citation_validation,
                 risk_validation=risk_validation,
+                answer_fact_check=answer_fact_check,
                 validation=synthesis.get("validation") or {},
                 answer_alignment=synthesis.get("answer_alignment") or {},
                 answer_quality=synthesis.get("answer_quality") or {},
@@ -897,13 +957,20 @@ class Orchestrator:
                 citation_refs=synthesis.get("citation_refs") or [],
                 citation_validation=citation_validation,
                 risk_validation=risk_validation,
+                answer_fact_check=answer_fact_check,
                 validation=synthesis.get("validation") or {},
                 answer_alignment=synthesis.get("answer_alignment") or {},
                 answer_quality=synthesis.get("answer_quality") or {},
                 termination_reason=termination_reason,
                 model_output_available=model_output_available,
             )
-            self._write_agentic_report(user_query, action, answer, data=merged, mode=synthesis.get("mode", "model_tool_loop"))
+            self._write_agentic_report(
+                user_query,
+                action,
+                answer,
+                data={**merged, "answer_fact_check": answer_fact_check},
+                mode=synthesis.get("mode", "model_tool_loop"),
+            )
             return answer
 
     def _prepare_task_plan(self, user_query: str, phase: str) -> dict:
@@ -914,6 +981,18 @@ class Orchestrator:
         # local-file plan.
         plan_context = ""
         task_plan = self.planner.create_task_plan(user_query, plan_context)
+        if task_plan.get("status") == "error":
+            append_task_event(
+                self.state.task_id,
+                "task_plan",
+                step=0,
+                phase="ROUTING",
+                data=task_plan,
+            )
+            return task_plan
+
+        freshness_policy = build_freshness_policy(user_query, task_plan)
+        task_plan = {**task_plan, "freshness_policy": freshness_policy}
         append_task_event(
             self.state.task_id,
             "task_plan",
@@ -921,11 +1000,9 @@ class Orchestrator:
             phase="ROUTING",
             data=task_plan,
         )
-        if task_plan.get("status") == "error":
-            return task_plan
-
         self._task_plan = task_plan
         self.state.run_metadata["task_plan"] = task_plan
+        self.state.run_metadata["freshness_policy"] = freshness_policy
         generic_web_mode = bool(self.state.run_metadata.get("generic_web_search_only"))
         # Keep the legacy call shape for existing planner test doubles. The
         # generic web mode is the only path that needs an explicit phase.
@@ -1116,6 +1193,7 @@ class Orchestrator:
             action = str(plan.get("action") or "").strip()
             args = dict(plan.get("args") or {}) if isinstance(plan.get("args"), dict) else {}
             task_point_id = str(plan.get("task_point_id") or "").strip()
+            call_id = str(plan.get("call_id") or "").strip()
             last_action = action or last_action
             append_task_event(
                 self.state.task_id,
@@ -1124,6 +1202,7 @@ class Orchestrator:
                 phase=phase,
                 action=action,
                 args=args,
+                call_id=call_id,
                 task_point_id=task_point_id,
                 router=plan.get("router", "model_tool_decision"),
                 raw_model_output=plan.get("raw_model_output", ""),
@@ -1195,6 +1274,18 @@ class Orchestrator:
                         termination_reason=("max_steps_reached" if step >= max_steps else "model_requested_finish"),
                     )
                     return answer
+                if self._calculation_results:
+                    # A deterministic computation is an agent observation,
+                    # not a direct-answer shortcut.  Route it through final
+                    # synthesis so RWKV receives the exact tool result and
+                    # the event trace preserves the model/tool boundary.
+                    return self._complete_model_tool_loop(
+                        user_query,
+                        last_action,
+                        [],
+                        step,
+                        termination_reason=("max_steps_reached" if step >= max_steps else "model_requested_finish"),
+                    )
                 if retrieval_attempted and last_retrieval_failure and replan_attempts < max_replan_attempts:
                     # A discovery/provider failure is not evidence.  Give the
                     # model-owned planner the configured recovery rounds even
@@ -1464,6 +1555,7 @@ class Orchestrator:
                 phase=phase,
                 action=action,
                 args=args,
+                call_id=call_id,
                 decision_source="model",
             )
             try:
@@ -1486,6 +1578,13 @@ class Orchestrator:
                     structured_result = raw_result
                 if not isinstance(structured_result, dict):
                     structured_result = {"status": "ok", "raw": raw_result}
+                structured_result = normalize_tool_result(
+                    structured_result,
+                    tool_name=action,
+                    call_id=call_id,
+                )
+                if action == "web_search":
+                    structured_result = self._attach_date_candidates(structured_result)
             except Exception as exc:
                 structured_result = {
                     "status": "error",
@@ -1505,6 +1604,44 @@ class Orchestrator:
                 task_point_id=task_point_id,
             )
             structured_result["request_status"] = request_status
+
+            if (
+                action == "connector_lookup"
+                and not is_error(structured_result)
+                and any(
+                    isinstance(item, dict) and has_substantive_evidence(item)
+                    for item in structured_result.get("results") or []
+                )
+            ):
+                # Structured connector records are already evidence. They do
+                # not enter the page chunker, so preserve them as a retrieval
+                # round for final synthesis without changing the chunk path.
+                rounds.append((str(args.get("query") or user_query), structured_result))
+                retrieval_progressed = True
+                no_progress_steps = 0
+                last_retrieval_failure = None
+
+            if action == "date_diff" and str(structured_result.get("status") or "") == "ok":
+                calculation = {
+                    "status": "ok",
+                    "tool": "date_diff",
+                    "date_a": structured_result.get("date_a", ""),
+                    "date_b": structured_result.get("date_b", ""),
+                    "days": structured_result.get("days"),
+                    "signed_days": structured_result.get("signed_days"),
+                    "formula": structured_result.get("formula", ""),
+                    "source_refs": list(structured_result.get("source_refs") or []),
+                }
+                self._calculation_results.append(calculation)
+                append_task_event(
+                    self.state.task_id,
+                    "calculation_result",
+                    step=step,
+                    phase="CALCULATION",
+                    action=action,
+                    data=calculation,
+                    decision_source="model",
+                )
 
             # A search result is metadata only.  A fetched page is processed
             # as one document and one chunk at a time before the planner sees
@@ -1819,6 +1956,7 @@ class Orchestrator:
         self.state.task_id = task_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.state.run_metadata = dict(run_metadata or {})
         self._retrieval_ledger = RetrievalLedger()
+        self._calculation_results = []
         self.state.task_output_dir = os.path.join(DATA_PIPELINE.get("output_directory", "./data/output"), self.state.task_id)
         os.makedirs(self.state.task_output_dir, exist_ok=True)
         

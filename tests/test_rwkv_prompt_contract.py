@@ -51,7 +51,9 @@ class RWKVPromptContractTests(unittest.TestCase):
                 ]
             }
         )
-        self.assertEqual(payload, {"name": "web_search", "arguments": {"query": "test query"}})
+        self.assertEqual(payload["name"], "web_search")
+        self.assertEqual(payload["arguments"], {"query": "test query"})
+        self.assertEqual(payload["call_id"], "call_1")
 
     def test_no_evidence_is_explicitly_marked_for_model(self):
         llm = _PromptFakeLLM()

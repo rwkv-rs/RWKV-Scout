@@ -18,11 +18,16 @@ def load_builtin_tools() -> None:
         if _loaded:
             return
         import tools.chat  # noqa: F401
+        import tools.calculator  # noqa: F401
+        import tools.connectors  # noqa: F401
         import tools.crossref  # noqa: F401
+        import tools.date_calculator  # noqa: F401
         import tools.github_rest  # noqa: F401
         import tools.mediawiki  # noqa: F401
         import tools.paper_search  # noqa: F401
         import tools.static_ops  # noqa: F401
+        import tools.page_tools  # noqa: F401
+        import tools.time_tools  # noqa: F401
         import tools.weather  # noqa: F401
         # ``tools.web_search_generic`` is the active public web capability.
         # The former execute_web_search implementation is legacy and is no

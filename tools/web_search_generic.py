@@ -26,6 +26,7 @@ from utils.task_events import append_task_event
 from utils.evidence_quality import MIN_PAGE_BODY_CHARS, has_substantive_evidence
 from utils.source_authority import annotate_source, resolve_source_policy
 from utils.web_retrieval import candidate_score, normalize_url
+from utils.freshness import annotate_freshness, build_freshness_policy
 
 
 def _parse_result(value: Any) -> dict[str, Any]:
@@ -331,6 +332,7 @@ def web_search(query: str, **kwargs: Any) -> str:
     query = " ".join(str(query or "").split()).strip()
     task_id = str(kwargs.get("task_id") or "")
     task_plan = kwargs.get("task_plan") if isinstance(kwargs.get("task_plan"), dict) else {}
+    freshness_policy = build_freshness_policy(kwargs.get("original_goal") or query, task_plan)
     source_policy = resolve_source_policy(query, {"task_plan": task_plan})
     if not query:
         return json.dumps({"status": "error", "message": "query is empty", "results": []}, ensure_ascii=False)
@@ -453,6 +455,7 @@ def web_search(query: str, **kwargs: Any) -> str:
                 "candidate_count": 0,
                 "page_evidence": [],
                 "evidence_ready": False,
+                "freshness_policy": freshness_policy,
                 "evidence_policy": "no candidate URL was admitted; the model must decide whether to refine the query",
             },
             ensure_ascii=False,
@@ -499,6 +502,7 @@ def web_search(query: str, **kwargs: Any) -> str:
                 "evidence_ready": False,
                 "authority_missing": True,
                 "required_domains": source_policy.get("required_domains") or [],
+                "freshness_policy": freshness_policy,
                 "evidence_policy": "official-domain gate blocked page fetch; refine the query or use a matching official URL",
             },
             ensure_ascii=False,
@@ -540,7 +544,7 @@ def web_search(query: str, **kwargs: Any) -> str:
             page=page_evidence,
         )
         if record:
-            records.append(record)
+            records.append(annotate_freshness(record, freshness_policy))
 
     refs = [
         {
@@ -592,6 +596,7 @@ def web_search(query: str, **kwargs: Any) -> str:
         "usable_evidence_count": len(usable_records),
         "evidence_missing_count": missing_page_count + (len(records) - len(usable_records)),
         "retrieved_at": datetime.now().isoformat(timespec="seconds"),
+        "freshness_policy": freshness_policy,
         "evidence_policy": "candidate URLs and Markdown chunk facts are untrusted evidence; the model decides whether to search again or summarize",
     }
     append_task_event(

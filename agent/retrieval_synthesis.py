@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from difflib import SequenceMatcher
 from typing import Any
@@ -574,6 +575,7 @@ def _pack_source_evidence(
         return (
             f"BEGIN EVIDENCE SOURCE {item.get('ref_id', '')}\n"
             f"URL (citation metadata only): {item.get('url', '')}\n"
+            f"Freshness metadata (control only): {json.dumps(item.get('freshness') or {}, ensure_ascii=False)}\n"
             "The URL, title, search snippet, provider summary and publication metadata are not evidence.\n"
             "EVIDENCE BODY (the only factual source for this record; cite S#:#):\n"
             f"{body}\nEND EVIDENCE SOURCE {item.get('ref_id', '')}"
@@ -980,6 +982,7 @@ def build_evidence_context(
                 "evidence_provenance": provenance,
                 "source_quality": source_quality(item),
                 "authority": item.get("authority") or authority_for_url(item.get("url"), query_text, constraints),
+                "freshness": item.get("freshness") or {},
             }
         )
     # Pack after ranking but before validation/citation metadata is returned.
@@ -997,6 +1000,7 @@ def build_evidence_context(
     )
     return {
         "text": context_text,
+        "evidence_text": context_text,
         "selected_evidence": packed_metadata,
         "source_chars": sum(item["source_chars"] for item in packed_metadata),
         "selected_chars": sum(item["selected_chars"] for item in packed_metadata),
@@ -1025,6 +1029,11 @@ def build_evidence_context(
         ) or len(packed_metadata) < len(selected_metadata),
         "final_context_truncated": False,
         "validation": validation,
+        "calculation_results": [
+            item for item in (data.get("calculation_results") or [])
+            if isinstance(item, dict) and str(item.get("status") or "") == "ok"
+        ],
+        "calculation_text": _calculation_context_text(data.get("calculation_results") or []),
         "strategy": strategy,
     }
 
@@ -1285,6 +1294,43 @@ def _requested_final_completion_budget(
     return requested
 
 
+def _calculation_context_text(results: Any) -> str:
+    """Render successful deterministic tool outputs for final RWKV synthesis.
+
+    These rows are intentionally separate from web evidence.  They carry a
+    computed value into the answer prompt without pretending that the
+    calculator is a source or allowing it to create a citation.
+    """
+
+    rows = [
+        item for item in (results or [])
+        if isinstance(item, dict)
+        and str(item.get("status") or "") == "ok"
+        and str(item.get("tool") or "") == "date_diff"
+    ]
+    if not rows:
+        return ""
+    lines = [
+        "BEGIN DETERMINISTIC TOOL RESULTS",
+        "The following values came from an explicit computation tool. They are not web evidence; use the exact numeric result and cite the web source for the operand dates when available.",
+    ]
+    for index, item in enumerate(rows, start=1):
+        refs = ", ".join(str(ref) for ref in item.get("source_refs") or [] if str(ref).strip())
+        lines.extend(
+            [
+                f"CALCULATION C{index} (date_diff)",
+                f"date_a: {item.get('date_a', '')}",
+                f"date_b: {item.get('date_b', '')}",
+                f"absolute_days: {item.get('days', '')}",
+                f"signed_days: {item.get('signed_days', '')}",
+                f"formula: {item.get('formula', '')}",
+                f"operand_source_refs: {refs or 'not supplied'}",
+            ]
+        )
+    lines.append("END DETERMINISTIC TOOL RESULTS")
+    return "\n".join(lines)
+
+
 def _fit_final_context_projection(
     context: dict[str, Any],
     data: dict[str, Any],
@@ -1302,11 +1348,23 @@ def _fit_final_context_projection(
     unbound partial source to RWKV.
     """
     limit = max(1024, int(get_llm_context_length()))
-    original_text = str(context.get("text") or "").strip()
+    calculation_text = str(context.get("calculation_text") or "").strip()
+
+    def compose_context(source_text: str) -> str:
+        source_text = str(source_text or "").strip() or "(no retrieved evidence)"
+        if not calculation_text:
+            return source_text
+        return f"{source_text}\n\n{calculation_text}"
+
+    original_source_text = str(
+        context.get("evidence_text") or context.get("text") or ""
+    ).strip()
+    original_text = compose_context(original_source_text)
 
     def with_projection(selected: list[dict[str, Any]], text: str, truncated: bool) -> dict[str, Any]:
         projected = dict(context)
-        projected["text"] = text or "(no retrieved evidence)"
+        projected["evidence_text"] = text or "(no retrieved evidence)"
+        projected["text"] = compose_context(text)
         projected["selected_evidence"] = selected
         projected["validation"] = build_evidence_validation(
             data,
@@ -1358,10 +1416,18 @@ def _context_fields(context: dict[str, Any]) -> dict[str, Any]:
         "context_text": context["text"],
         "selected_evidence": context["selected_evidence"],
         "validation": context.get("validation") or {},
+        "calculation_results": context.get("calculation_results") or [],
         "context_stats": {
             key: value
             for key, value in context.items()
-            if key not in {"text", "selected_evidence", "validation"}
+            if key not in {
+                "text",
+                "evidence_text",
+                "selected_evidence",
+                "validation",
+                "calculation_results",
+                "calculation_text",
+            }
         },
     }
 
@@ -1659,8 +1725,10 @@ def synthesize_retrieval_answer(
     strategy = normalize_strategy((constraints or {}).get("strategy_config") or data.get("strategy_config"))
     context = build_evidence_context(data, constraints=constraints, query=query)
     context_fields = _context_fields(context)
-    evidence_context_text = context["text"]
+    evidence_context_text = str(context.get("evidence_text") or context["text"])
+    calculation_results = context.get("calculation_results") or []
     context_stats = context_fields["context_stats"]
+    context_stats["calculation_count"] = len(calculation_results)
     # Keep the evidence-only projection separate from the actual final prompt.
     # The latter may also contain the bounded execution record.
     context_stats["evidence_context_chars"] = context["context_chars"]
@@ -1692,6 +1760,7 @@ def synthesize_retrieval_answer(
     validation_prompt = _validation_prompt(context.get("validation") or {})
     acceptance_context = _plan_acceptance_context(constraints)
     source_policy = resolve_source_policy(query, constraints)
+    freshness_policy = (constraints or {}).get("freshness_policy") or {}
     task_plan = (constraints or {}).get("task_plan") or {}
     task_mode = str(task_plan.get("task_mode") or "lookup")
     requested_fields = [
@@ -1734,6 +1803,17 @@ def synthesize_retrieval_answer(
         if acceptance_context and task_mode in {"latest_list", "deep_research"}
         else ""
     )
+    freshness_instruction = ""
+    if freshness_policy.get("as_of"):
+        freshness_instruction = (
+            f"Temporal constraint: answer only with information available on or before {freshness_policy['as_of']}. "
+            "Do not use a source dated after that cutoff; if a source date is unknown, state that limitation. "
+        )
+    else:
+        freshness_instruction = (
+            "Temporal policy: prefer the most recent source available at retrieval time for current/latest questions, "
+            "but do not invent a publication date when the source does not provide one. "
+        )
     variant_instruction = {
         "default.v1": "",
         "citation_first.v1": "For every factual claim, attach the most relevant source reference or say that evidence is insufficient. ",
@@ -1779,6 +1859,7 @@ def synthesize_retrieval_answer(
         context = dict(context)
         context["text"] = "(no retrieved evidence)"
         context["selected_evidence"] = []
+        context["evidence_text"] = "(no retrieved evidence)"
         context["selected_chars"] = 0
         context["source_chars"] = 0
         context["chunk_count"] = 0
@@ -1796,7 +1877,7 @@ def synthesize_retrieval_answer(
         )
         context_citation_refs = []
         validation_prompt = _validation_prompt(context["validation"])
-        evidence_context_text = context["text"]
+        evidence_context_text = str(context.get("evidence_text") or context["text"])
         usable_evidence_count = 0
     answer_context = context
     context_stats["final_evidence_suppressed"] = final_evidence_suppressed
@@ -1829,6 +1910,11 @@ def synthesize_retrieval_answer(
                 f"USABLE_EVIDENCE_AVAILABLE ({usable_evidence_count} source bodies). "
                 "Use only the EVIDENCE BODY sections for factual claims."
             )
+    elif calculation_results:
+        evidence_state = (
+            "CALCULATION_RESULT_AVAILABLE. Use the deterministic tool result for the arithmetic and do not add "
+            "unsupported web facts."
+        )
     else:
         evidence_state = (
             "NO_USABLE_EVIDENCE. The body does not support the requested facts; state that briefly "
@@ -1851,7 +1937,12 @@ def synthesize_retrieval_answer(
             "supported details across the visible chunks. Treat validation and chunk markers as routing metadata; "
             "do not turn a locator gap into a refusal. "
             if usable_evidence_count
-            else "No-source-body mode: the requested claim is not confirmed by a retrieved source body; say that briefly and stop. "
+            else (
+                "Computation-only mode: use the deterministic tool result shown below for the requested arithmetic; "
+                "do not invent operands or claim that the calculator is a web source. "
+                if calculation_results
+                else "No-source-body mode: the requested claim is not confirmed by a retrieved source body; say that briefly and stop. "
+            )
         )
         output_precision_instruction = (
             "Copy names, dates, quantities, polarity, commands, and flags exactly from the body; do not invent or reverse them. "
@@ -1863,6 +1954,12 @@ def synthesize_retrieval_answer(
         calculation_hint = build_calculation_check(
             query,
             context.get("selected_evidence") or context_text,
+        )
+        calculation_instruction = (
+            "The DETERMINISTIC TOOL RESULTS are authoritative only for the arithmetic they explicitly report. "
+            "Do not recalculate them mentally, change their operands, or cite C# as a web source. "
+            if calculation_results
+            else ""
         )
         list_instruction = ""
         if task_mode == "latest_list":
@@ -1881,10 +1978,12 @@ def synthesize_retrieval_answer(
             f"{variant_instruction}{risk_instructions}{acceptance_instruction}"
             f"Output mode: {task_mode}. {brevity_instruction}{list_instruction}"
             f"{evidence_usage_instruction}{output_precision_instruction}{source_instruction}"
+            f"{freshness_instruction}"
             f"{polarity_hint}"
             f"{scope_hint}"
             f"{answer_first_hint}"
             f"{calculation_hint}"
+            f"{calculation_instruction}"
             f"Question: {query}\n"
             f"Evidence status: {current_evidence_state}\n"
             f"{current_validation_prompt}"
@@ -1956,7 +2055,7 @@ def synthesize_retrieval_answer(
     context_stats = context_fields["context_stats"]
     context_citation_refs = _citation_refs_for_context(data, context)
     answer_context = context
-    evidence_context_text = context_text
+    evidence_context_text = str(context.get("evidence_text") or context_text)
     usable_evidence_count = int(context.get("usable_evidence_count") or 0)
     context_stats["final_usable_evidence_count"] = usable_evidence_count
     context_stats["final_selected_evidence_count"] = len(context.get("selected_evidence") or [])
@@ -2075,7 +2174,7 @@ def synthesize_retrieval_answer(
         # closed, preserve the model's raw output in the trace but never expose
         # an unsupported factual continuation to the user.  This is an output
         # protocol boundary, not a second model/verifier or a truth judgement.
-        closed_world_enforced = not usable_evidence_count
+        closed_world_enforced = not usable_evidence_count and not calculation_results
         if closed_world_enforced and not _is_evidence_refusal(answer):
             answer = _closed_world_fallback()
         if not closed_world_enforced:

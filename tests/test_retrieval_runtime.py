@@ -124,10 +124,37 @@ class RetrievalRuntimeTests(unittest.TestCase):
             ToolRegistry.get_json_catalog("ALL", model_visible_only=True)
         )
         rows = {row["name"]: row for row in catalog}
-        self.assertEqual(set(rows), {"web_search", "finish_task"})
-        self.assertEqual(ToolRegistry.model_visible_names("ALL"), ["finish_task", "web_search"])
+        self.assertEqual(
+            set(rows),
+            {
+                "web_search",
+                "open_page",
+                "find_in_page",
+                "connector_lookup",
+                "calculator",
+                "current_time",
+                "date_diff",
+                "finish_task",
+            },
+        )
+        self.assertEqual(
+            ToolRegistry.model_visible_names("ALL"),
+            [
+                "finish_task",
+                "web_search",
+                "open_page",
+                "find_in_page",
+                "connector_lookup",
+                "calculator",
+                "date_diff",
+                "current_time",
+            ],
+        )
         self.assertEqual(rows["web_search"]["category"], "retrieval")
+        self.assertEqual(rows["date_diff"]["category"], "computation")
         self.assertEqual(rows["finish_task"]["category"], "control")
+        self.assertEqual(rows["calculator"]["category"], "computation")
+        self.assertEqual(rows["connector_lookup"]["category"], "connector")
         self.assertNotIn("search_web_tavily", rows)
         self.assertNotIn("fetch_web_url", rows)
 
@@ -138,6 +165,8 @@ class RetrievalRuntimeTests(unittest.TestCase):
         self.assertNotIn('"name": "search_web_keyless"', prompt)
         self.assertNotIn('"name": "fetch_web_url"', prompt)
         self.assertNotIn("provider-specific search API", prompt)
+        self.assertIn('"name": "date_diff"', prompt)
+        self.assertIn("YYYY-MM-DD", prompt)
 
     def test_global_loop_blocks_successful_duplicate_web_search_before_execution(self):
         orchestrator = Orchestrator()
