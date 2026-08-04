@@ -1,0 +1,1689 @@
+{
+  "case_1": [
+    [
+      "Python 3.13+ free-threaded support",
+      "free-threaded Python 3.13"
+    ],
+    [
+      "--disable-gil"
+    ],
+    [
+      "sys._is_gil_enabled()"
+    ],
+    [
+      "PYTHON_GIL",
+      "-X gil"
+    ]
+  ],
+  "case_2": [
+    [
+      "official Start Locally selector",
+      "Start Locally"
+    ],
+    [
+      "OS/package/language/compute platform",
+      "OS package language compute platform"
+    ],
+    [
+      "CUDA version",
+      "CUDA"
+    ],
+    [
+      "generated command",
+      "select ... run"
+    ]
+  ],
+  "case_3": [
+    [
+      "fetch added v17.5/v16.15",
+      "v17.5.0",
+      "v16.15.0"
+    ],
+    [
+      "no experimental-fetch flag from v18",
+      "v18.0.0",
+      "experimental-fetch"
+    ],
+    [
+      "no longer experimental from v21",
+      "v21.0.0",
+      "no longer experimental"
+    ]
+  ],
+  "case_4": [
+    [
+      "GIN index",
+      "USING GIN"
+    ],
+    [
+      "jsonb_ops default",
+      "jsonb_ops"
+    ],
+    [
+      "jsonb_path_ops alternative",
+      "jsonb_path_ops"
+    ],
+    [
+      "CREATE INDEX ... USING GIN",
+      "CREATE INDEX",
+      "USING GIN"
+    ]
+  ],
+  "case_5": [
+    [
+      "proxy_http_version 1.1",
+      "proxy_http_version",
+      "HTTP/1.1"
+    ],
+    [
+      "Upgrade header",
+      "proxy_set_header Upgrade",
+      "Upgrade"
+    ],
+    [
+      "Connection header",
+      "proxy_set_header Connection",
+      "Connection"
+    ],
+    [
+      "proxy_pass"
+    ]
+  ],
+  "case_6": [
+    [
+      "deploy.resources.reservations.devices",
+      "reservations.devices"
+    ],
+    {
+      "all": [
+        "capabilities",
+        "gpu"
+      ]
+    },
+    [
+      "count or device_ids",
+      "count",
+      "device_ids"
+    ],
+    [
+      "count and device_ids mutually exclusive",
+      "mutually exclusive"
+    ]
+  ],
+  "case_7": [
+    [
+      "Ingress stable",
+      "stable API",
+      "stable"
+    ],
+    [
+      "Ingress API frozen",
+      "frozen"
+    ],
+    [
+      "Gateway recommended",
+      "Gateway"
+    ],
+    [
+      "HTTP/HTTPS routing to Service",
+      "HTTP/HTTPS",
+      "Service"
+    ],
+    [
+      "Ingress Controller"
+    ]
+  ],
+  "case_8": [
+    [
+      "Asynchronous Programming in Rust",
+      "async book"
+    ],
+    [
+      "rust-lang.github.io/async-book",
+      "async-book"
+    ],
+    [
+      "two parts",
+      "two-part"
+    ],
+    [
+      "async/await"
+    ],
+    [
+      "Future"
+    ]
+  ],
+  "case_9": [
+    [
+      "The Go Memory Model",
+      "Go memory model"
+    ],
+    [
+      "go.dev/ref/mem"
+    ],
+    [
+      "data-race-free",
+      "DRF-SC"
+    ],
+    [
+      "happens-before"
+    ],
+    [
+      "sync/atomic"
+    ]
+  ],
+  "case_10": [
+    [
+      "TypeScript 6.0"
+    ],
+    [
+      "breaking changes",
+      "breaking change"
+    ],
+    [
+      "deprecations",
+      "deprecated"
+    ],
+    [
+      "ignoreDeprecations",
+      "ignoreDeprecations: 6.0"
+    ],
+    [
+      "TypeScript 7.0"
+    ]
+  ],
+  "case_11": [
+    [
+      "Android Security Bulletin July 2026",
+      "July 2026"
+    ],
+    [
+      "published July 6, 2026",
+      "July 6, 2026"
+    ],
+    [
+      "no security vulnerabilities",
+      "no security vulnerabilities in this bulletin"
+    ],
+    [
+      "2026-07-01",
+      "2026-07-05"
+    ]
+  ],
+  "case_12": [
+    [
+      "USN-8573-1",
+      "USN-8566-1",
+      "USN-8490-2"
+    ],
+    [
+      "July 20, 2026",
+      "17 July 2026",
+      "20 July 2026"
+    ],
+    [
+      "libde265",
+      "Linux kernel"
+    ],
+    [
+      "Wget",
+      "Apache HTTP Server"
+    ]
+  ],
+  "case_16": [
+    [
+      "July 21, 2026"
+    ],
+    [
+      "MFSA 2026-68"
+    ],
+    [
+      "Firefox 153"
+    ],
+    [
+      "MFSA 2026-69"
+    ],
+    [
+      "MFSA 2026-70"
+    ]
+  ],
+  "case_18": [
+    [
+      "09 Jun 2026",
+      "June 9, 2026"
+    ],
+    [
+      "CVE-2026-45447"
+    ],
+    [
+      "CVE-2026-34182"
+    ],
+    [
+      "CVE-2026-34183"
+    ],
+    [
+      "CVE-2026-35188"
+    ]
+  ],
+  "case_19": [
+    [
+      "01 Aug 2026",
+      "August 1, 2026"
+    ],
+    [
+      "CVE-2026-3865"
+    ],
+    [
+      "CVE-2026-4342"
+    ],
+    [
+      "ingress-nginx"
+    ]
+  ],
+  "case_20": [
+    [
+      "2026-06-24"
+    ],
+    [
+      "CVE-2026-12064"
+    ],
+    [
+      "proto-default skips SSH verification"
+    ],
+    [
+      "8.20.0"
+    ]
+  ],
+  "case_13": [
+    [
+      "Debian Security Tracker"
+    ],
+    [
+      "CVE-2026-41651"
+    ],
+    [
+      "PackageKit"
+    ],
+    [
+      "local privilege escalation"
+    ],
+    [
+      "1.3.5"
+    ]
+  ],
+  "case_14": [
+    [
+      "CISA KEV",
+      "Known Exploited Vulnerabilities Catalog"
+    ],
+    [
+      "living catalog"
+    ],
+    [
+      "evidence of exploitation"
+    ],
+    [
+      "recent additions require timestamp"
+    ]
+  ],
+  "case_17": [
+    [
+      "GitHub Advisory Database"
+    ],
+    [
+      "pip"
+    ],
+    [
+      "high severity"
+    ],
+    [
+      "CVE-2026-53502"
+    ],
+    [
+      "CVE-2026-53505"
+    ],
+    [
+      "CVE-2026-53504"
+    ]
+  ],
+  "case_21": [
+    [
+      "ISO/IEC 14882:2024"
+    ],
+    [
+      "Edition 7"
+    ],
+    [
+      "published October 2024"
+    ],
+    [
+      "Published"
+    ]
+  ],
+  "case_22": [
+    [
+      "ECMAScript 2026"
+    ],
+    [
+      "seventeenth edition"
+    ],
+    [
+      "current ECMA-262"
+    ],
+    [
+      "Stage 4 proposals"
+    ]
+  ],
+  "case_23": [
+    [
+      "WHATWG HTML Living Standard"
+    ],
+    [
+      "html.spec.whatwg.org/multipage"
+    ],
+    [
+      "July 2026 update"
+    ],
+    [
+      "no numbered edition"
+    ]
+  ],
+  "case_24": [
+    [
+      "RFC 9110"
+    ],
+    [
+      "HTTP Semantics"
+    ],
+    [
+      "June 2022"
+    ],
+    [
+      "Internet Standard"
+    ],
+    [
+      "erratum 7599"
+    ],
+    [
+      "205"
+    ]
+  ],
+  "case_25": [
+    [
+      "Candidate Recommendation Draft"
+    ],
+    [
+      "21 May 2026"
+    ],
+    [
+      "Editor's Draft",
+      "Editor’s Draft"
+    ],
+    [
+      "27 July 2026"
+    ],
+    [
+      "not final Recommendation"
+    ]
+  ],
+  "case_26": [
+    [
+      "22 May 2026"
+    ],
+    [
+      "1 November 2025 00:00",
+      "1 November 2025"
+    ],
+    [
+      "140545万人",
+      "1,405.45 million"
+    ],
+    [
+      "71722万人男性",
+      "717.22 million males"
+    ],
+    [
+      "68823万人女性",
+      "688.23 million females"
+    ]
+  ],
+  "case_27": [
+    [
+      "Q1 2026 monetary policy report"
+    ],
+    [
+      "11 May 2026"
+    ],
+    [
+      "moderately accommodative monetary policy"
+    ],
+    [
+      "GDP 5%"
+    ],
+    [
+      "M2 8.5%"
+    ],
+    [
+      "aggregate financing 7.9%"
+    ]
+  ],
+  "case_28": [
+    [
+      "26 June 2026"
+    ],
+    [
+      "7355亿元",
+      "735.5 billion yuan"
+    ],
+    [
+      "7.9%"
+    ],
+    [
+      "18.41亿移动电话用户",
+      "1.841 billion mobile users"
+    ],
+    [
+      "12.75亿5G用户",
+      "1.275 billion 5G users"
+    ],
+    [
+      "505.3万5G基站",
+      "5.053 million 5G base stations"
+    ]
+  ],
+  "case_29": [
+    [
+      "SAMR official recall portal"
+    ],
+    [
+      "18 June 2026"
+    ],
+    [
+      "Harley-Davidson Sportster S"
+    ],
+    [
+      "Polestar 4"
+    ],
+    [
+      "live index"
+    ]
+  ],
+  "case_32": [
+    [
+      "China Earthquake Networks Center"
+    ],
+    [
+      "26 July 2026"
+    ],
+    [
+      "20:36:18"
+    ],
+    [
+      "4.8"
+    ],
+    [
+      "New Taipei, Taiwan"
+    ],
+    [
+      "real-time answer requires timestamp"
+    ]
+  ],
+  "case_37": [
+    [
+      "SEC EDGAR"
+    ],
+    [
+      "Form 13F-HR"
+    ],
+    [
+      "Q1 2026"
+    ],
+    [
+      "filed May 2026"
+    ],
+    [
+      "31 March 2026"
+    ],
+    [
+      "information-table XML"
+    ]
+  ],
+  "case_39": [
+    [
+      "Q1 2026"
+    ],
+    [
+      "28 March 2026"
+    ],
+    [
+      "$7.4 billion revenue"
+    ],
+    [
+      "$11.2 billion Q2 guidance"
+    ],
+    [
+      "AMD investor relations"
+    ]
+  ],
+  "case_41": [
+    [
+      "Apple Service and Repair"
+    ],
+    [
+      "iPhone"
+    ],
+    [
+      "My Support repair tracking"
+    ],
+    [
+      "Self Service Repair"
+    ],
+    [
+      "model/region dependent"
+    ]
+  ],
+  "case_42": [
+    [
+      "WHO Publications"
+    ],
+    [
+      "WHO Digital Publications"
+    ],
+    [
+      "official item page"
+    ],
+    [
+      "Download PDF"
+    ],
+    [
+      "topic must be specified"
+    ]
+  ],
+  "case_43": [
+    [
+      "Artemis II"
+    ],
+    [
+      "10-day lunar journey"
+    ],
+    [
+      "Artemis III 2027"
+    ],
+    [
+      "Artemis IV 2028"
+    ],
+    [
+      "NASA official update"
+    ]
+  ],
+  "case_44": [
+    [
+      "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
+    ],
+    [
+      "Albert Gu"
+    ],
+    [
+      "Tri Dao"
+    ],
+    [
+      "selective state spaces"
+    ],
+    [
+      "linear scaling"
+    ]
+  ],
+  "case_45": [
+    [
+      "llama.cpp issue tracker"
+    ],
+    [
+      "Vulkan/AMD startup"
+    ],
+    [
+      "CUDA 13.1 performance"
+    ],
+    [
+      "driver performance degradation"
+    ],
+    [
+      "GPU memory/OOM"
+    ],
+    [
+      "tool calling"
+    ]
+  ],
+  "case_46": [
+    [
+      "CUDA Error 803"
+    ],
+    [
+      "cuda-compat conflict"
+    ],
+    [
+      "host driver"
+    ],
+    [
+      "missing kernel image"
+    ],
+    [
+      "Triton/Mamba illegal instruction"
+    ]
+  ],
+  "case_15": [
+    [
+      "CVE-2026-55654"
+    ],
+    [
+      "OpenSSH"
+    ],
+    [
+      "heap out-of-bounds read"
+    ],
+    [
+      "GSSAPI"
+    ],
+    [
+      "Kerberos"
+    ],
+    [
+      "denial of service"
+    ]
+  ],
+  "case_30": [
+    [
+      "National Medical Products Administration"
+    ],
+    [
+      "official drug portal"
+    ],
+    [
+      "product-specific recall notice"
+    ],
+    [
+      "announcement date"
+    ],
+    [
+      "NMPA notice URL"
+    ]
+  ],
+  "case_31": [
+    [
+      "active warnings are time-dependent"
+    ],
+    [
+      "location-dependent"
+    ],
+    [
+      "China Meteorological Administration"
+    ],
+    [
+      "retrieval timestamp"
+    ],
+    [
+      "not a static nationwide list"
+    ]
+  ],
+  "case_33": [
+    [
+      "BLS June 2026 PPI"
+    ],
+    [
+      "15 July 2026"
+    ],
+    [
+      "final demand -0.3%"
+    ],
+    [
+      "goods -1.4%"
+    ],
+    [
+      "services +0.2%"
+    ],
+    [
+      "12-month +5.5%"
+    ]
+  ],
+  "case_34": [
+    [
+      "week ending 17 July 2026"
+    ],
+    [
+      "22 July 2026"
+    ],
+    [
+      "crude inventories +2.0 million barrels"
+    ],
+    [
+      "411.7 million barrels"
+    ],
+    [
+      "6% below five-year average"
+    ],
+    [
+      "SPR excluded"
+    ]
+  ],
+  "case_35": [
+    [
+      "NOAA SWPC"
+    ],
+    [
+      "Notifications Timeline"
+    ],
+    [
+      "space-weather alert status is time-sensitive"
+    ],
+    [
+      "issue/valid times"
+    ],
+    [
+      "watches warnings alerts"
+    ]
+  ],
+  "case_36": [
+    [
+      "CDC Travelers' Health Notices"
+    ],
+    [
+      "Level 3 Ebola DRC"
+    ],
+    [
+      "Level 2 Ebola DRC/Uganda"
+    ],
+    [
+      "Level 1 Global Dengue"
+    ],
+    [
+      "update date and destination scope"
+    ]
+  ],
+  "case_38": [
+    [
+      "Xiaomi Corporation"
+    ],
+    [
+      "HKEX"
+    ],
+    [
+      "stock code 01810"
+    ],
+    [
+      "20 July 2026"
+    ],
+    [
+      "next-day disclosure return"
+    ],
+    [
+      "17 July 2026 board-meeting announcement"
+    ]
+  ],
+  "case_40": [
+    [
+      "20 February 2026"
+    ],
+    [
+      "BYOIP pipeline change"
+    ],
+    [
+      "BGP prefixes withdrawn"
+    ],
+    [
+      "about 1100 prefixes"
+    ],
+    [
+      "6 hours 7 minutes"
+    ],
+    [
+      "prefix restoration"
+    ]
+  ],
+  "case_47": [
+    [
+      "V2EX macOS discussions"
+    ],
+    [
+      "user-generated reports"
+    ],
+    [
+      "specific thread"
+    ],
+    [
+      "macOS version"
+    ],
+    [
+      "not a controlled survey"
+    ]
+  ],
+  "case_48": [
+    [
+      "r/LocalLLaMA"
+    ],
+    [
+      "RWKV"
+    ],
+    [
+      "community anecdotes"
+    ],
+    [
+      "exact post/comment"
+    ],
+    [
+      "model/version/hardware context"
+    ],
+    [
+      "not a benchmark"
+    ]
+  ],
+  "case_49": [
+    [
+      "Stack Overflow"
+    ],
+    [
+      "Docker Compose"
+    ],
+    [
+      "NVIDIA Container Toolkit/runtime"
+    ],
+    [
+      "GPU driver"
+    ],
+    [
+      "CUDA/image/host mismatch"
+    ],
+    [
+      "exact error and environment required"
+    ]
+  ],
+  "case_50": [
+    [
+      "Hacker News discussion"
+    ],
+    [
+      "opinion thread"
+    ],
+    [
+      "exact discussion link"
+    ],
+    [
+      "PostgreSQL official release page"
+    ],
+    [
+      "separate opinion from release facts"
+    ]
+  ],
+  "rwkv_search_001": [
+    [
+      "Renée Miller"
+    ]
+  ],
+  "rwkv_search_002": [
+    [
+      "Alan Fekete"
+    ],
+    [
+      "Uwe Roehm"
+    ],
+    [
+      "University of Sydney"
+    ]
+  ],
+  "rwkv_search_003": [
+    [
+      "Tim Berners-Lee"
+    ],
+    [
+      "MIT"
+    ],
+    [
+      "University of Oxford"
+    ]
+  ],
+  "rwkv_search_004": [
+    [
+      "Apache Spark"
+    ]
+  ],
+  "rwkv_search_005": [
+    [
+      "Tedros Adhanom Ghebreyesus"
+    ],
+    [
+      "5 May 2023"
+    ]
+  ],
+  "rwkv_search_006": [
+    [
+      "Baku, Azerbaijan"
+    ]
+  ],
+  "rwkv_search_007": [
+    [
+      "Maria Ressa"
+    ],
+    [
+      "Philippines"
+    ],
+    [
+      "Rappler"
+    ],
+    [
+      "Dmitry Muratov"
+    ],
+    [
+      "Russia"
+    ],
+    [
+      "Novaya Gazeta"
+    ]
+  ],
+  "rwkv_search_008": [
+    [
+      "John Hopfield"
+    ],
+    [
+      "Geoffrey Hinton"
+    ],
+    [
+      "artificial neural networks"
+    ],
+    [
+      "machine learning"
+    ]
+  ],
+  "rwkv_search_009": [
+    [
+      "Avi Wigderson"
+    ],
+    [
+      "theory of computation"
+    ],
+    [
+      "computational complexity"
+    ]
+  ],
+  "rwkv_search_010": [
+    [
+      "Maryna Viazovska"
+    ],
+    [
+      "EPFL"
+    ],
+    [
+      "Swiss Federal Institute of Technology in Lausanne"
+    ]
+  ],
+  "rwkv_search_011": [
+    [
+      "The Astrophysical Journal Letters"
+    ],
+    [
+      "Volume 875"
+    ],
+    [
+      "Issue 1"
+    ]
+  ],
+  "rwkv_search_012": [
+    [
+      "16 November 2022"
+    ],
+    [
+      "11 December 2022"
+    ],
+    [
+      "25 days"
+    ],
+    [
+      "25 days 10 hours 53 minutes"
+    ]
+  ],
+  "rwkv_search_013": [
+    [
+      "Daniel Goldscheider"
+    ]
+  ],
+  "rwkv_search_014": [
+    [
+      "Brian Behlendorf"
+    ],
+    [
+      "A Patchy Server"
+    ]
+  ],
+  "rwkv_search_015": [
+    [
+      "ACM OPEN"
+    ],
+    [
+      "open access"
+    ]
+  ],
+  "rwkv_search_016": [
+    [
+      "Yoshihiro Togashi"
+    ],
+    [
+      "Yu Yu Hakusho"
+    ]
+  ],
+  "rwkv_search_017": [
+    [
+      "Ken Liu"
+    ],
+    [
+      "The Paper Menagerie"
+    ]
+  ],
+  "rwkv_search_018": [
+    [
+      "Studio Ghibli"
+    ],
+    [
+      "Isao Takahata"
+    ],
+    [
+      "Grave of the Fireflies"
+    ]
+  ],
+  "rwkv_search_019": [
+    [
+      "Robert Galbraith"
+    ],
+    [
+      "The Cuckoo's Calling"
+    ]
+  ],
+  "rwkv_search_020": [
+    [
+      "The Twilight Zone"
+    ],
+    [
+      "George R. R. Martin"
+    ]
+  ],
+  "rwkv_search_021": [
+    [
+      "Doctor Who"
+    ],
+    [
+      "Douglas Adams"
+    ]
+  ],
+  "rwkv_search_022": [
+    [
+      "Snowpiercer"
+    ],
+    [
+      "Bong Joon-ho"
+    ]
+  ],
+  "rwkv_search_023": [
+    [
+      "Rouge"
+    ],
+    [
+      "Li Bihua"
+    ],
+    [
+      "Stanley Kwan"
+    ]
+  ],
+  "rwkv_search_024": [
+    [
+      "Slam Dunk Scholarship"
+    ],
+    [
+      "2006"
+    ]
+  ],
+  "rwkv_search_025": [
+    [
+      "1982"
+    ],
+    [
+      "novels"
+    ],
+    [
+      "short stories"
+    ],
+    [
+      "fantastic"
+    ],
+    [
+      "realistic"
+    ]
+  ],
+  "rwkv_search_026": [
+    [
+      "Ferranti Mark 1"
+    ],
+    [
+      "Conway Berners-Lee"
+    ],
+    [
+      "Mary Lee Woods"
+    ]
+  ],
+  "rwkv_search_027": [
+    [
+      "1935"
+    ],
+    [
+      "Irène Joliot-Curie"
+    ],
+    [
+      "Frédéric Joliot"
+    ],
+    [
+      "Chemistry"
+    ]
+  ],
+  "rwkv_search_028": [
+    [
+      "Sofia Coppola"
+    ],
+    [
+      "Somewhere"
+    ],
+    [
+      "Golden Lion"
+    ]
+  ],
+  "rwkv_search_029": [
+    [
+      "Brian Herbert"
+    ],
+    [
+      "Kevin J. Anderson"
+    ]
+  ],
+  "rwkv_search_030": [
+    [
+      "Fran Walsh"
+    ],
+    [
+      "The Return of the King"
+    ],
+    [
+      "three Academy Awards"
+    ]
+  ],
+  "rwkv_search_031": [
+    [
+      "Living"
+    ],
+    [
+      "Kazuo Ishiguro"
+    ]
+  ],
+  "rwkv_search_032": [
+    [
+      "Henry Irving"
+    ],
+    [
+      "Lyceum Theatre"
+    ],
+    [
+      "Bram Stoker"
+    ]
+  ],
+  "rwkv_search_033": [
+    [
+      "Mary Wollstonecraft"
+    ],
+    [
+      "A Vindication of the Rights of Woman"
+    ]
+  ],
+  "rwkv_search_034": [
+    [
+      "Save Me the Waltz"
+    ],
+    [
+      "Zelda Fitzgerald"
+    ]
+  ],
+  "rwkv_search_035": [
+    [
+      "The Inklings"
+    ],
+    [
+      "C. S. Lewis"
+    ],
+    [
+      "J. R. R. Tolkien"
+    ]
+  ],
+  "rwkv_search_036": [
+    [
+      "tiangolo"
+    ],
+    [
+      "fastapi"
+    ]
+  ],
+  "rwkv_search_037": [
+    [
+      "yyx990803"
+    ],
+    [
+      "vue"
+    ]
+  ],
+  "rwkv_search_038": [
+    [
+      "Georgi Gerganov"
+    ],
+    [
+      "10 March 2023"
+    ]
+  ],
+  "rwkv_search_039": [
+    [
+      "Salvatore Sanfilippo"
+    ],
+    [
+      "antirez"
+    ],
+    [
+      "Linux Foundation"
+    ],
+    [
+      "Valkey"
+    ]
+  ],
+  "rwkv_search_040": [
+    [
+      "DuckDB: an Embeddable Analytical Database"
+    ],
+    [
+      "2019"
+    ],
+    [
+      "SIGMOD"
+    ]
+  ],
+  "rwkv_search_041": [
+    [
+      "Fossil"
+    ],
+    [
+      "mirror"
+    ],
+    [
+      "not the primary repository"
+    ]
+  ],
+  "rwkv_search_042": [
+    [
+      "2019"
+    ],
+    [
+      "NeurIPS"
+    ],
+    [
+      "Adam Paszke"
+    ],
+    [
+      "PyTorch: An Imperative Style, High-Performance Deep Learning Library"
+    ]
+  ],
+  "rwkv_search_043": [
+    [
+      "Cloud Native Computing Foundation"
+    ],
+    [
+      "CNCF"
+    ],
+    [
+      "2018"
+    ]
+  ],
+  "rwkv_search_044": [
+    [
+      "Noam Shazeer"
+    ],
+    [
+      "Character.AI"
+    ]
+  ],
+  "rwkv_search_045": [
+    [
+      "Jacob Devlin"
+    ],
+    [
+      "Google AI Language"
+    ]
+  ],
+  "rwkv_search_046": [
+    [
+      "Highly accurate protein structure prediction with AlphaFold"
+    ],
+    [
+      "google-deepmind/alphafold"
+    ]
+  ],
+  "rwkv_search_047": [
+    [
+      "Linus Torvalds"
+    ],
+    [
+      "Linux kernel"
+    ]
+  ],
+  "rwkv_search_048": [
+    [
+      "CWI"
+    ],
+    [
+      "Centrum Wiskunde & Informatica"
+    ],
+    [
+      "1991"
+    ]
+  ],
+  "rwkv_search_049": [
+    [
+      "Ton Roosendaal"
+    ],
+    [
+      "NeoGeo"
+    ]
+  ],
+  "rwkv_search_050": [
+    [
+      "GPLv2"
+    ],
+    [
+      "Linux kernel"
+    ],
+    [
+      "1991"
+    ]
+  ],
+  "date_001": [
+    [
+      "5 May 2023"
+    ],
+    [
+      "Tedros Adhanom Ghebreyesus"
+    ]
+  ],
+  "date_002": [
+    [
+      "16 November 2022"
+    ],
+    [
+      "11 December 2022"
+    ],
+    [
+      "25 days 10 hours 53 minutes"
+    ]
+  ],
+  "date_003": [
+    [
+      "15 March 2017"
+    ],
+    [
+      "Tim Berners-Lee"
+    ],
+    [
+      "World Wide Web"
+    ]
+  ],
+  "date_004": [
+    [
+      "8 October 2024"
+    ],
+    [
+      "John Hopfield"
+    ],
+    [
+      "Geoffrey Hinton"
+    ],
+    [
+      "artificial neural networks"
+    ]
+  ],
+  "date_005": [
+    [
+      "4 July 2024"
+    ],
+    [
+      "4 July 2025"
+    ],
+    [
+      "3.1"
+    ],
+    [
+      "漫长的告别"
+    ],
+    [
+      "The Long Goodbye"
+    ]
+  ],
+  "date_006": [
+    [
+      "7 October 2024"
+    ],
+    [
+      "Python 3.13.0"
+    ]
+  ],
+  "date_007": [
+    [
+      "17 April 2024"
+    ],
+    [
+      "Kubernetes 1.30"
+    ],
+    [
+      "Uwubernetes"
+    ]
+  ],
+  "date_008": [
+    [
+      "2019"
+    ],
+    [
+      "30 June 2019"
+    ],
+    [
+      "10 July 2019"
+    ],
+    [
+      "Baku"
+    ]
+  ],
+  "date_009": [
+    [
+      "10 April 2019"
+    ],
+    [
+      "The Astrophysical Journal Letters"
+    ],
+    [
+      "Volume 875"
+    ],
+    [
+      "Issue 1"
+    ]
+  ],
+  "date_010": [
+    [
+      "2005"
+    ],
+    [
+      "7 April 2005"
+    ],
+    [
+      "Linux kernel"
+    ],
+    [
+      "Linus Torvalds"
+    ]
+  ],
+  "date_011": [
+    [
+      "0.139.2"
+    ],
+    [
+      "16 July 2026"
+    ],
+    [
+      "FastAPI"
+    ]
+  ],
+  "date_012": [
+    [
+      "GitHub"
+    ],
+    [
+      "rwkv-search"
+    ]
+  ],
+  "url_001": [
+    [
+      "Python 3.13"
+    ],
+    [
+      "free-threaded build"
+    ],
+    [
+      "experimental JIT"
+    ],
+    [
+      "PEP 703"
+    ]
+  ],
+  "url_002": [
+    [
+      "FastAPI"
+    ],
+    [
+      "OpenAPI"
+    ],
+    [
+      "JSON Schema"
+    ],
+    [
+      "Starlette"
+    ],
+    [
+      "Pydantic"
+    ]
+  ],
+  "url_003": [
+    [
+      "Kubernetes"
+    ],
+    [
+      "control plane"
+    ],
+    [
+      "nodes"
+    ],
+    [
+      "workloads"
+    ],
+    [
+      "services"
+    ]
+  ],
+  "url_004": [
+    [
+      "distributed version control"
+    ],
+    [
+      "branching"
+    ],
+    [
+      "merging"
+    ],
+    [
+      "data integrity"
+    ]
+  ],
+  "url_005": [
+    [
+      "Window.fetch"
+    ],
+    [
+      "Promise"
+    ],
+    [
+      "Response"
+    ],
+    [
+      "AbortController"
+    ]
+  ],
+  "url_006": [
+    [
+      "json"
+    ],
+    [
+      "jsonb"
+    ],
+    [
+      "GIN"
+    ],
+    [
+      "duplicate object keys"
+    ]
+  ],
+  "url_007": [
+    [
+      "HTTP semantics"
+    ],
+    [
+      "methods"
+    ],
+    [
+      "status codes"
+    ],
+    [
+      "header fields"
+    ],
+    [
+      "representations"
+    ]
+  ],
+  "url_008": [
+    [
+      "reverse proxy"
+    ],
+    [
+      "mod_proxy"
+    ],
+    [
+      "ProxyPass"
+    ],
+    [
+      "ProxyPassReverse"
+    ]
+  ],
+  "url_009": [
+    [
+      "serverless"
+    ],
+    [
+      "self-contained"
+    ],
+    [
+      "zero-configuration"
+    ],
+    [
+      "public domain"
+    ],
+    [
+      "embedded"
+    ]
+  ],
+  "url_010": [
+    [
+      "RWKV-LM"
+    ]
+  ]
+}

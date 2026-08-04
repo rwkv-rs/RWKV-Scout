@@ -14,6 +14,7 @@ from config import (
     get_llm_api_key,
     get_llm_base_url,
     get_llm_model,
+    get_llm_temperature,
     get_model_connect_timeout_seconds,
     get_model_read_timeout_seconds,
     get_slm_concurrency,
@@ -121,7 +122,7 @@ class OpenAICompatBackend:
             "messages": list(messages),
             "stream": False,
             "max_tokens": max_tokens or 768,
-            "temperature": 0.0,
+            "temperature": get_llm_temperature(),
         }
         if tools:
             payload["tools"] = tools
@@ -139,7 +140,7 @@ class OpenAICompatBackend:
             "model": self.model_name,
             "prompt": prompt,
             "max_tokens": max(1, int(max_tokens)),
-            "temperature": 0.0,
+            "temperature": get_llm_temperature(),
             "stream": False,
         }
         if stop:

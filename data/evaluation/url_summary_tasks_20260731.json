@@ -1,0 +1,56 @@
+{
+  "suite": "url-summary-real-web",
+  "description": "Given-URL web summary tasks. The model must decide whether to call web_search and may answer only from fetched page-body evidence.",
+  "cases": [
+    {
+      "case_id": "url_001",
+      "max_tool_steps": 8,
+      "query": "Open and summarize this web page. List its topic, key points, and important links explicitly provided by the page. Use only page-body evidence and do not guess. URL: https://docs.python.org/3/whatsnew/3.13.html"
+    },
+    {
+      "case_id": "url_002",
+      "max_tool_steps": 8,
+      "query": "Open and summarize this web page. Explain what product or project it introduces, its main capabilities, and the usage patterns emphasized by the page. Use only page-body evidence. URL: https://fastapi.tiangolo.com/features/"
+    },
+    {
+      "case_id": "url_003",
+      "max_tool_steps": 8,
+      "query": "Summarize this web page by describing its topic, core concepts, and key components listed on the page. If the body does not establish a fact, say that it was not found. URL: https://kubernetes.io/docs/concepts/overview/"
+    },
+    {
+      "case_id": "url_004",
+      "max_tool_steps": 8,
+      "query": "Read and summarize this web page, including the problem it addresses, its main characteristics, and related resources explicitly named by the page. Every factual statement must come from the page body. URL: https://git-scm.com/about"
+    },
+    {
+      "case_id": "url_005",
+      "max_tool_steps": 8,
+      "query": "Summarize this web page's purpose, interface behavior, parameters, and cautions. Include only claims directly supported by the page body. URL: https://developer.mozilla.org/en-US/docs/Web/API/Window/fetch"
+    },
+    {
+      "case_id": "url_006",
+      "max_tool_steps": 8,
+      "query": "Open and summarize this web page. Explain the database feature it describes, the supported data forms, and important limitations or cautions stated on the page. Do not answer unsupported parts. URL: https://www.postgresql.org/docs/current/datatype-json.html"
+    },
+    {
+      "case_id": "url_007",
+      "max_tool_steps": 8,
+      "query": "Summarize this standards document page, including its scope, core terminology, and main requirements. Distinguish statements established by the page body from facts that cannot be confirmed there. URL: https://www.rfc-editor.org/rfc/rfc9110"
+    },
+    {
+      "case_id": "url_008",
+      "max_tool_steps": 8,
+      "query": "Read and summarize this web page, focusing on the proxy function it describes, typical configuration goals, and cautions listed by the page. Use only page-body evidence. URL: https://httpd.apache.org/docs/2.4/howto/reverse_proxy.html"
+    },
+    {
+      "case_id": "url_009",
+      "max_tool_steps": 8,
+      "query": "Open and summarize this web page's description of the SQLite project, its main characteristics, and explicit facts stated by the page. Do not treat search snippets or memory as page-body evidence. URL: https://www.sqlite.org/about.html"
+    },
+    {
+      "case_id": "url_010",
+      "max_tool_steps": 8,
+      "query": "Summarize this web page's project purpose, main content, and explicit links or resources in the page body. If the page body cannot be retrieved, state that the web-page summary could not be completed. URL: https://github.com/BlinkDL/RWKV-LM"
+    }
+  ]
+}

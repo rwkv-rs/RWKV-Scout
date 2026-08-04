@@ -42,10 +42,10 @@
     },
     "local_13b": {
       "label": "RWKV 13.3B",
-      "base_url": "http://127.0.0.1:29613/v1",
+      "base_url": "http://172.31.89.209:29613/v1",
       "model": "rwkv7-g1i_preview4922-13.3b-20260720-ctx12288",
       "max_tokens": 8192,
-      "temperature": 0.0,
+      "temperature": 0.00001,
       "context_length": 12288,
       "ui_visible": true
     },
@@ -119,7 +119,7 @@
     "concurrency": 4
   },
   "SLM_CONFIG": {
-    "endpoint": "http://127.0.0.1:29613/v1/chat/completions",
+    "endpoint": "http://172.31.89.209:29613/v1/chat/completions",
     "protocol": "openai",
     "password": "rwkv-skills",
     "concurrency": 4,
@@ -133,11 +133,11 @@
     "prompt_version": "retrieval-synthesis-v1",
     "default_variant": "candidate",
     "citation_remote_validation": false,
-    "max_parallel_cases": 2
+    "max_parallel_cases": 4
   },
   "MODEL_RUNTIME": {
     "backend": "openai_compat",
-    "max_inflight_requests": 2,
+    "max_inflight_requests": 4,
     "max_retry_attempts": 2,
     "retry_delay_seconds": 1,
     "retry_timeout_errors": false,

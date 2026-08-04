@@ -197,6 +197,19 @@ def get_llm_model() -> str:
     )
 
 
+def get_llm_temperature() -> float:
+    """Return the configured sampling temperature for model requests."""
+    provider = get_llm_provider()
+    raw_value = os.environ.get(
+        "RWKV_ECRA_LLM_TEMPERATURE",
+        LLM_ENDPOINTS.get(provider, {}).get("temperature", 0.0),
+    )
+    try:
+        return max(0.0, min(float(raw_value), 2.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def get_llm_context_length() -> int:
     provider = get_llm_provider()
     try:

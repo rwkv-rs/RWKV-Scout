@@ -1,0 +1,12 @@
+{"case_id":"date_001","category":"historical_date","query":"世界卫生组织宣布 COVID-19 不再构成国际关注的突发公共卫生事件时，宣布日期是哪一天，WHO 总干事是谁？","source":"date_regression_20260729","max_tool_steps":100}
+{"case_id":"date_002","category":"historical_date","query":"阿耳忒弥斯 1 号任务实际发射于哪一天，从发射到返回地球总共持续了多少天？","source":"date_regression_20260729","max_tool_steps":100}
+{"case_id":"date_003","category":"award_date","query":"2016 年图灵奖是什么时候公布的，获奖者是谁，官方授奖理由是什么？","source":"date_regression_20260729","max_tool_steps":100}
+{"case_id":"date_004","category":"award_date","query":"2024 年诺贝尔物理学奖在哪一天公布，获奖者是谁，诺贝尔委员会所述的核心贡献是什么？","source":"date_regression_20260729","max_tool_steps":100}
+{"case_id":"date_005","category":"release_date","query":"《绝区零》首次公开发布是哪一天，首个周年庆日期是什么，当前最新版本的主题是什么？请区分历史日期和当前版本信息。","source":"date_regression_20260729","max_tool_steps":100}
+{"case_id":"date_006","category":"release_date","query":"Python 3.13.0 正式发布是哪一天？请给出 Python 官方发布页链接和发布日期。","source":"date_regression_20260729","max_tool_steps":100}
+{"case_id":"date_007","category":"release_date","query":"Kubernetes 1.30 正式发布是哪一天？请使用官方 Kubernetes 发布公告核对日期。","source":"date_regression_20260729","max_tool_steps":100}
+{"case_id":"date_008","category":"institution_date","query":"良渚古城遗址被列入世界遗产名录是哪一年哪一天，世界遗产委员会当时在哪座城市举行会议？","source":"date_regression_20260729","max_tool_steps":100}
+{"case_id":"date_009","category":"space_date","query":"事件视界望远镜首次发布 M87 星系中心黑洞图像是哪一天，相关论文发表在哪一期学术期刊？","source":"date_regression_20260729","max_tool_steps":100}
+{"case_id":"date_010","category":"open_source_date","query":"Git 版本控制系统首次公开发布是哪一年哪一天？请同时给出 Linus Torvalds 开始开发 Git 的直接背景。","source":"date_regression_20260729","max_tool_steps":100}
+{"case_id":"date_011","category":"current_date","query":"截至 2026 年 7 月 29 日，FastAPI 的最新稳定版本是什么、发布日期是哪一天？如果官方来源没有明确标注，请明确说明证据不足。","source":"date_regression_20260729","max_tool_steps":100}
+{"case_id":"date_012","category":"current_date","query":"截至 2026 年 7 月 29 日，RWKV Agent 或 rwkv-search GitHub 仓库最新公开提交的日期、提交标题和链接是什么？","source":"date_regression_20260729","max_tool_steps":100}

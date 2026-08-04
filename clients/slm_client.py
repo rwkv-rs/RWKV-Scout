@@ -5,6 +5,7 @@ import time
 import concurrent.futures
 from config import (
     get_llm_model,
+    get_llm_temperature,
     get_model_backend_name,
     get_slm_concurrency,
     get_slm_endpoint,
@@ -166,7 +167,7 @@ class SLMClient:
                 "model": get_llm_model() or "rwkv7-g1h-1.5b",
                 "messages": [{"role": "user", "content": content}],
                 "max_tokens": 2400,
-                "temperature": 0.2,
+                "temperature": get_llm_temperature(),
                 "stream": False,
             }
             with model_request_slot(current_task_id.get() or "slm-request"):
