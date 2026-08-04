@@ -35,6 +35,7 @@ def _load_page(url: str, max_chars: int, task_id: str) -> dict[str, Any]:
     retrieval_role="evidence",
     model_visible=True,
     category="retrieval",
+    description="Open one selected http/https page and return page evidence; use only after discovery and never pass a search-results page.",
     signature="""[Tool] open_page
 - Function: open one URL selected from search results and return its page body as evidence.
 - Parameters: url (complete http/https URL), max_chars (optional, 1000-20000).
@@ -62,6 +63,7 @@ def open_page(url: str, max_chars: int = 20000, **kwargs: Any) -> str:
     retrieval_role="evidence",
     model_visible=True,
     category="retrieval",
+    description="Open a selected page and locate matching text lines; use it to find fields in long evidence, not to interpret their meaning.",
     signature="""[Tool] find_in_page
 - Function: open one selected URL and return matching line excerpts plus the full page evidence record.
 - Parameters: url (complete http/https URL), pattern (short text or regular expression), max_chars (optional).

@@ -321,6 +321,7 @@ def _compact_page(
     retrieval_role="discovery",
     model_visible=True,
     category="retrieval",
+    description="Run one bounded general-web retrieval transaction for discovery and evidence; the result is evidence, not a final answer.",
     signature="""[Tool] web_search
 - Function: perform one bounded general-web retrieval transaction.
 - Parameters: query (one concise search query or one complete http/https URL).

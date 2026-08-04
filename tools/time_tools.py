@@ -15,6 +15,7 @@ from tools.registry import ToolRegistry
     phase="ALL",
     model_visible=True,
     category="computation",
+    description="Return the current clock reading for an IANA timezone; use only for current time and never as a historical fact source.",
     signature="""[Tool] current_time
 - Function: return the current clock reading for an IANA timezone.
 - Parameters: timezone (for example UTC, Asia/Shanghai, America/New_York).

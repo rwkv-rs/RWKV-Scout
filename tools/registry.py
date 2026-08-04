@@ -183,7 +183,13 @@ class ToolRegistry:
             rows.append(
                 {
                     "name": name,
-                    "description": str(meta.get("signature") or "").strip(),
+                    # ``description`` is a first-class model contract.  Keep
+                    # the signature as a compatibility fallback for legacy
+                    # registrations, but every model-visible entry must have
+                    # a non-empty description before it reaches RWKV.
+                    "description": str(
+                        meta.get("description") or meta.get("signature") or ""
+                    ).strip(),
                     "arguments": meta.get("argument_schema") or {"type": "object", "additionalProperties": False},
                     "plugin": meta.get("plugin", ""),
                     "capabilities": list(meta.get("capabilities") or ()),
@@ -207,8 +213,14 @@ class ToolRegistry:
         strict_args: bool = True,
         model_visible: bool = False,
         category: str = "internal",
+        description: str = "",
     ):
         def decorator(func: Callable):
+            model_description = str(description or signature or "").strip()
+            if model_visible and not model_description:
+                raise ValueError(
+                    f"model-visible tool '{name}' must declare a non-empty description"
+                )
             capabilities_tuple = tuple(str(item) for item in capabilities)
             allowed = []
             argument_types = {}
@@ -240,6 +252,7 @@ class ToolRegistry:
                 "name": name,
                 "func": func,
                 "signature": signature,
+                "description": model_description,
                 "phase": phase,
                 "plugin": plugin,
                 "capabilities": capabilities_tuple,
@@ -367,6 +380,7 @@ class ToolRegistry:
     phase="SYNTHESIS",
     model_visible=True,
     category="control",
+    description="End the current Agent tool loop with empty arguments; this only requests synthesis and does not write the final answer.",
     signature="""[Tool] finish_task
 - 功能: 认为用户所有的目标已经完全达成，退出系统。
 - 参数: 无"""

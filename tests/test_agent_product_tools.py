@@ -1,8 +1,10 @@
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agent.tool_protocol import canonicalize_tool_call, normalize_tool_result
+from agent.planner import Planner
+from agent.orchestrator import Orchestrator
 from tools.builtin import load_builtin_tools
 from tools.registry import ToolRegistry
 from utils.answer_fact_check import check_answer_facts
@@ -18,6 +20,79 @@ class AgentProductToolTests(unittest.TestCase):
         names = ToolRegistry.model_visible_names("ALL")
         for name in ("web_search", "open_page", "find_in_page", "connector_lookup", "calculator", "date_diff", "current_time", "finish_task"):
             self.assertIn(name, names)
+
+    def test_every_model_tool_has_description_and_argument_contract(self):
+        catalog = json.loads(
+            ToolRegistry.get_json_catalog("ALL", model_visible_only=True)
+        )
+        self.assertEqual(
+            {row["name"] for row in catalog},
+            set(ToolRegistry.model_visible_names("ALL")),
+        )
+        for row in catalog:
+            self.assertTrue(row["description"].strip(), row["name"])
+            self.assertEqual(row["arguments"].get("type"), "object")
+            properties = row["arguments"].get("properties") or {}
+            required = set(row["arguments"].get("required") or [])
+            self.assertIsInstance(properties, dict)
+            self.assertTrue(required.issubset(properties), row["name"])
+
+    def test_planner_prompt_contains_each_model_tool_description(self):
+        catalog = json.loads(
+            ToolRegistry.get_json_catalog("ALL", model_visible_only=True)
+        )
+        prompt = Planner._system_prompt("ALL")
+        for row in catalog:
+            self.assertIn(row["description"], prompt)
+
+    def test_multiple_deterministic_tools_run_in_one_model_owned_loop(self):
+        orchestrator = Orchestrator()
+        orchestrator.state.task_id = "MULTI_TOOL_LOOP_TEST"
+        orchestrator.planner.plan_next_action = Mock(
+            side_effect=[
+                {
+                    "action": "current_time",
+                    "args": {"timezone": "UTC"},
+                    "call_id": "clock-1",
+                },
+                {
+                    "action": "calculator",
+                    "args": {"expression": "(10 + 5) * 2"},
+                    "call_id": "calc-1",
+                },
+                {
+                    "action": "date_diff",
+                    "args": {
+                        "date_a": "2023-10-05",
+                        "date_b": "2025-04-16",
+                    },
+                    "call_id": "date-1",
+                },
+                {"action": "finish_task", "args": {}, "call_id": "finish-1"},
+            ]
+        )
+        orchestrator.planner.observe_tool_result = Mock()
+        orchestrator._complete_model_tool_loop = Mock(return_value="done")
+        with patch("agent.orchestrator.append_task_event"):
+            result = orchestrator._run_single_loop(
+                "Use the tools to check the time, calculate 15*2, and find the date difference.",
+                {},
+                {"atomic_points": []},
+                max_steps=4,
+            )
+
+        self.assertEqual(result, "done")
+        self.assertEqual(orchestrator.planner.plan_next_action.call_count, 4)
+        observed_tools = [
+            item[0][0]["tool"]
+            for item in orchestrator.planner.observe_tool_result.call_args_list
+            if item[0] and isinstance(item[0][0], dict) and item[0][0].get("tool")
+        ]
+        self.assertEqual(
+            observed_tools,
+            ["current_time", "calculator", "date_diff"],
+        )
+        self.assertEqual(orchestrator._calculation_results[0]["days"], 559)
 
     def test_protocol_adapter_preserves_model_call_and_id(self):
         call = canonicalize_tool_call({"tool_calls": [{"id": "call-7", "function": {"name": "calculator", "arguments": '{"expression":"2+3"}'}}]})

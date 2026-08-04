@@ -54,6 +54,7 @@ def _evaluate(node: ast.AST) -> int | float:
     phase="ALL",
     model_visible=True,
     category="computation",
+    description="Safely evaluate a complete numeric expression; use it for arithmetic after all operands are known, not for web facts.",
     signature="""[Tool] calculator
 - Function: deterministically evaluate a small arithmetic expression.
 - Parameters: expression (numbers, parentheses, + - * / // % **, abs/ceil/floor/round/sqrt).

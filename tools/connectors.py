@@ -79,6 +79,7 @@ def _structured_rows(payload: dict[str, Any], connector: str) -> dict[str, Any]:
     retrieval_role="discovery",
     model_visible=True,
     category="connector",
+    description="Query one structured domain connector: weather for current conditions, github for repositories/files, or papers for scholarly records.",
     signature="""[Tool] connector_lookup
 - Function: use one curated structured connector rather than general web search.
 - Parameters: connector (weather|github|papers), query, scope (optional), max_results (optional).

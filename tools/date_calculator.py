@@ -67,6 +67,7 @@ def _source_refs(*values: Any) -> list[str]:
     phase="ALL",
     model_visible=True,
     category="computation",
+    description="Calculate exact calendar-day distance between two already-confirmed YYYY-MM-DD dates; it does not select event dates or retrieve facts.",
     signature="""[Tool] date_diff
 - Function: calculate the exact number of calendar days between two dates.
 - Parameters: date_a (YYYY-MM-DD), date_b (YYYY-MM-DD), source_a (optional S#:C#), source_b (optional S#:C#).
