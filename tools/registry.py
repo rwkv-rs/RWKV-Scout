@@ -180,6 +180,16 @@ class ToolRegistry:
                 continue
             if model_visible_only and not meta.get("model_visible", False):
                 continue
+            explicit_description = str(meta.get("description") or "").strip()
+            signature = str(meta.get("signature") or "").strip()
+            if explicit_description and signature and explicit_description != signature:
+                # The short description is useful for routing, but RWKV also
+                # needs the legacy signature's parameter contract.  Omitting
+                # it makes the model invent backend arguments such as
+                # ``max_results`` for the provider-agnostic web_search tool.
+                model_description = f"{explicit_description}\n{signature}"
+            else:
+                model_description = explicit_description or signature
             rows.append(
                 {
                     "name": name,
@@ -187,9 +197,7 @@ class ToolRegistry:
                     # the signature as a compatibility fallback for legacy
                     # registrations, but every model-visible entry must have
                     # a non-empty description before it reaches RWKV.
-                    "description": str(
-                        meta.get("description") or meta.get("signature") or ""
-                    ).strip(),
+                    "description": model_description,
                     "arguments": meta.get("argument_schema") or {"type": "object", "additionalProperties": False},
                     "plugin": meta.get("plugin", ""),
                     "capabilities": list(meta.get("capabilities") or ()),

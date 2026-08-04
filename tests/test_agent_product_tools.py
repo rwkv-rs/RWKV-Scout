@@ -37,13 +37,24 @@ class AgentProductToolTests(unittest.TestCase):
             self.assertIsInstance(properties, dict)
             self.assertTrue(required.issubset(properties), row["name"])
 
+    def test_model_description_keeps_legacy_parameter_contract(self):
+        catalog = json.loads(
+            ToolRegistry.get_json_catalog("ALL", model_visible_only=True)
+        )
+        web_search = next(row for row in catalog if row["name"] == "web_search")
+        self.assertIn("Parameters: query", web_search["description"])
+        self.assertEqual(
+            set(web_search["arguments"]["properties"]),
+            {"query"},
+        )
+
     def test_planner_prompt_contains_each_model_tool_description(self):
         catalog = json.loads(
             ToolRegistry.get_json_catalog("ALL", model_visible_only=True)
         )
         prompt = Planner._system_prompt("ALL")
         for row in catalog:
-            self.assertIn(row["description"], prompt)
+            self.assertIn(row["description"].splitlines()[0], prompt)
 
     def test_multiple_deterministic_tools_run_in_one_model_owned_loop(self):
         orchestrator = Orchestrator()
