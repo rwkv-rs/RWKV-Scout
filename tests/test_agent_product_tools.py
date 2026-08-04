@@ -45,7 +45,7 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertIn("Parameters: query", web_search["description"])
         self.assertEqual(
             set(web_search["arguments"]["properties"]),
-            {"query"},
+            {"query", "max_results"},
         )
 
     def test_planner_prompt_contains_each_model_tool_description(self):

@@ -321,15 +321,15 @@ def _compact_page(
     retrieval_role="discovery",
     model_visible=True,
     category="retrieval",
-    description="Run one bounded general-web retrieval transaction for discovery and evidence; the result is evidence, not a final answer.",
+    description="Run one bounded general-web retrieval transaction for discovery and evidence; provide query and optionally max_results; the result is evidence, not a final answer.",
     signature="""[Tool] web_search
 - Function: perform one bounded general-web retrieval transaction.
-- Parameters: query (one concise search query or one complete http/https URL).
+- Parameters: query (one concise search query or one complete http/https URL), max_results (optional, capped at 8).
 - Pipeline: discovery, candidate admission/ranking, bounded page fetch, Markdown extraction, adaptive evidence extraction (cleaned pages up to the configured threshold stay single-pass; longer pages are chunked).
 - Provider selection, URL fetching, page cleaning and chunk aggregation are internal backend steps; do not invent a provider-specific tool name.
 - The result is evidence only. It is not a final answer and does not decide whether the user's task is complete.""",
 )
-def web_search(query: str, **kwargs: Any) -> str:
+def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     query = " ".join(str(query or "").split()).strip()
     task_id = str(kwargs.get("task_id") or "")
     task_plan = kwargs.get("task_plan") if isinstance(kwargs.get("task_plan"), dict) else {}
@@ -338,7 +338,10 @@ def web_search(query: str, **kwargs: Any) -> str:
     if not query:
         return json.dumps({"status": "error", "message": "query is empty", "results": []}, ensure_ascii=False)
 
-    max_candidates = 8
+    try:
+        max_candidates = max(1, min(int(max_results or 8), 8))
+    except (TypeError, ValueError):
+        max_candidates = 8
     max_pages = 4
     append_task_event(
         task_id,
