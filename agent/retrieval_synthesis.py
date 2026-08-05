@@ -1306,15 +1306,27 @@ def _calculation_context_text(results: Any) -> str:
         item for item in (results or [])
         if isinstance(item, dict)
         and str(item.get("status") or "") == "ok"
-        and str(item.get("tool") or "") == "date_diff"
+        and str(item.get("tool") or "") in {"date_diff", "current_time"}
     ]
     if not rows:
         return ""
     lines = [
         "BEGIN DETERMINISTIC TOOL RESULTS",
-        "The following values came from an explicit computation tool. They are not web evidence; use the exact numeric result and cite the web source for the operand dates when available.",
+        "The following values came from explicit deterministic tools. They are not web evidence. Use exact clock or numeric results; cite web evidence only for separate factual claims.",
     ]
     for index, item in enumerate(rows, start=1):
+        if str(item.get("tool") or "") == "current_time":
+            lines.extend(
+                [
+                    f"CLOCK T{index} (current_time)",
+                    f"timezone: {item.get('timezone', '')}",
+                    f"iso: {item.get('iso', '')}",
+                    f"date: {item.get('date', '')}",
+                    f"utc_offset: {item.get('utc_offset', '')}",
+                    f"observed_at_utc: {item.get('observed_at_utc', '')}",
+                ]
+            )
+            continue
         refs = ", ".join(str(ref) for ref in item.get("source_refs") or [] if str(ref).strip())
         lines.extend(
             [
@@ -1912,8 +1924,8 @@ def synthesize_retrieval_answer(
             )
     elif calculation_results:
         evidence_state = (
-            "CALCULATION_RESULT_AVAILABLE. Use the deterministic tool result for the arithmetic and do not add "
-            "unsupported web facts."
+            "DETERMINISTIC_TOOL_RESULT_AVAILABLE. Use the exact deterministic tool result for the requested time or arithmetic "
+            "and do not add unsupported web facts."
         )
     else:
         evidence_state = (
@@ -1938,7 +1950,7 @@ def synthesize_retrieval_answer(
             "do not turn a locator gap into a refusal. "
             if usable_evidence_count
             else (
-                "Computation-only mode: use the deterministic tool result shown below for the requested arithmetic; "
+                "Deterministic-tool mode: use the exact tool result shown below for the requested time or arithmetic; "
                 "do not invent operands or claim that the calculator is a web source. "
                 if calculation_results
                 else "No-source-body mode: the requested claim is not confirmed by a retrieved source body; say that briefly and stop. "

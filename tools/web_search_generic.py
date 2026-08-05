@@ -70,6 +70,38 @@ def _extract_single_goal_url(goal: str) -> str:
     return normalized[0] if len(normalized) == 1 else ""
 
 
+_UNSUPPORTED_DOWNLOAD_SUFFIXES = {
+    ".7z",
+    ".doc",
+    ".docx",
+    ".gz",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".ppt",
+    ".pptx",
+    ".rar",
+    ".tar",
+    ".xls",
+    ".xlsx",
+    ".zip",
+    ".pdf",
+}
+
+
+def _is_unsupported_download_url(value: str) -> bool:
+    """Return whether the URL is a binary download for this HTML pipeline.
+
+    A landing page may link to a report PDF, but the generic search tool only
+    admits pages that its HTML/Markdown fetcher can turn into evidence.  Keep
+    this check at candidate admission so binary downloads do not consume the
+    page-fetch budget or masquerade as short/empty evidence.
+    """
+
+    path = urlparse(str(value or "")).path.casefold().rstrip("/")
+    return any(path.endswith(suffix) for suffix in _UNSUPPORTED_DOWNLOAD_SUFFIXES)
+
+
 def _direct_candidate(url: str) -> dict[str, Any]:
     return {
         "url": url,
@@ -99,6 +131,8 @@ def _merge_candidates(
                 continue
             url = normalize_url(str(item.get("url") or ""))
             if not url or _is_search_result_url(url):
+                continue
+            if _is_unsupported_download_url(url):
                 continue
             title = " ".join(str(item.get("title") or "").split())
             snippet = " ".join(str(item.get("snippet") or "").split())
@@ -389,7 +423,11 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         provider_statuses = [
             {"provider": "direct_url", "status": "ok", "count": 1, "errors": []}
         ]
-        candidates = [annotate_source(_direct_candidate(direct_url), query, {"task_plan": task_plan})]
+        candidates = (
+            []
+            if _is_unsupported_download_url(direct_url)
+            else [annotate_source(_direct_candidate(direct_url), query, {"task_plan": task_plan})]
+        )
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(run_keyless), pool.submit(run_tavily)]

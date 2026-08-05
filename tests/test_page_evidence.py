@@ -166,6 +166,7 @@ class PageEvidenceTests(unittest.TestCase):
             limit=2,
         )
         self.assertEqual(candidates[0]["url"], "https://vldb.org/trustees.html")
+        self.assertEqual(len(candidates), 1)
 
 
 if __name__ == "__main__":

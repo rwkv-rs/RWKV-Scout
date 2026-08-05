@@ -59,6 +59,12 @@ class Orchestrator:
         self._task_plan: dict = {}
         self._retrieval_ledger = RetrievalLedger()
         self._calculation_results: list[dict] = []
+        self._time_results: list[dict] = []
+
+    def _deterministic_results(self) -> list[dict]:
+        """Return deterministic observations in execution order by type."""
+
+        return [*self._calculation_results, *self._time_results]
 
     def _retrieval_context(self) -> dict:
         return {
@@ -721,7 +727,7 @@ class Orchestrator:
             "results": [],
             "citation_refs": [],
             "sources": [],
-            "calculation_results": list(self._calculation_results),
+            "calculation_results": self._deterministic_results(),
         }
         synthesis = synthesize_retrieval_answer(
             user_query,
@@ -735,7 +741,7 @@ class Orchestrator:
         answer_fact_check = check_answer_facts(
             answer,
             evidence=[],
-            calculation_results=self._calculation_results,
+            calculation_results=self._deterministic_results(),
             freshness_policy=self.state.run_metadata.get("freshness_policy") or {},
         )
         append_task_event(
@@ -843,9 +849,9 @@ class Orchestrator:
                 rounds,
                 ranking_strategy=self._ranking_strategy(),
             )
-            if self._calculation_results:
+            if self._calculation_results or self._time_results:
                 merged = dict(merged)
-                merged["calculation_results"] = list(self._calculation_results)
+                merged["calculation_results"] = self._deterministic_results()
             self._record_final_ranking(action, merged, step, stage="model_tool_loop_merge")
             synthesis = synthesize_retrieval_answer(
                 user_query,
@@ -865,7 +871,7 @@ class Orchestrator:
             answer_fact_check = check_answer_facts(
                 answer,
                 evidence=substantive_evidence_items(merged.get("results") or []),
-                calculation_results=merged.get("calculation_results") or self._calculation_results,
+                calculation_results=merged.get("calculation_results") or self._deterministic_results(),
                 freshness_policy=self.state.run_metadata.get("freshness_policy") or merged.get("freshness_policy") or {},
             )
             risk_validation = validate_risk_answer(answer, self.state.run_metadata)
@@ -1244,7 +1250,12 @@ class Orchestrator:
                     isinstance(point, dict) and bool(point.get("evidence_needed"))
                     for point in (self._task_plan.get("atomic_points") or [])
                 )
-                if not rounds and plan_requires_evidence and not retrieval_attempted:
+                if (
+                    not rounds
+                    and plan_requires_evidence
+                    and not retrieval_attempted
+                    and not (self._calculation_results or self._time_results)
+                ):
                     answer_rejection = {
                         "schema_version": "retrieval.v1",
                         "status": "error",
@@ -1274,11 +1285,13 @@ class Orchestrator:
                         termination_reason=("max_steps_reached" if step >= max_steps else "model_requested_finish"),
                     )
                     return answer
-                if self._calculation_results:
-                    # A deterministic computation is an agent observation,
-                    # not a direct-answer shortcut.  Route it through final
-                    # synthesis so RWKV receives the exact tool result and
-                    # the event trace preserves the model/tool boundary.
+                if self._calculation_results or self._time_results:
+                    # Deterministic tool observations (arithmetic or clock)
+                    # are agent observations, not direct-answer shortcuts.
+                    # Route them through final synthesis so RWKV receives the
+                    # exact tool result while preserving the model/tool
+                    # boundary and without pretending the result is web
+                    # evidence.
                     return self._complete_model_tool_loop(
                         user_query,
                         last_action,
@@ -1643,6 +1656,28 @@ class Orchestrator:
                     decision_source="model",
                 )
 
+            if action == "current_time" and str(structured_result.get("status") or "") == "ok":
+                clock = {
+                    "status": "ok",
+                    "tool": "current_time",
+                    "timezone": structured_result.get("timezone", ""),
+                    "iso": structured_result.get("iso", ""),
+                    "date": structured_result.get("date", ""),
+                    "utc_offset": structured_result.get("utc_offset", ""),
+                    "observed_at_utc": structured_result.get("observed_at_utc", ""),
+                    "deterministic": True,
+                }
+                self._time_results.append(clock)
+                append_task_event(
+                    self.state.task_id,
+                    "deterministic_tool_result",
+                    step=step,
+                    phase="CALCULATION",
+                    action=action,
+                    data=clock,
+                    decision_source="model",
+                )
+
             # A search result is metadata only.  A fetched page is processed
             # as one document and one chunk at a time before the planner sees
             # any observation.  Never feed the raw page body back into the
@@ -1957,6 +1992,7 @@ class Orchestrator:
         self.state.run_metadata = dict(run_metadata or {})
         self._retrieval_ledger = RetrievalLedger()
         self._calculation_results = []
+        self._time_results = []
         self.state.task_output_dir = os.path.join(DATA_PIPELINE.get("output_directory", "./data/output"), self.state.task_id)
         os.makedirs(self.state.task_output_dir, exist_ok=True)
         

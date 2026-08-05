@@ -105,6 +105,41 @@ class AgentProductToolTests(unittest.TestCase):
         )
         self.assertEqual(orchestrator._calculation_results[0]["days"], 559)
 
+    def test_current_time_is_sufficient_for_time_only_task(self):
+        orchestrator = Orchestrator()
+        orchestrator.state.task_id = "CURRENT_TIME_ONLY_TEST"
+        orchestrator.planner.plan_next_action = Mock(
+            side_effect=[
+                {
+                    "action": "current_time",
+                    "args": {"timezone": "Asia/Shanghai"},
+                    "call_id": "clock-only-1",
+                },
+                {"action": "finish_task", "args": {}, "call_id": "clock-only-finish"},
+            ]
+        )
+        orchestrator.planner.observe_tool_result = Mock()
+        orchestrator._complete_model_tool_loop = Mock(return_value="current date")
+        with patch("agent.orchestrator.append_task_event"):
+            result = orchestrator._run_single_loop(
+                "现在的日期是什么？",
+                {},
+                {
+                    "atomic_points": [
+                        {
+                            "id": "P1",
+                            "objective": "return the current date",
+                            "evidence_needed": ["current clock observation"],
+                        }
+                    ]
+                },
+                max_steps=2,
+            )
+
+        self.assertEqual(result, "current date")
+        self.assertEqual(orchestrator._complete_model_tool_loop.call_count, 1)
+        self.assertEqual(orchestrator._time_results[0]["tool"], "current_time")
+
     def test_protocol_adapter_preserves_model_call_and_id(self):
         call = canonicalize_tool_call({"tool_calls": [{"id": "call-7", "function": {"name": "calculator", "arguments": '{"expression":"2+3"}'}}]})
         self.assertEqual(call["name"], "calculator")
