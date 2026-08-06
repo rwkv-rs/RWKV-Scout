@@ -75,6 +75,7 @@ class ExperimentStrategyTests(unittest.TestCase):
                 "citation_refs": [],
             },
             llm=model,
+            constraints={"enable_answer_repair": True},
         )
         self.assertIn("正文直接支持的答案", result["content"])
         self.assertGreaterEqual(model.calls, 2)

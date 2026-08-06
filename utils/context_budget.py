@@ -21,7 +21,10 @@ def routing_observation_tokens(configured: int) -> int:
 def evidence_tokens(configured: int) -> int:
     """Return the evidence budget after prompt and completion headroom."""
     limit = context_limit(configured)
-    return max(2048, min(7500, limit - 3500))
+    # RWKV can handle a larger bounded evidence packet than the old fixed
+    # 7.5K ceiling. Keep one shared packer, but scale the packet with the
+    # actual model window instead of silently throwing away relevant chunks.
+    return max(2048, min(10000, limit - 3000))
 
 
 def planner_prompt_tokens(configured: int) -> int:

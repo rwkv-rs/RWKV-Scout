@@ -39,11 +39,11 @@
     },
     "local_13b": {
       "label": "RWKV 13.3B",
-      "base_url": "http://172.31.89.209:29613/v1",
-      "model": "rwkv7-g1i_preview4922-13.3b-20260720-ctx12288",
+      "base_url": "http://127.0.0.1:29613/v1",
+      "model": "rwkv7-g1i-13.3b-20260805-ctx16384",
       "max_tokens": 8192,
       "temperature": 0.00001,
-      "context_length": 12288,
+      "context_length": 16384,
       "ui_visible": true
     },
     "local_direct_1p5b": {
@@ -82,15 +82,21 @@
     "allowed_extensions": [".txt", ".md"],
     "max_chunk_tokens": 2400,
     "web_chunk_mode": "adaptive",
-    "web_chunk_single_pass_tokens": 4096,
-    "web_chunk_tokens": 4096,
+    "web_search_max_pages": 8,
+    "web_chunk_single_pass_tokens": 2400,
+    "web_chunk_tokens": 1600,
     "web_chunk_min_tokens": 1024,
-    "web_chunk_max_tokens": 4096,
+    "web_chunk_max_tokens": 2400,
     "web_chunk_prompt_reserve_tokens": 1024,
     "web_chunk_output_reserve_tokens": 4096,
     "web_chunk_safety_margin_tokens": 512,
     "web_chunk_overlap_ratio": 0.1,
-    "web_context_max_chunks_per_source": 3,
+    "web_context_max_chunks_per_source": 4,
+    "web_provider_concurrency": 4,
+    "web_page_fetch_concurrency": 16,
+    "web_page_evidence_concurrency": 8,
+    "web_chunk_concurrency": 8,
+    "web_chunk_timeout_seconds": 120,
     "web_candidate_max_tokens": 8192,
     "web_candidate_max_facts": 64,
     "overlap_ratio": 0.05,
@@ -113,15 +119,15 @@
     "memory_truncate_length": 60000
   },
   "LLM_CONFIG": {
-    "concurrency": 4
+    "concurrency": 32
   },
   "SLM_CONFIG": {
     "endpoint": "http://172.31.89.209:29613/v1/chat/completions",
     "protocol": "openai",
     "password": "rwkv-skills",
-    "concurrency": 4,
+    "concurrency": 32,
     "enable_async_parallel": false,
-    "async_parallelism": 2,
+    "async_parallelism": 8,
     "async_batch_wait_ms": 20
   },
   "EXPERIMENT": {
@@ -134,7 +140,9 @@
   },
   "MODEL_RUNTIME": {
     "backend": "openai_compat",
-    "max_inflight_requests": 4,
+    "max_inflight_requests": 8,
+    "reserved_control_slots": 2,
+    "max_chunk_requests_per_task": 2,
     "max_retry_attempts": 2,
     "retry_delay_seconds": 1,
     "retry_timeout_errors": false,

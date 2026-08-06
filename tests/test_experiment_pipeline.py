@@ -135,7 +135,7 @@ class ExperimentPipelineTests(unittest.TestCase):
             query="requested fact",
         )
         self.assertEqual([item["ref_id"] for item in context["selected_evidence"]], ["S1", "S2", "S3"])
-        self.assertLessEqual(context["context_tokens"], 7500)
+        self.assertLessEqual(context["context_tokens"], 10000)
         self.assertIn("BEGIN EVIDENCE SOURCE S3", context["text"])
         self.assertEqual(context["usable_evidence_count"], 3)
         self.assertEqual(
@@ -251,9 +251,9 @@ class ExperimentPipelineTests(unittest.TestCase):
 
     def test_experiment_model_contract_is_the_active_rwkv_13b_profile(self):
         profile = get_experiment_model_config()
-        self.assertEqual(profile["model"], "rwkv7-g1i_preview4922-13.3b-20260720-ctx12288")
+        self.assertEqual(profile["model"], "rwkv7-g1i-13.3b-20260805-ctx16384")
         self.assertEqual(profile["endpoint"], LLM_ENDPOINTS["local_13b"]["base_url"])
-        self.assertEqual(profile["context_length"], 12288)
+        self.assertEqual(profile["context_length"], 16384)
         self.assertEqual(validate_experiment_model_contract()["api_key"], "rwkv-skills")
 
     def test_historical_rwkv_7b_contract_remains_explicitly_validatable(self):
@@ -682,9 +682,10 @@ class ExperimentPipelineTests(unittest.TestCase):
             }
             decisions = iter(
                 [
-                    {"action": "search_mediawiki", "args": {"query": "stations", "max_results": 2}},
-                    {"action": "fetch_mediawiki_page", "args": {"url": "https://example.com/one"}},
-                    {"action": "fetch_mediawiki_page", "args": {"url": "https://example.com/one"}},
+                    {"action": "web_search", "args": {"query": "stations", "max_results": 2}},
+                    {"action": "web_search", "args": {"query": "stations", "max_results": 2}},
+                    {"action": "web_search", "args": {"query": "stations", "max_results": 2}},
+                    {"action": "finish_task", "args": {}},
                 ]
             )
             executed = []
@@ -692,7 +693,7 @@ class ExperimentPipelineTests(unittest.TestCase):
 
             def fake_execute(action, args, context, phase=None):
                 executed.append((action, args, phase))
-                if action == "search_mediawiki":
+                if action == "web_search":
                     return json.dumps(
                         {
                             "status": "ok",
@@ -728,7 +729,7 @@ class ExperimentPipelineTests(unittest.TestCase):
 
             with (
                 patch("agent.orchestrator.append_task_event"),
-                patch("agent.orchestrator.ToolRegistry.execute", side_effect=fake_execute),
+                patch("tools.registry.ToolRegistry.execute", side_effect=fake_execute),
                 patch("agent.orchestrator.synthesize_retrieval_answer", side_effect=fake_synthesis),
             ):
                 orchestrator.planner.create_task_plan = lambda *_args: plan
@@ -738,7 +739,7 @@ class ExperimentPipelineTests(unittest.TestCase):
                 result = orchestrator._run_model_tool_loop("find stations", {})
 
             self.assertIn("bounded summary", result)
-            self.assertEqual([item[0] for item in executed], ["search_mediawiki", "fetch_mediawiki_page"])
+            self.assertEqual([item[0] for item in executed], ["web_search"] * 4)
             self.assertEqual(len(synthesis_calls), 1)
             # A blocked/repeated request is recoverable evidence feedback, not
             # a terminal reason.  The loop now reaches its configured global

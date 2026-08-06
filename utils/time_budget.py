@@ -98,3 +98,50 @@ def task_time_budget(task_id: str, timeout_seconds: float | None = None) -> Iter
     finally:
         _deadline.reset(deadline_token)
         _task_id.reset(task_token)
+
+
+@contextmanager
+def child_time_budget(
+    timeout_seconds: float | None,
+    *,
+    task_id: str | None = None,
+) -> Iterator[None]:
+    """Bound one internal stage without replacing its parent task deadline.
+
+    Worker pools copy the model/task context, but callers that only use the
+    acceptance runner's signal timeout do not install ``task_time_budget``.
+    In that mode a child deadline still exists, so its failures must carry the
+    real task id instead of the misleading ``unknown`` label.
+    """
+
+    try:
+        requested = float(timeout_seconds) if timeout_seconds is not None else 0.0
+    except (TypeError, ValueError):
+        requested = 0.0
+    if requested <= 0:
+        yield
+        return
+    parent_remaining = remaining_seconds()
+    effective = requested if parent_remaining is None else min(requested, parent_remaining)
+    task_token = None
+    if not _task_id.get():
+        if task_id is None:
+            # Import lazily to avoid making the low-level budget helper depend
+            # on the tracker during module initialization.
+            try:
+                from utils.token_tracker import current_task_id
+
+                candidate = current_task_id.get()
+                if candidate and candidate != "UNKNOWN_TASK":
+                    task_id = str(candidate)
+            except Exception:
+                task_id = None
+        if task_id:
+            task_token = _task_id.set(str(task_id))
+    deadline_token = _deadline.set(time.monotonic() + max(0.05, effective))
+    try:
+        yield
+    finally:
+        _deadline.reset(deadline_token)
+        if task_token is not None:
+            _task_id.reset(task_token)

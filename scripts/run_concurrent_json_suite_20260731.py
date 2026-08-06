@@ -128,9 +128,12 @@ def run_dataset(
     out_dir: Path,
     workers: int,
     *,
+    limit: int = 0,
     case_timeout_seconds: float | None,
 ) -> dict[str, Any]:
     cases = load_cases(input_path)
+    if limit > 0:
+        cases = cases[:limit]
     effective_workers = min(max(1, int(workers)), len(cases))
     dataset_dir = out_dir / label
     dataset_dir.mkdir(parents=True, exist_ok=True)
@@ -191,12 +194,20 @@ def main() -> int:
         default=DEFAULT_CASE_TIMEOUT_SECONDS,
         help="Hard wall-clock limit for each case; default 600 seconds.",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Optional maximum number of cases from the selected input; 0 runs all cases.",
+    )
     args = parser.parse_args()
     if args.case_timeout_seconds <= 0:
         raise SystemExit("--case-timeout-seconds must be positive")
     workers = get_experiment_max_parallel_cases() if args.workers is None else args.workers
     if workers < 1:
         raise SystemExit("--workers must be positive")
+    if args.limit < 0:
+        raise SystemExit("--limit must be non-negative")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     datasets = (
         [(args.label, args.input)]
@@ -218,6 +229,7 @@ def main() -> int:
             input_path,
             args.output_dir,
             workers,
+            limit=args.limit,
             case_timeout_seconds=args.case_timeout_seconds,
         )
         with queue_log.open("a", encoding="utf-8") as log:

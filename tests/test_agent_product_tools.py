@@ -18,7 +18,7 @@ class AgentProductToolTests(unittest.TestCase):
 
     def test_public_agent_surface_contains_product_tools(self):
         names = ToolRegistry.model_visible_names("ALL")
-        for name in ("web_search", "open_page", "find_in_page", "connector_lookup", "calculator", "date_diff", "current_time", "finish_task"):
+        for name in ("web_search", "connector_lookup", "calculator", "date_diff", "current_time", "finish_task"):
             self.assertIn(name, names)
 
     def test_every_model_tool_has_description_and_argument_contract(self):
@@ -103,6 +103,7 @@ class AgentProductToolTests(unittest.TestCase):
             observed_tools,
             ["current_time", "calculator", "date_diff"],
         )
+        self.assertEqual(orchestrator._arithmetic_results[0]["result"], 30)
         self.assertEqual(orchestrator._calculation_results[0]["days"], 559)
 
     def test_current_time_is_sufficient_for_time_only_task(self):
@@ -211,33 +212,6 @@ class AgentProductToolTests(unittest.TestCase):
         )
         self.assertEqual(cutoff["status"], "needs_review")
         self.assertEqual(len(cutoff["freshness_violations"]), 1)
-
-    @patch("tools.page_tools.fetch_web_url")
-    def test_find_in_page_returns_matches_and_page_body(self, fetch):
-        fetch.return_value = json.dumps(
-            {
-                "status": "ok",
-                "results": [
-                    {
-                        "title": "Example",
-                        "url": "https://example.com/doc",
-                        "content": "alpha\nRelease date: 2024-10-07\nomega",
-                        "page_excerpt": "alpha\nRelease date: 2024-10-07\nomega",
-                        "source_excerpt": "alpha\nRelease date: 2024-10-07\nomega",
-                        "evidence_origin": "fetched_page_body",
-                        "evidence_boundary": "page_body_only",
-                    }
-                ],
-            },
-            ensure_ascii=False,
-        )
-        from tools.page_tools import find_in_page
-
-        result = json.loads(find_in_page("https://example.com/doc", "Release date"))
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["matches"][0]["line"], 2)
-        self.assertIn("2024-10-07", result["results"][0]["content"])
-
 
 if __name__ == "__main__":
     unittest.main()

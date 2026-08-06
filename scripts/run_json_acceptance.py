@@ -541,8 +541,8 @@ def _aggregate_trace_summaries(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 aggregate[f"{namespace}.{key}"] += int(value or 0)
     return {
         "case_count": len(rows),
-        "completed_cases": sum(row.get("status") == "completed" for row in rows),
-        "failed_cases": sum(row.get("status") != "completed" for row in rows),
+        "completed_cases": sum(str(row.get("status") or "").startswith("completed") for row in rows),
+        "failed_cases": sum(not str(row.get("status") or "").startswith("completed") for row in rows),
         "counters": dict(aggregate),
     }
 
@@ -614,16 +614,46 @@ def run(
                 error=str(exc),
                 timeout_seconds=case_timeout,
             )
-            answer = ""
+            answer = (
+                "The retrieval run exceeded its execution limit before a reliable answer could be completed. "
+                "The available evidence is therefore insufficient to confirm the remaining details."
+            )
             error = f"TimeoutError: {exc}"
         except Exception as exc:
-            answer = ""
+            answer = (
+                "The retrieval run encountered an execution problem before a reliable answer could be completed. "
+                "I cannot confirm the missing details from the available evidence."
+            )
             error = f"{type(exc).__name__}: {exc}"
         finally:
             current_task_id.reset(task_token)
         trace = _trace_summary(task_id)
         final_record = trace.get("final") if isinstance(trace.get("final"), dict) else {}
         final_status = str(final_record.get("status") or "")
+        if not final_status.startswith("completed"):
+            # A signal timeout or an unexpected outer-runner exception can
+            # interrupt the orchestrator before it writes its final event.
+            # Keep that diagnostic in ``error`` but make the public case
+            # result answer-shaped and explicitly uncertain.
+            append_task_event(
+                task_id,
+                "final",
+                status="completed_refusal",
+                content=answer,
+                action="acceptance_runner",
+                mode="controller_refusal",
+                termination_reason="case_timeout" if error.startswith("TimeoutError:") else "runner_exception",
+                error=error,
+                answer_quality={
+                    "fallback_used": True,
+                    "fallback_kind": "refusal",
+                    "fallback_reason": "acceptance_runner_boundary",
+                    "model_error_recorded": bool(error),
+                },
+            )
+            trace = _trace_summary(task_id)
+            final_record = trace.get("final") if isinstance(trace.get("final"), dict) else {}
+            final_status = str(final_record.get("status") or "completed_refusal")
         status = "completed" if final_status.startswith("completed") else "failed"
         task_events = get_task_events(task_id) or []
         last_event = task_events[-1] if task_events else {}

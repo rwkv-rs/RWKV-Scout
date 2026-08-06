@@ -81,8 +81,6 @@ class ToolRegistry:
             name = str(meta.get("name") or "")
             return name in {
                 "web_search",
-                "open_page",
-                "find_in_page",
                 "connector_lookup",
                 "calculator",
                 "current_time",
@@ -90,6 +88,18 @@ class ToolRegistry:
                 "answer_user",
                 "finish_task",
             } and meta.get("phase") != "LEGACY"
+        # Termination is a model-visible control action throughout the
+        # retrieval episode.  Keeping it SYNTHESIS-only makes a successful
+        # discovery/extraction turn unable to end cleanly, so the loop keeps
+        # searching until a step or timeout guard fires.
+        if str(meta.get("name") or "") == "finish_task":
+            return str(phase).upper() in {
+                "DISCOVERY",
+                "EXTRACTION",
+                "RECOVERY",
+                "SYNTHESIS",
+                "ALL",
+            }
         if str(phase).upper() == "ALL":
             # Internal callers may execute any non-legacy registered tool in
             # this phase. Planner-facing visibility is handled separately by
@@ -128,20 +138,22 @@ class ToolRegistry:
         model-facing choices. This prevents the model from treating Tavily,
         Bing, or a page fetcher as separate research strategies.
         """
+        # The public model surface is phase-independent. Internal execution
+        # phases are no longer routing choices; the unified research loop
+        # exposes one stable catalog on every decision.
+        catalog_phase = "ALL" if phase is not None else None
         names = [
             name
             for name, meta in cls._tools.items()
-            if meta.get("model_visible", False) and cls._phase_allows(meta, phase)
+            if meta.get("model_visible", False) and cls._phase_allows(meta, catalog_phase)
         ]
         public_order = {
             "finish_task": 0,
             "web_search": 1,
-            "open_page": 2,
-            "find_in_page": 3,
-            "connector_lookup": 4,
-            "calculator": 5,
-            "date_diff": 6,
-            "current_time": 7,
+            "connector_lookup": 2,
+            "calculator": 3,
+            "date_diff": 4,
+            "current_time": 5,
         }
         return sorted(names, key=lambda name: (public_order.get(name, 99), name))
 
@@ -167,16 +179,15 @@ class ToolRegistry:
             public_order = {
                 "finish_task": 0,
                 "web_search": 1,
-                "open_page": 2,
-                "find_in_page": 3,
-                "connector_lookup": 4,
-                "calculator": 5,
-                "date_diff": 6,
-                "current_time": 7,
+                "connector_lookup": 2,
+                "calculator": 3,
+                "date_diff": 4,
+                "current_time": 5,
             }
             items.sort(key=lambda item: (public_order.get(item[0], 99), item[0]))
         for name, meta in items:
-            if not cls._phase_allows(meta, phase):
+            catalog_phase = "ALL" if model_visible_only and phase is not None else phase
+            if not cls._phase_allows(meta, catalog_phase):
                 continue
             if model_visible_only and not meta.get("model_visible", False):
                 continue

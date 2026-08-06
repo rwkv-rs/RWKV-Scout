@@ -24,6 +24,7 @@ from tools.web_search_keyless import _is_search_result_url, search_web_keyless
 from tools.web_search_tavily import search_web_tavily
 from utils.task_events import append_task_event
 from utils.evidence_quality import MIN_PAGE_BODY_CHARS, has_substantive_evidence
+from utils.concurrency import shutdown_pool, submit_with_context, task_wait_timeout
 from utils.source_authority import annotate_source, resolve_source_policy
 from utils.web_retrieval import candidate_score, normalize_url
 from utils.freshness import annotate_freshness, build_freshness_policy
@@ -39,6 +40,25 @@ def _parse_result(value: Any) -> dict[str, Any]:
             return {"status": "error", "message": value[:500], "results": []}
         return parsed if isinstance(parsed, dict) else {"status": "error", "results": []}
     return {"status": "error", "results": []}
+
+
+def _pipeline_concurrency(name: str, default: int, *, maximum: int = 64) -> int:
+    try:
+        return max(1, min(int(DATA_PIPELINE.get(name, default) or default), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+def _shared_source_urls(agent_state: Any) -> set[str]:
+    retrieval = getattr(agent_state, "retrieval", None)
+    sources = getattr(retrieval, "sources", {}) if retrieval is not None else {}
+    if not isinstance(sources, dict):
+        return set()
+    return {
+        normalize_url(str(item.get("url") or ""))
+        for item in sources.values()
+        if isinstance(item, dict) and str(item.get("url") or "").strip()
+    }
 
 
 def _host(url: str) -> str:
@@ -270,6 +290,7 @@ def _compact_page(
     except Exception as exc:
         evidence = {
             "status": "error",
+            "error_class": "chunk_extraction_failed",
             "url": url,
             "title": page.get("title") or url,
             "page_chars": len(page_text),
@@ -285,6 +306,8 @@ def _compact_page(
         "url": url,
         "title": str(page.get("title") or candidate.get("title") or url),
         "status": str(evidence.get("status") or "no_evidence"),
+        "error_class": str(evidence.get("error_class") or ""),
+        "source_body_available": bool(source_excerpt),
         "page_chars": int(evidence.get("page_chars") or 0),
         "chunk_count": int(evidence.get("chunk_count") or 0),
         "chunk_window_tokens": int(evidence.get("chunk_window_tokens") or 0),
@@ -295,21 +318,16 @@ def _compact_page(
     if not source_excerpt:
         return None, page_evidence
 
-    if compact_facts:
-        page_evidence["evidence_origin"] = "fetched_page_body_with_model_locator"
-        page_evidence["model_extraction_status"] = "ok"
-    else:
-        # A failed/empty parallel-candidate call is an extraction miss, not a
-        # failed page fetch.  The cleaned page body and its source_chunks are
-        # still first-party retrieval evidence and must remain available for
-        # ranking, cross-checking, and final synthesis.  Dropping the whole
-        # page here made a transient model timeout look identical to an empty
-        # webpage and caused valid search results to disappear.
-        page_evidence["evidence_origin"] = "fetched_page_body"
-        page_evidence["model_extraction_status"] = "no_evidence"
-        page_evidence.setdefault("errors", []).append(
-            "parallel-candidate returned no locator facts; retained cleaned page body"
-        )
+    extraction_status = str(page_evidence.get("status") or "no_evidence").casefold()
+    # A fetched and cleaned source is canonical evidence even when the
+    # optional RWKV locator is empty, malformed or timed out.  The locator is
+    # metadata used to improve ranking; it is not an evidence admission gate.
+    # This is essential for high-concurrency RWKV runs: one slow chunk must
+    # not discard an otherwise valid page.
+    page_evidence["evidence_origin"] = "fetched_page_body"
+    page_evidence["model_extraction_status"] = (
+        "ok" if compact_facts else ("empty" if extraction_status == "no_evidence" else "error")
+    )
 
     record = {
         "title": page_evidence["title"],
@@ -340,10 +358,13 @@ def _compact_page(
         "discovery_providers": candidate.get("discovery_providers") or [],
         "authority": candidate.get("authority") or {},
     }
+    if compact_facts:
+        record["model_locator_facts"] = compact_facts[:14000]
     if not has_substantive_evidence(record):
         page_evidence["status"] = "no_evidence"
         page_evidence.setdefault("errors", []).append("extracted body did not meet the substantive evidence threshold")
         return None, page_evidence
+    page_evidence["status"] = "ok"
     return record, page_evidence
 
 
@@ -366,6 +387,7 @@ def _compact_page(
 def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     query = " ".join(str(query or "").split()).strip()
     task_id = str(kwargs.get("task_id") or "")
+    agent_state = kwargs.get("agent_state")
     task_plan = kwargs.get("task_plan") if isinstance(kwargs.get("task_plan"), dict) else {}
     freshness_policy = build_freshness_policy(kwargs.get("original_goal") or query, task_plan)
     source_policy = resolve_source_policy(query, {"task_plan": task_plan})
@@ -376,7 +398,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         max_candidates = max(1, min(int(max_results or 8), 8))
     except (TypeError, ValueError):
         max_candidates = 8
-    max_pages = 4
+    max_pages = _pipeline_concurrency("web_search_max_pages", 8, maximum=16)
     append_task_event(
         task_id,
         "web_search_stage",
@@ -391,7 +413,8 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             "chunk_mode": DATA_PIPELINE.get("web_chunk_mode", "adaptive"),
             "single_pass_threshold_tokens": DATA_PIPELINE.get("web_chunk_single_pass_tokens", 7000),
             "chunk_target_tokens": DATA_PIPELINE.get("web_chunk_tokens", 4096),
-            "chunk_max_tokens": DATA_PIPELINE.get("web_chunk_max_tokens", 4096),
+            "chunk_max_tokens": DATA_PIPELINE.get("web_chunk_max_tokens", 2400),
+            "page_evidence_concurrency": DATA_PIPELINE.get("web_page_evidence_concurrency", 8),
         },
     )
 
@@ -429,9 +452,42 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             else [annotate_source(_direct_candidate(direct_url), query, {"task_plan": task_plan})]
         )
     else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            futures = [pool.submit(run_keyless), pool.submit(run_tavily)]
-            provider_results = [future.result() for future in futures]
+        provider_jobs = [run_keyless, run_tavily]
+        provider_results: list[dict[str, Any]] = [
+            {"status": "error", "provider_errors": ["provider did not complete"], "results": []}
+            for _ in provider_jobs
+        ]
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(_pipeline_concurrency("web_provider_concurrency", 2), len(provider_jobs))
+        )
+        futures = {
+            submit_with_context(pool, job): index
+            for index, job in enumerate(provider_jobs)
+        }
+        cancelled = False
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=task_wait_timeout()):
+                index = futures[future]
+                try:
+                    provider_results[index] = future.result()
+                except Exception as exc:
+                    provider_results[index] = {
+                        "status": "error",
+                        "provider_errors": [f"{type(exc).__name__}: {exc}"],
+                        "results": [],
+                    }
+        except concurrent.futures.TimeoutError:
+            cancelled = True
+            for future in futures:
+                if not future.done():
+                    index = futures[future]
+                    provider_results[index] = {
+                        "status": "error",
+                        "provider_errors": ["provider wait exceeded task budget"],
+                        "results": [],
+                    }
+        finally:
+            shutdown_pool(pool, list(futures), cancelled=cancelled)
 
         provider_statuses = [
             {
@@ -448,6 +504,53 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             limit=max_candidates,
             task_plan=task_plan,
         )
+
+    # A follow-up research round must add novelty to the shared evidence
+    # store. Reuse is handled from the store; do not refetch the same page as
+    # a second recovery path.
+    seen_urls = _shared_source_urls(agent_state)
+    novel_candidates = [
+        item for item in candidates
+        if normalize_url(str(item.get("url") or "")) not in seen_urls
+    ]
+    reused_records = []
+    retrieval = getattr(agent_state, "retrieval", None)
+    stored_sources = getattr(retrieval, "sources", {}) if retrieval is not None else {}
+    if not novel_candidates and stored_sources:
+        query_terms = {term.casefold() for term in re.findall(r"[A-Za-z0-9_\-]{3,}", query)}
+        reused_records = [
+            dict(item)
+            for item in stored_sources.values()
+            if isinstance(item, dict)
+            and (
+                not query_terms
+                or query_terms.intersection(
+                    {term.casefold() for term in re.findall(r"[A-Za-z0-9_\-]{3,}", str(item.get("title") or ""))}
+                )
+            )
+        ][:max_pages]
+    if novel_candidates:
+        candidates = novel_candidates
+    elif not reused_records and seen_urls:
+        result = {
+            "status": "no_new_evidence",
+            "real_network": False,
+            "provider": "evidence_store",
+            "retrieval_role": "discovery",
+            "query": query,
+            "count": 0,
+            "candidate_count": len(candidates),
+            "fetched_count": 0,
+            "results": [],
+            "sources": [],
+            "citation_refs": [],
+            "page_evidence": [],
+            "evidence_ready": False,
+            "reused_sources": False,
+            "novel_source_count": 0,
+            "evidence_policy": "all discovered URLs are already in the shared evidence store; refine the query",
+        }
+        return json.dumps(result, ensure_ascii=False, indent=2)
     append_task_event(
         task_id,
         "web_search_stage",
@@ -551,23 +654,66 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             indent=2,
         )
 
+    if reused_records:
+        result = {
+            "status": "ok",
+            "real_network": False,
+            "provider": "evidence_store",
+            "retrieval_role": "discovery",
+            "query": query,
+            "count": len(reused_records),
+            "candidate_count": len(candidates),
+            "fetched_count": 0,
+            "results": reused_records,
+            "sources": [item.get("url", "") for item in reused_records],
+            "citation_refs": [],
+            "page_evidence": [],
+            "evidence_ready": bool(reused_records),
+            "reused_sources": True,
+            "novel_source_count": 0,
+            "evidence_policy": "existing evidence store projection; no duplicate network fetch",
+        }
+        append_task_event(task_id, "web_search_stage", phase="RESEARCH", action="web_search", stage="reuse", query=query, count=len(reused_records))
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
     llm = LLMClient()
     selected = candidates[:max_pages]
     fetched: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(selected))) as pool:
-        future_map = {pool.submit(_fetch_candidate, item, task_id): item for item in selected}
-        for future in concurrent.futures.as_completed(future_map):
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(_pipeline_concurrency("web_page_fetch_concurrency", 2), len(selected))
+    )
+    future_map = {
+        submit_with_context(pool, _fetch_candidate, item, task_id): item
+        for item in selected
+    }
+    cancelled = False
+    try:
+        for future in concurrent.futures.as_completed(future_map, timeout=task_wait_timeout()):
             candidate = future_map[future]
             try:
                 fetched.append((candidate, future.result()))
             except Exception as exc:
                 fetched.append((candidate, {"status": "error", "message": f"{type(exc).__name__}: {exc}", "results": []}))
+    except concurrent.futures.TimeoutError:
+        cancelled = True
+        for future, candidate in future_map.items():
+            if not future.done():
+                fetched.append((candidate, {"status": "error", "message": "page fetch wait exceeded task budget", "results": []}))
+    finally:
+        shutdown_pool(pool, list(future_map), cancelled=cancelled)
 
     fetched.sort(key=lambda item: int(item[0].get("candidate_rank") or 10**6))
-    evidence_pages: list[dict[str, Any]] = []
-    records: list[dict[str, Any]] = []
-    for candidate, fetched_result in fetched:
-        record, page_evidence = _compact_page(
+    # Page extraction is independent once fetches have completed. Run pages
+    # concurrently, while page_evidence.py applies the separate global model
+    # request gate to every chunk call.
+    page_workers = min(
+        _pipeline_concurrency("web_page_evidence_concurrency", 8, maximum=32),
+        max(1, len(fetched)),
+    )
+
+    def process_page(pair: tuple[dict[str, Any], dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        candidate, fetched_result = pair
+        return _compact_page(
             query,
             candidate,
             fetched_result,
@@ -575,6 +721,37 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             task_id,
             task_plan=task_plan,
         )
+
+    processed: list[tuple[int, dict[str, Any] | None, dict[str, Any]]] = []
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=page_workers)
+    future_map = {
+        submit_with_context(pool, process_page, pair): index
+        for index, pair in enumerate(fetched)
+    }
+    cancelled = False
+    try:
+        for future in concurrent.futures.as_completed(future_map, timeout=task_wait_timeout()):
+            index = future_map[future]
+            try:
+                record, page_evidence = future.result()
+            except Exception as exc:
+                record, page_evidence = None, {
+                    "status": "error",
+                    "error_class": "page_evidence_failed",
+                    "errors": [f"{type(exc).__name__}: {exc}"],
+                }
+            processed.append((index, record, page_evidence))
+    except concurrent.futures.TimeoutError:
+        cancelled = True
+        for future, index in future_map.items():
+            if not future.done():
+                processed.append((index, None, {"status": "error", "error_class": "page_evidence_timeout", "errors": ["page evidence wait exceeded task budget"]}))
+    finally:
+        shutdown_pool(pool, list(future_map), cancelled=cancelled)
+
+    evidence_pages: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    for _, record, page_evidence in sorted(processed, key=lambda item: item[0]):
         evidence_pages.append(page_evidence)
         append_task_event(
             task_id,

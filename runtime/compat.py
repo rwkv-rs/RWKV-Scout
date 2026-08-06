@@ -16,13 +16,14 @@ from config import (
     get_llm_model,
     get_llm_temperature,
     get_model_connect_timeout_seconds,
+    get_model_chunk_requests_per_task,
     get_model_read_timeout_seconds,
     get_slm_concurrency,
 )
 from runtime.backend import BackendResponse
 from utils.runtime_gate import model_request_slot
 from utils.text_encoding import repair_mojibake
-from utils.token_tracker import current_task_id
+from utils.token_tracker import current_model_lane, current_task_id
 from utils.time_budget import bounded_timeout
 
 
@@ -154,6 +155,8 @@ class OpenAICompatBackend:
         if not prompts:
             return []
         worker_count = min(max(1, get_slm_concurrency()), len(prompts))
+        if current_model_lane.get() == "chunk":
+            worker_count = min(worker_count, get_model_chunk_requests_per_task())
         results = [""] * len(prompts)
         with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {

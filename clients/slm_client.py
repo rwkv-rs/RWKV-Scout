@@ -3,10 +3,12 @@ import json
 import requests
 import time
 import concurrent.futures
+import contextvars
 from config import (
     get_llm_model,
     get_llm_temperature,
     get_model_backend_name,
+    get_model_chunk_requests_per_task,
     get_slm_concurrency,
     get_slm_endpoint,
     get_slm_password,
@@ -15,7 +17,7 @@ from config import (
 from runtime import get_model_backend
 from utils.chunker import get_token_count
 from utils.runtime_gate import model_request_slot
-from utils.token_tracker import current_task_id, global_token_tracker
+from utils.token_tracker import current_task_id, global_token_tracker, model_lane
 
 class SLMClient:
     def __init__(self, endpoint_override=None, password_override=None):
@@ -38,6 +40,14 @@ class SLMClient:
     def batch_generate(self, contents: list[str], tracker=None, task_id: str = None) -> list[str]:
         if not contents:
             return []
+
+        token = current_task_id.set(task_id or current_task_id.get())
+        try:
+            return self._batch_generate_with_context(contents, tracker=tracker, task_id=task_id)
+        finally:
+            current_task_id.reset(token)
+
+    def _batch_generate_with_context(self, contents: list[str], tracker=None, task_id: str = None) -> list[str]:
             
         # 1. 🚀 发送前：立即进行输入 Token 本地计算与计费拦截
         total_in_tokens = sum(get_token_count(c) for c in contents)
@@ -56,6 +66,13 @@ class SLMClient:
         return results
 
     def _batch_generate_direct(self, contents: list[str]) -> list[str]:
+        # SLM calls are evidence/chunk work. Keep them out of the reserved
+        # control lane even when the backend implementation is shared with
+        # planner and synthesis requests.
+        with model_lane("chunk"):
+            return self._batch_generate_direct_impl(contents)
+
+    def _batch_generate_direct_impl(self, contents: list[str]) -> list[str]:
         selected_backend = get_model_backend_name()
         if selected_backend in {"direct_rwkv", "auto"}:
             backend = get_model_backend()
@@ -170,7 +187,7 @@ class SLMClient:
                 "temperature": get_llm_temperature(),
                 "stream": False,
             }
-            with model_request_slot(current_task_id.get() or "slm-request"):
+            with model_request_slot(current_task_id.get() or "slm-request", lane="chunk"):
                 response = requests.post(self.endpoint, json=payload, headers=request_headers, timeout=180)
             if response.status_code != 200:
                 raise RuntimeError(f"HTTP {response.status_code} - {response.text[:1000]}")
@@ -181,10 +198,17 @@ class SLMClient:
             message = choices[0].get("message") or {}
             return message.get("content") or choices[0].get("text", "")
 
-        worker_count = min(max(1, get_slm_concurrency()), len(contents))
+        worker_count = min(
+            max(1, get_slm_concurrency()),
+            get_model_chunk_requests_per_task(),
+            len(contents),
+        )
         results = [""] * len(contents)
         with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {executor.submit(generate_one, content): index for index, content in enumerate(contents)}
+            futures = {
+                executor.submit(contextvars.copy_context().run, generate_one, content): index
+                for index, content in enumerate(contents)
+            }
             for future in concurrent.futures.as_completed(futures):
                 results[futures[future]] = future.result()
         return results

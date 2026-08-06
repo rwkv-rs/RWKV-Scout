@@ -7,6 +7,7 @@ from agent.retrieval_synthesis import (
     _final_completion_budget,
     _normalize_evidence_code_spans,
     _normalize_free_threading_polarity,
+    _evidence_limited_fallback,
     build_evidence_context,
     synthesize_retrieval_answer,
 )
@@ -25,7 +26,94 @@ class _FakeLLM:
         return SimpleNamespace(content="Supported answer [S1]")
 
 
+class _EmptyLLM:
+    provider = "local_13b"
+
+    def text_completion(self, prompt, max_tokens=0, **kwargs):
+        return SimpleNamespace(content="")
+
+
+class _ErrorLLM:
+    provider = "local_13b"
+
+    def text_completion(self, prompt, max_tokens=0, **kwargs):
+        raise TimeoutError("simulated RWKV final timeout")
+
+
 class RetrievalSynthesisTests(unittest.TestCase):
+    def test_empty_rwkv_output_becomes_a_nonempty_evidence_bounded_answer(self):
+        result = synthesize_retrieval_answer(
+            "Who founded the project?",
+            {
+                "query": "Who founded the project?",
+                "results": [
+                    {
+                        "title": "Project source",
+                        "url": "https://example.com/project",
+                        "content": "The project was founded by Example Research in 2024. " * 8,
+                        "evidence_origin": "fetched_page_body",
+                    }
+                ],
+            },
+            llm=_EmptyLLM(),
+        )
+        self.assertTrue(result["content"].strip())
+        self.assertIn(result["mode"], {"controller_fallback", "controller_refusal"})
+        self.assertTrue(result["answer_quality"]["fallback_used"])
+        self.assertNotIn("Local RWKV", result["content"])
+
+    def test_rwkv_final_exception_becomes_a_nonempty_answer_and_keeps_diagnostic(self):
+        result = synthesize_retrieval_answer(
+            "Who founded the project?",
+            {
+                "query": "Who founded the project?",
+                "results": [
+                    {
+                        "title": "Project source",
+                        "url": "https://example.com/project",
+                        "content": "The project was founded by Example Research in 2024. " * 8,
+                        "evidence_origin": "fetched_page_body",
+                    }
+                ],
+            },
+            llm=_ErrorLLM(),
+        )
+        self.assertTrue(result["content"].strip())
+        self.assertIn(result["mode"], {"controller_fallback", "controller_refusal"})
+        self.assertIn("TimeoutError", result["model_error"])
+        self.assertNotIn("TimeoutError", result["content"])
+
+    def test_empty_rwkv_output_without_evidence_is_an_explicit_nonempty_refusal(self):
+        result = synthesize_retrieval_answer(
+            "Who founded the project?",
+            {
+                "query": "Who founded the project?",
+                "results": [],
+            },
+            llm=_EmptyLLM(),
+        )
+        self.assertTrue(result["content"].strip())
+        self.assertEqual(result["mode"], "controller_refusal")
+        self.assertEqual(result["answer_quality"]["fallback_kind"], "refusal")
+
+    def test_controller_fallback_quotes_visible_evidence_when_model_is_unavailable(self):
+        result = _evidence_limited_fallback(
+            "What does the source state?",
+            {
+                "usable_evidence_count": 1,
+                "selected_evidence": [
+                    {
+                        "ref_id": "S1",
+                        "evidence_text": "The source explicitly states the project launched in 2024.",
+                    }
+                ],
+                "validation": {"subquestion_coverage": []},
+            },
+            reason="rwkv_empty_output",
+        )
+        self.assertEqual(result["mode"], "controller_fallback")
+        self.assertIn("launched in 2024", result["content"])
+
     def test_answer_first_contract_is_used_only_with_visible_evidence(self):
         llm = _FakeLLM()
         result = synthesize_retrieval_answer(

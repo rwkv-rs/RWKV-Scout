@@ -1236,6 +1236,135 @@ def _closed_world_fallback() -> str:
     return "无法根据当前检索到的正文证据确认该问题所需的事实，因此不提供未经证据支持的答案。"
 
 
+def _fallback_excerpt(value: Any, *, limit: int = 360) -> str:
+    """Extract a small source-body excerpt for controller-side degradation."""
+
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"https?://\S+", "", text)
+    parts = re.split(r"(?<=[.!?。！？])\s+|\n+", text)
+    useful: list[str] = []
+    total = 0
+    for part in parts:
+        part = re.sub(r"\s+", " ", part).strip(" -|#")
+        if len(part) < 24 or part.startswith(("Table of contents", "Navigation", "Skip to")):
+            continue
+        remaining = limit - total
+        if remaining <= 0:
+            break
+        clipped = part[:remaining].rstrip()
+        useful.append(clipped)
+        total += len(clipped) + 1
+        if total >= limit:
+            break
+    excerpt = " ".join(useful).strip()
+    if len(excerpt) >= limit:
+        excerpt = excerpt[: limit - 1].rstrip() + "…"
+    return excerpt
+
+
+def _evidence_limited_fallback(
+    query: str,
+    context: dict[str, Any],
+    *,
+    reason: str,
+    model_error: str = "",
+) -> dict[str, Any]:
+    """Return a non-empty, source-bounded answer when RWKV cannot finish."""
+
+    validation = context.get("validation") or {}
+    coverage_rows = [
+        row for row in validation.get("subquestion_coverage") or [] if isinstance(row, dict)
+    ]
+    missing_rows = [row for row in coverage_rows if not bool(row.get("answerable"))]
+    covered_rows = [row for row in coverage_rows if bool(row.get("answerable"))]
+    covered_refs = {
+        str(source.get("ref_id") or "")
+        for row in covered_rows
+        for source in (row.get("sources") or [])
+        if isinstance(source, dict) and str(source.get("ref_id") or "").strip()
+    }
+    selected = [
+        item
+        for item in context.get("selected_evidence") or []
+        if isinstance(item, dict) and str(item.get("evidence_text") or "").strip()
+    ]
+    if not selected and int(context.get("usable_evidence_count") or 0) > 0:
+        # A final-context projection can retain source text while a later
+        # validator projection drops its compact per-source metadata.  Keep
+        # the controller fallback bounded to that exact visible projection.
+        visible_text = str(context.get("evidence_text") or context.get("text") or "").strip()
+        if visible_text and visible_text != "(no retrieved evidence)":
+            selected = [{"ref_id": "S1", "evidence_text": visible_text}]
+    if covered_refs:
+        focused = [item for item in selected if str(item.get("ref_id") or "") in covered_refs]
+        if focused:
+            selected = focused
+
+    calculation_results = context.get("calculation_results") or []
+    lines: list[str] = []
+    for item in calculation_results[:8]:
+        if not isinstance(item, dict):
+            continue
+        tool = str(item.get("tool") or "calculator")
+        result = item.get("formatted_result", item.get("result", item.get("days", "")))
+        expression = str(item.get("expression") or item.get("formula") or "").strip()
+        lines.append(f"- {expression + ' = ' if expression else ''}{result} ({tool} result)")
+
+    # Atomic validation points with no covered row mean that the selected page
+    # is not evidence for this question. Do not replay an unrelated page.
+    can_quote_evidence = bool(selected) and (not coverage_rows or bool(covered_rows))
+    if can_quote_evidence:
+        for item in selected[:4]:
+            excerpt = _fallback_excerpt(item.get("evidence_text"), limit=360)
+            if excerpt:
+                lines.append(f"- {excerpt} [{item.get('ref_id') or 'S1'}]")
+
+    if lines:
+        answer = "Based on the currently citable evidence, the following can be confirmed:\n" + "\n".join(lines[:6])
+        mode = "controller_fallback"
+    else:
+        answer = (
+            "The retrieved source bodies do not provide enough direct evidence to reliably answer this question. "
+            "I will not fill the gap with unsupported information."
+        )
+        mode = "controller_refusal"
+
+    if missing_rows:
+        missing_lines = []
+        for row in missing_rows[:12]:
+            point_id = str(row.get("point_id") or "").strip()
+            task = re.sub(r"\s+", " ", str(row.get("task") or point_id)).strip()
+            if task:
+                missing_lines.append(f"- {point_id + ': ' if point_id else ''}{task}")
+        if missing_lines:
+            answer += (
+                "\n\nThe following parts remain unconfirmed because the evidence is insufficient:\n"
+                + "\n".join(missing_lines)
+            )
+
+    return {
+        "content": answer.strip() or "The available evidence is insufficient to answer reliably.",
+        "mode": mode,
+        "fallback_reason": reason,
+        "model_error": model_error,
+        "answer_quality": {
+            "fallback_used": True,
+            "fallback_kind": "refusal" if mode == "controller_refusal" else "evidence_excerpt",
+            "fallback_reason": reason,
+            "model_error_recorded": bool(model_error),
+            "missing_point_count": len(missing_rows),
+        },
+        "answer_alignment": assess_answer_alignment(
+            answer,
+            [] if mode == "controller_refusal" else selected,
+        ),
+    }
+
+
 def _answer_revision_key(
     answer: str,
     copy_evidence: list[dict[str, Any]] | None,
@@ -1306,7 +1435,7 @@ def _calculation_context_text(results: Any) -> str:
         item for item in (results or [])
         if isinstance(item, dict)
         and str(item.get("status") or "") == "ok"
-        and str(item.get("tool") or "") in {"date_diff", "current_time"}
+        and str(item.get("tool") or "") in {"calculator", "date_diff", "current_time"}
     ]
     if not rows:
         return ""
@@ -1324,6 +1453,15 @@ def _calculation_context_text(results: Any) -> str:
                     f"date: {item.get('date', '')}",
                     f"utc_offset: {item.get('utc_offset', '')}",
                     f"observed_at_utc: {item.get('observed_at_utc', '')}",
+                ]
+            )
+            continue
+        if str(item.get("tool") or "") == "calculator":
+            lines.extend(
+                [
+                    f"CALCULATION C{index} (calculator)",
+                    f"expression: {item.get('expression', '')}",
+                    f"result: {item.get('formatted_result', item.get('result', ''))}",
                 ]
             )
             continue
@@ -1783,14 +1921,21 @@ def synthesize_retrieval_answer(
     max_items = int(task_plan.get("max_items") or 0) if str(task_plan.get("max_items") or "0").isdigit() else 0
     policy = risk_context(constraints)
     if llm is None:
+        fallback = _evidence_limited_fallback(
+            query,
+            context,
+            reason="rwkv_unavailable",
+        )
         return {
-            "content": "Local RWKV is not configured; no final answer was generated.",
-            "mode": "rwkv_unavailable",
+            "content": fallback["content"],
+            "mode": fallback["mode"],
             "evidence_count": len(data.get("results") or []),
             "citation_refs": context_citation_refs,
             "prompt": "",
             "model_output": "",
-            "answer_alignment": assess_answer_alignment("", context.get("selected_evidence") or []),
+            "fallback_reason": fallback["fallback_reason"],
+            "answer_quality": fallback["answer_quality"],
+            "answer_alignment": fallback["answer_alignment"],
             **context_fields,
         }
 
@@ -1957,8 +2102,15 @@ def synthesize_retrieval_answer(
             )
         )
         output_precision_instruction = (
-            "Copy names, dates, quantities, polarity, commands, and flags exactly from the body; do not invent or reverse them. "
-            "Put citations after the sentence or code block. "
+            (
+                "Copy deterministic dates, times, operands, and results exactly from the tool block; do not recalculate, alter, or invent them. "
+                "Do not add a web citation for a deterministic tool result; cite only separate claims supported by visible web evidence. "
+            )
+            if calculation_results
+            else (
+                "Copy names, dates, quantities, polarity, commands, and flags exactly from the body; do not invent or reverse them. "
+                "Put citations after the sentence or code block. "
+            )
         )
         polarity_hint = _evidence_polarity_hint(query, context_text)
         scope_hint = _answer_scope_hint(query)
@@ -2130,7 +2282,7 @@ def synthesize_retrieval_answer(
         draft_alignment = assess_answer_alignment(answer, selected_evidence)
         draft_copy_ratio = _source_copy_ratio(answer, copy_evidence)
         post_repair_copy_ratio = draft_copy_ratio
-        if answer and usable_evidence_count and (
+        if bool((constraints or {}).get("enable_answer_repair", False)) and answer and usable_evidence_count and (
             _needs_answer_repair(answer, copy_evidence)
             or _is_evidence_refusal(answer)
             or not re.search(r"\[S\d+(?::C\d+)?\]", answer)
@@ -2156,7 +2308,7 @@ def synthesize_retrieval_answer(
         # citation-contract pass; this is not a verifier and it never adds
         # facts or sources.  If the evidence cannot support a claim, the
         # model is instructed to mark that point unconfirmed.
-        if answer and usable_evidence_count:
+        if bool((constraints or {}).get("enable_answer_repair", False)) and answer and usable_evidence_count:
             post_repair_alignment = assess_answer_alignment(answer, selected_evidence)
             post_repair_copy_ratio = _source_copy_ratio(answer, copy_evidence)
             if (
@@ -2187,7 +2339,7 @@ def synthesize_retrieval_answer(
         # an unsupported factual continuation to the user.  This is an output
         # protocol boundary, not a second model/verifier or a truth judgement.
         closed_world_enforced = not usable_evidence_count and not calculation_results
-        if closed_world_enforced and not _is_evidence_refusal(answer):
+        if closed_world_enforced and answer and not _is_evidence_refusal(answer):
             answer = _closed_world_fallback()
         if not closed_world_enforced:
             answer = _normalize_evidence_code_spans(answer, evidence_context_text)
@@ -2241,9 +2393,30 @@ def synthesize_retrieval_answer(
                 "answer_alignment": answer_alignment,
                 **context_fields,
             }
+        if not answer:
+            fallback = _evidence_limited_fallback(
+                query,
+                answer_context,
+                reason="rwkv_empty_output",
+            )
+            answer = fallback["content"]
+            fallback_quality = fallback["answer_quality"]
+            fallback_quality["draft_model_output_chars"] = len(model_output)
+            return {
+                "content": answer,
+                "mode": fallback["mode"],
+                "evidence_count": usable_evidence_count,
+                "citation_refs": context_citation_refs,
+                "prompt": prompt,
+                "model_output": model_output,
+                "fallback_reason": fallback["fallback_reason"],
+                "answer_quality": fallback_quality,
+                "answer_alignment": fallback["answer_alignment"],
+                **context_fields,
+            }
         return {
-            "content": answer or "Local RWKV returned an empty answer.",
-            "mode": "local_rwkv_empty",
+            "content": answer,
+            "mode": "local_rwkv_final",
             "evidence_count": usable_evidence_count,
             "citation_refs": context_citation_refs,
             "prompt": prompt,
@@ -2253,15 +2426,28 @@ def synthesize_retrieval_answer(
             **context_fields,
         }
     except Exception as exc:
+        error_text = f"{type(exc).__name__}: {exc}"
+        fallback = _evidence_limited_fallback(
+            query,
+            answer_context,
+            reason="rwkv_final_call_error",
+            model_error=error_text,
+        )
         return {
-            "content": f"Local RWKV final-answer call failed: {type(exc).__name__}: {exc}",
-            "mode": "local_rwkv_error",
+            "content": fallback["content"],
+            "mode": fallback["mode"],
             "evidence_count": usable_evidence_count,
             "citation_refs": context_citation_refs,
             "prompt": prompt,
             "model_output": _clean_answer(str(raw or "")),
-            "error": f"{type(exc).__name__}: {exc}",
-            "answer_quality": {"source_copy_ratio": 0.0, "source_copy_detected": False},
-            "answer_alignment": assess_answer_alignment("", context.get("selected_evidence") or []),
+            "error": error_text,
+            "fallback_reason": fallback["fallback_reason"],
+            "model_error": error_text,
+            "answer_quality": {
+                **fallback["answer_quality"],
+                "source_copy_ratio": 0.0,
+                "source_copy_detected": False,
+            },
+            "answer_alignment": fallback["answer_alignment"],
             **context_fields,
         }

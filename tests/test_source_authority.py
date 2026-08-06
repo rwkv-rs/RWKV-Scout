@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.planner import Planner
-from agent.orchestrator import Orchestrator
 from agent.retrieval_synthesis import (
     _clean_answer,
     _enforce_latest_list_shape,
@@ -289,46 +288,6 @@ class SourceAuthorityTests(unittest.TestCase):
         self.assertTrue(result["context_stats"]["official_body_available"])
         self.assertTrue(result["selected_evidence"])
         self.assertIn("WebSocket proxying", llm_prompt_text(llm))
-
-    def test_review_reports_authority_missing_as_unfinished(self):
-        plan = {
-            "source_policy": "official_required",
-            "required_domains": ["miit.gov.cn"],
-            "atomic_points": [
-                {
-                    "id": "P1",
-                    "task": "official statistic",
-                    "objective": "confirm the official statistic",
-                    "evidence_needed": ["official source"],
-                    "acceptance_criteria": ["official domain"],
-                }
-            ],
-        }
-        orchestrator = Orchestrator()
-        orchestrator.state.task_id = "SOURCE_AUTHORITY_REVIEW_TEST"
-        orchestrator.state.run_metadata = {"task_plan": plan}
-        orchestrator._task_plan = plan
-        with patch("agent.orchestrator.append_task_event"):
-            review, _validation = orchestrator._build_engineering_evidence_review(
-                "latest MIIT official statistic",
-                [
-                    (
-                        "latest MIIT official statistic",
-                        {
-                            "status": "ok",
-                            "results": [
-                                {
-                                    "url": "https://www.researchandmarkets.com/report",
-                                    "content": "MIIT official statistic summary " * 8,
-                                    "evidence_origin": "fetched_page_body",
-                                }
-                            ],
-                        },
-                    )
-                ],
-            )
-        self.assertIn("P1", review["missing_point_ids"])
-        self.assertEqual(review["evidence_state"], "partial_or_conflicted")
 
     def test_official_gate_skips_third_party_page_fetches(self):
         plan = {

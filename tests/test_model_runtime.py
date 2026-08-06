@@ -28,7 +28,21 @@ class ModelRuntimeTests(unittest.TestCase):
                 {"role": "user", "content": "Question"},
             ]
         )
-        self.assertEqual(prompt, "System:\nUse evidence.\n\nUser:\nQuestion\n\nAssistant:")
+        self.assertEqual(prompt, "### User\nUse evidence.\n\n### User\nQuestion\n\n### Assistant")
+
+    def test_tool_transcript_matches_rwkv_skills_json_protocol(self):
+        prompt = render_rwkv_transcript(
+            [
+                {"role": "system", "content": "Use the available tools."},
+                {"role": "user", "content": "Find the answer."},
+            ],
+            tools=[{"name": "web_search"}],
+        )
+        self.assertEqual(prompt.count("System:"), 0)
+        self.assertIn("Use the available tools.", prompt)
+        self.assertIn('"name":"web_search"', prompt)
+        self.assertIn("**Tool Call:**", prompt)
+        self.assertTrue(prompt.endswith("### Assistant\n**Tool Call:**\n"))
 
     def test_compat_response_is_normalized_without_sdk_objects(self):
         response = OpenAICompatBackend._response(

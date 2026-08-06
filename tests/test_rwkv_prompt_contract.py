@@ -1,12 +1,14 @@
 import unittest
 from types import SimpleNamespace
 
-from agent.planner import _canonicalize_tool_payload
+from agent.planner import _canonicalize_tool_payload, _extract_json_object
 from agent.retrieval_synthesis import synthesize_retrieval_answer
 from utils.rwkv_prompt import (
     FINAL_CONTINUATION_STOP_SUFFIXES,
+    assistant_json_prefix,
     build_final_continuation_prompt,
     clean_final_continuation,
+    tool_call_prefix,
 )
 
 
@@ -27,15 +29,32 @@ class _PromptFakeLLM:
 class RWKVPromptContractTests(unittest.TestCase):
     def test_final_prompt_uses_raw_official_continuation_prefix(self):
         prompt = build_final_continuation_prompt("回答问题")
-        self.assertTrue(prompt.endswith("Assistant: <think></think>\n"))
-        self.assertTrue(prompt.startswith("User: "))
+        self.assertTrue(prompt.endswith("### Assistant"))
+        self.assertTrue(prompt.startswith("### User\n"))
+
+    def test_json_prefix_matches_rwkv_skills_tool_continuation(self):
+        self.assertEqual(
+            assistant_json_prefix(enable_think=True, prefill_object=True),
+            "### Assistant\n<think></think\n{",
+        )
+        self.assertEqual(
+            assistant_json_prefix(enable_think=False, prefill_object=True),
+            "### Assistant\n```json\n{",
+        )
+        self.assertEqual(tool_call_prefix(), "### Assistant\n**Tool Call:**\n")
+
+    def test_json_parser_accepts_only_the_prefilled_object_tail(self):
+        payload = _extract_json_object('"name":"web_search","arguments":{"query":"rwkv"}}')
+        self.assertEqual(payload, {"name": "web_search", "arguments": {"query": "rwkv"}})
+        with self.assertRaises(ValueError):
+            _extract_json_object("the model did not return a function call")
 
     def test_final_cleanup_removes_generated_transcript_boundary_only(self):
         self.assertEqual(
-            clean_final_continuation("答案\nAssistant: User: 后续污染"),
+            clean_final_continuation("答案\n### Assistant\n### User\n后续污染"),
             "答案",
         )
-        self.assertEqual(clean_final_continuation("Assistant: <think></think>答案"), "答案")
+        self.assertEqual(clean_final_continuation("### Assistant\n<think></think>答案"), "答案")
 
     def test_native_tool_envelope_is_adapted_without_changing_model_choice(self):
         payload = _canonicalize_tool_payload(

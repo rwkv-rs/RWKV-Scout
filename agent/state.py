@@ -3,11 +3,147 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Set
 
 from utils.chunker import get_token_count
+
+
+@dataclass
+class RetrievalEpisodeState:
+    """Single shared evidence state for one model-owned retrieval episode.
+
+    The planner, orchestrator, validator and final synthesizer must observe
+    the same evidence ledger.  Keeping these collections on the task state
+    prevents a replan or phase transition from creating a fresh local view
+    and losing the already collected page/point bindings.
+    """
+
+    rounds: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    rounds_by_point: Dict[str, list[tuple[str, dict[str, Any]]]] = field(default_factory=dict)
+    point_state: Dict[str, dict[str, Any]] = field(default_factory=dict)
+    last_discovery_results: list[dict[str, Any]] = field(default_factory=list)
+    last_retrieval_failure: dict[str, Any] | None = None
+    # The evidence store is task-scoped and shared by the planner, tools and
+    # final synthesizer.  It is deliberately external to the model
+    # transcript: a follow-up search adds to this store instead of creating a
+    # second recovery conversation.
+    sources: Dict[str, dict[str, Any]] = field(default_factory=dict)
+    query_history: list[dict[str, Any]] = field(default_factory=list)
+    coverage: Dict[str, dict[str, Any]] = field(default_factory=dict)
+    frozen_paths: list[dict[str, Any]] = field(default_factory=list)
+    replan_count: int = 0
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
+
+    @staticmethod
+    def source_key(item: dict[str, Any]) -> str:
+        url = str(item.get("url") or "").strip().casefold().rstrip("/")
+        if url:
+            return url
+        digest = str(item.get("content_sha256") or "").strip()
+        if digest:
+            return f"sha256:{digest}"
+        body = str(item.get("source_excerpt") or item.get("content") or "")
+        return f"sha256:{hashlib.sha256(body.encode('utf-8')).hexdigest()}"
+
+    def record_query(self, query: str, result: dict[str, Any], *, step: int = 0) -> dict[str, Any]:
+        """Merge one research round into the shared evidence store."""
+
+        query_text = " ".join(str(query or "").split()).strip()
+        added: list[str] = []
+        with self._lock:
+            self.query_history.append(
+                {
+                    "query": query_text,
+                    "step": int(step or 0),
+                    "status": str(result.get("status") or ""),
+                    "new_source_count": 0,
+                }
+            )
+            for item in result.get("results") or []:
+                if not isinstance(item, dict):
+                    continue
+                key = self.source_key(item)
+                if key not in self.sources:
+                    self.sources[key] = dict(item)
+                    added.append(key)
+                else:
+                    # Keep the richest representation when the same URL is
+                    # encountered by a focused follow-up search.
+                    current = self.sources[key]
+                    if len(str(item.get("content") or "")) > len(str(current.get("content") or "")):
+                        self.sources[key] = {**current, **item}
+            self.query_history[-1]["new_source_count"] = len(added)
+            self.rounds.append((query_text, result))
+            self.last_discovery_results[:] = [
+                item for item in result.get("results") or [] if isinstance(item, dict)
+            ]
+        return {"new_source_keys": added, "new_source_count": len(added), "total_sources": len(self.sources)}
+
+    def source_records(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(item) for item in self.sources.values()]
+
+    def routing_snapshot(self, *, max_sources: int = 8, max_queries: int = 8) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "round_count": len(self.query_history),
+                "source_count": len(self.sources),
+                "queries": [
+                    {
+                        "query": item.get("query", ""),
+                        "status": item.get("status", ""),
+                        "new_source_count": item.get("new_source_count", 0),
+                    }
+                    for item in self.query_history[-max_queries:]
+                ],
+                "sources": [
+                    {
+                        "title": item.get("title", ""),
+                        "url": item.get("url", ""),
+                        "chunk_count": item.get("chunk_count", 0),
+                    }
+                    for item in list(self.sources.values())[-max_sources:]
+                ],
+                "coverage": dict(self.coverage),
+                "frozen_path_count": len(self.frozen_paths),
+                "replan_count": self.replan_count,
+            }
+
+    def freeze_path(self, query: str, *, step: int = 0, reason: str = "") -> dict[str, Any]:
+        """Freeze a retrieval route without discarding its evidence."""
+
+        record = {
+            "query": " ".join(str(query or "").split()).strip(),
+            "step": int(step or 0),
+            "reason": str(reason or "")[:500],
+        }
+        with self._lock:
+            self.frozen_paths.append(record)
+        return dict(record)
+
+    def record_replan(self) -> int:
+        """Increment and return the task-scoped recovery count."""
+
+        with self._lock:
+            self.replan_count += 1
+            return self.replan_count
+
+    def reset(self) -> None:
+        self.rounds.clear()
+        self.rounds_by_point.clear()
+        self.point_state.clear()
+        self.last_discovery_results.clear()
+        self.last_retrieval_failure = None
+        self.sources.clear()
+        self.query_history.clear()
+        self.coverage.clear()
+        self.frozen_paths.clear()
+        self.replan_count = 0
 
 
 @dataclass
@@ -26,6 +162,7 @@ class AgentState:
     is_finished: bool = False
     final_result: str = ""
     run_metadata: dict[str, Any] = field(default_factory=dict)
+    retrieval: RetrievalEpisodeState = field(default_factory=RetrievalEpisodeState)
 
     def _mount_global_env(self) -> str:
         current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -125,4 +262,8 @@ class AgentState:
         ]
         if self.last_feedback:
             lines.append(f"Latest controller feedback: {self.last_feedback}")
+        lines.append(
+            "Shared research state (routing metadata only; source bodies remain in the evidence store):"
+        )
+        lines.append(json.dumps(self.retrieval.routing_snapshot(), ensure_ascii=False, separators=(",", ":")))
         return "\n".join(lines)

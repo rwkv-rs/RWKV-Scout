@@ -45,9 +45,9 @@ MODEL_CONTRACTS = {
     },
     "local_13b": {
         "label": "RWKV 13.3B",
-        "model": "rwkv7-g1i_preview4922-13.3b-20260720-ctx12288",
+        "model": "rwkv7-g1i-13.3b-20260805-ctx16384",
         "api_key": "rwkv-skills",
-        "context_length": 12288,
+        "context_length": 16384,
         "provider": "local_13b",
     },
     "local_direct_1p5b": {
@@ -336,6 +336,25 @@ def get_experiment_max_parallel_cases() -> int:
 def get_model_request_concurrency() -> int:
     """Maximum concurrent requests sent to the model service workspace-wide."""
     return max(1, int(MODEL_RUNTIME_CONFIG.get("max_inflight_requests", 8)))
+
+
+def get_model_reserved_control_slots() -> int:
+    """Model slots reserved for planner, validation, replanning and synthesis."""
+    limit = get_model_request_concurrency()
+    try:
+        configured = int(MODEL_RUNTIME_CONFIG.get("reserved_control_slots", 2))
+    except (TypeError, ValueError):
+        configured = 2
+    return max(0, min(max(0, limit - 1), configured))
+
+
+def get_model_chunk_requests_per_task() -> int:
+    """Maximum simultaneous chunk-evidence model requests for one task."""
+    try:
+        configured = int(MODEL_RUNTIME_CONFIG.get("max_chunk_requests_per_task", 2))
+    except (TypeError, ValueError):
+        configured = 2
+    return max(1, min(configured, get_model_request_concurrency()))
 
 
 def _bounded_seconds(value: object, default: float, *, minimum: float = 0.1, maximum: float = 3600.0) -> float:

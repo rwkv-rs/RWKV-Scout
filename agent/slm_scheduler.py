@@ -15,7 +15,7 @@ from config import (
     get_slm_concurrency,
 )
 from utils.chunker import get_token_count
-from utils.token_tracker import global_token_tracker
+from utils.token_tracker import current_task_id, global_token_tracker
 
 
 class _SLMInputQueueItem:
@@ -153,20 +153,32 @@ class SLMInputScheduler:
                 endpoint_override=batch[0].endpoint,
                 password_override=batch[0].password,
             )
-            results = client._batch_generate_direct([item.content for item in batch])
-            for item, result in zip(batch, results):
-                item.result = result
-                global_token_tracker.add_slm(
-                    0,
-                    get_token_count(result),
-                    task_id=item.task_id,
-                )
-                if item.tracker:
-                    item.tracker.track_slm(
-                        input_prompt=item.content,
-                        output_text=result,
+            # Never send a mixed-task batch through a worker that has one
+            # ContextVar identity. Otherwise model leases are recorded as
+            # UNKNOWN_TASK and one user's chunk fan-out can hide another
+            # user's planner/final request.
+            grouped: dict[str, list[_SLMInputQueueItem]] = {}
+            for item in batch:
+                grouped.setdefault(item.task_id or "UNKNOWN_TASK", []).append(item)
+            for task_id, task_items in grouped.items():
+                token = current_task_id.set(task_id)
+                try:
+                    results = client._batch_generate_direct([item.content for item in task_items])
+                finally:
+                    current_task_id.reset(token)
+                for item, result in zip(task_items, results):
+                    item.result = result
+                    global_token_tracker.add_slm(
+                        0,
+                        get_token_count(result),
                         task_id=item.task_id,
                     )
+                    if item.tracker:
+                        item.tracker.track_slm(
+                            input_prompt=item.content,
+                            output_text=result,
+                            task_id=item.task_id,
+                        )
         except Exception as exc:
             for item in batch:
                 item.error = exc

@@ -3,10 +3,22 @@ import os
 import json
 import threading
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from config import DATA_PIPELINE
 
 current_task_id: ContextVar[str] = ContextVar("current_task_id", default="UNKNOWN_TASK")
+current_model_lane: ContextVar[str] = ContextVar("current_model_lane", default="control")
+
+
+@contextmanager
+def model_lane(lane: str):
+    """Attach a scheduling lane to model calls made in this context."""
+    token = current_model_lane.set(str(lane or "control").casefold())
+    try:
+        yield
+    finally:
+        current_model_lane.reset(token)
 
 class GlobalTokenTracker:
     def __init__(self):

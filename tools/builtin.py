@@ -26,7 +26,6 @@ def load_builtin_tools() -> None:
         import tools.mediawiki  # noqa: F401
         import tools.paper_search  # noqa: F401
         import tools.static_ops  # noqa: F401
-        import tools.page_tools  # noqa: F401
         import tools.time_tools  # noqa: F401
         import tools.weather  # noqa: F401
         # ``tools.web_search_generic`` is the active public web capability.

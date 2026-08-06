@@ -135,7 +135,7 @@ class DateCalculatorTests(unittest.TestCase):
         )
         orchestrator.planner.observe_tool_result = Mock()
         orchestrator._complete_model_tool_loop = Mock(return_value="done")
-        with patch("agent.orchestrator.append_task_event") as append_event:
+        with patch("agent.unified_research.append_task_event") as append_event:
             result = orchestrator._run_single_loop(
                 "How many days?",
                 {},

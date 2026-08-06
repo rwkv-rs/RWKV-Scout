@@ -33,32 +33,29 @@ class RetrievalRuntimeTests(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["sources"], ["https://example.com"])
 
-    def test_model_plan_and_replan_keep_fixed_generic_schemas(self):
-        responses = iter(
-            [
-                '{"schema_version":"task_plan.v1","goal":"goal","atomic_points":[{"id":"P1","task":"check the fact","objective":"check fact","evidence_needed":["source"],"acceptance_criteria":["the fact is directly supported"],"output_format":"prose","status":"pending"}],"completion_rule":"supported"}',
-                '{"schema_version":"task_plan.v1","goal":"goal","atomic_points":[{"id":"P1a","task":"check the fact from a new source","objective":"check fact from a new source","evidence_needed":["source"],"acceptance_criteria":["the new source directly supports the fact"],"output_format":"prose","status":"pending"}],"completion_rule":"supported"}',
-            ]
-        )
-
+    def test_model_plan_keeps_fixed_generic_schema(self):
         class FakeLLM:
             def text_completion(self, prompt, max_tokens=1024, stop=None):
-                return SimpleNamespace(content=next(responses))
+                return SimpleNamespace(
+                    content=(
+                        '{"schema_version":"task_plan.v1","goal":"goal",'
+                        '"atomic_points":[{"id":"P1","task":"check the fact",'
+                        '"objective":"check fact","evidence_needed":["source"],'
+                        '"acceptance_criteria":["the fact is directly supported"],'
+                        '"output_format":"prose","status":"pending"}],'
+                        '"completion_rule":"supported"}'
+                    )
+                )
 
         planner = Planner()
         planner.llm = FakeLLM()
         plan = planner.create_task_plan("goal")
-        retrieval_observation = {
-            "schema_version": "retrieval.v1",
-            "status": "error",
-            "error_class": "page_fetch_failed",
-            "message": "the selected page could not be fetched",
-        }
-        followup = planner.replan_task("goal", plan, retrieval_observation, "evidence")
         self.assertEqual(plan["schema_version"], "task_plan.v1")
         self.assertEqual(plan["atomic_points"][0]["task"], "check the fact")
-        self.assertEqual(plan["atomic_points"][0]["acceptance_criteria"], ["the fact is directly supported"])
-        self.assertEqual(followup["atomic_points"][0]["id"], "P1a")
+        self.assertEqual(
+            plan["atomic_points"][0]["acceptance_criteria"],
+            ["the fact is directly supported"],
+        )
 
     def test_legacy_provider_is_not_executable_in_agent_phase(self):
         self.assertFalse(ToolRegistry.can_execute("search_web_keyless", "EXTRACTION"))
@@ -128,8 +125,6 @@ class RetrievalRuntimeTests(unittest.TestCase):
             set(rows),
             {
                 "web_search",
-                "open_page",
-                "find_in_page",
                 "connector_lookup",
                 "calculator",
                 "current_time",
@@ -142,8 +137,6 @@ class RetrievalRuntimeTests(unittest.TestCase):
             [
                 "finish_task",
                 "web_search",
-                "open_page",
-                "find_in_page",
                 "connector_lookup",
                 "calculator",
                 "date_diff",
@@ -168,6 +161,77 @@ class RetrievalRuntimeTests(unittest.TestCase):
         self.assertIn('"name": "date_diff"', prompt)
         self.assertIn("YYYY-MM-DD", prompt)
 
+    def test_planner_prompt_scopes_public_tools_by_phase_and_point(self):
+        discovery = Planner._system_prompt("DISCOVERY")
+        extraction = Planner._system_prompt("EXTRACTION")
+        self.assertIn('"name": "web_search"', discovery)
+        self.assertNotIn('"name": "open_page"', discovery)
+        self.assertNotIn('"name": "open_page"', extraction)
+        self.assertIn('"name": "web_search"', extraction)
+        self.assertIn('"task_point_id":"P1"', discovery)
+
+    def test_planner_decision_does_not_replay_audit_or_page_evidence_history(self):
+        prompts = []
+
+        class FakeLLM:
+            provider = "local"
+
+            def text_completion(self, prompt, max_tokens=1024, stop=None):
+                prompts.append(prompt)
+                return SimpleNamespace(content='{"name":"finish_task","arguments":{}}')
+
+        planner = Planner()
+        planner.llm = FakeLLM()
+        planner.begin_task(
+            "Find the requested fact",
+            "Task: Find the requested fact",
+            {
+                "schema_version": "task_plan.v1",
+                "goal": "Find the requested fact",
+                "atomic_points": [
+                    {
+                        "id": "P1",
+                        "task": "find the fact",
+                        "objective": "verify the fact",
+                        "evidence_needed": ["the direct fact"],
+                        "acceptance_criteria": ["a source supports it"],
+                    }
+                ],
+            },
+        )
+        planner._messages.append(
+            {"role": "tool", "content": "HISTORICAL_CONTROLLER_ERROR_SHOULD_NOT_BE_SENT"}
+        )
+        planner.observe_tool_result(
+            {
+                "status": "ok",
+                "results": [
+                    {
+                        "title": "Current page",
+                        "url": "https://example.com/current",
+                        "chunk_candidates": [
+                            {"facts": ["SECRET_PAGE_FACT"], "quote": "SECRET_PAGE_QUOTE"}
+                        ],
+                    }
+                ],
+            }
+        )
+
+        action = planner.plan_next_action(
+            "Find the requested fact",
+            None,
+            "Task: Find the requested fact",
+            "DISCOVERY",
+        )
+
+        self.assertEqual(action["action"], "finish_task")
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("Latest tool observation (routing only)", prompts[0])
+        self.assertIn("https://example.com/current", prompts[0])
+        self.assertNotIn("HISTORICAL_CONTROLLER_ERROR_SHOULD_NOT_BE_SENT", prompts[0])
+        self.assertIn("SECRET_PAGE_FACT", prompts[0])
+        self.assertIn("SECRET_PAGE_QUOTE", prompts[0])
+
     def test_global_loop_blocks_successful_duplicate_web_search_before_execution(self):
         orchestrator = Orchestrator()
         orchestrator.state.task_id = "DUPLICATE_SEARCH_TEST"
@@ -189,8 +253,8 @@ class RetrievalRuntimeTests(unittest.TestCase):
             }
         )
 
-        with patch("agent.orchestrator.ToolRegistry.execute", return_value=tool_result) as execute:
-            with patch("agent.orchestrator.append_task_event") as append_event:
+        with patch("tools.registry.ToolRegistry.execute", return_value=tool_result) as execute:
+            with patch("agent.unified_research.append_task_event") as append_event:
                 result = orchestrator._run_single_loop("goal", {}, task_plan, max_steps=3)
 
         self.assertEqual(result, "done")
@@ -240,13 +304,13 @@ class RetrievalRuntimeTests(unittest.TestCase):
             }
         )
 
-        with patch("agent.orchestrator.ToolRegistry.execute", return_value=empty_result) as execute:
-            with patch("agent.orchestrator.append_task_event") as append_event:
+        with patch("tools.registry.ToolRegistry.execute", return_value=empty_result) as execute:
+            with patch("agent.unified_research.append_task_event") as append_event:
                 result = orchestrator._run_single_loop("goal", {}, task_plan, max_steps=3)
 
         self.assertEqual(result, "done")
         self.assertEqual(execute.call_count, 1)
-        self.assertEqual(orchestrator.planner.plan_next_action.call_count, 3)
+        self.assertEqual(orchestrator.planner.plan_next_action.call_count, 2)
         duplicate_events = [
             call
             for call in append_event.call_args_list
@@ -254,7 +318,137 @@ class RetrievalRuntimeTests(unittest.TestCase):
         ]
         self.assertEqual(len(duplicate_events), 1)
 
+    def test_duplicate_freezes_path_rebuilds_planner_and_fans_out_replan(self):
+        orchestrator = Orchestrator()
+        orchestrator.state.task_id = "DUPLICATE_MICRO_REPLAN_TEST"
+        orchestrator.planner.plan_next_action = Mock(
+            side_effect=[
+                {"action": "web_search", "args": {"query": "same query"}},
+                {"action": "web_search", "args": {"query": "same query"}},
+                {"action": "web_search", "args": {"query": "alternate focus"}},
+                {"action": "finish_task", "args": {}},
+            ]
+        )
+        orchestrator.planner.begin_replan = Mock()
+        orchestrator.planner.observe_tool_result = Mock()
+        orchestrator._complete_model_tool_loop = Mock(return_value="done")
+        task_plan = {
+            "atomic_points": [
+                {
+                    "id": "P1",
+                    "task": "verify the official fact",
+                    "objective": "verify the official fact",
+                    "evidence_needed": ["direct source evidence"],
+                }
+            ]
+        }
+        result = json.dumps(
+            {
+                "status": "ok",
+                "results": [
+                    {
+                        "title": "Source",
+                        "url": "https://example.com/fact",
+                        "content": "Direct source evidence.",
+                    }
+                ],
+            }
+        )
+
+        with (
+            patch("tools.registry.ToolRegistry.execute", return_value=result) as execute,
+            patch(
+                "agent.unified_research._coverage",
+                side_effect=[
+                    {"status": "insufficient_evidence", "missing": [{"point_id": "P1", "task": "verify the official fact"}]},
+                    {"status": "complete", "missing": []},
+                ],
+            ),
+            patch("agent.unified_research.append_task_event") as append_event,
+        ):
+            answer = orchestrator._run_single_loop("verify the fact", {}, task_plan, max_steps=4)
+
+        self.assertEqual(answer, "done")
+        self.assertEqual(execute.call_count, 4)  # initial search + three replan queries
+        orchestrator.planner.begin_replan.assert_called_once()
+        self.assertEqual(orchestrator.state.retrieval.replan_count, 1)
+        self.assertEqual(len(orchestrator.state.retrieval.frozen_paths), 1)
+        replan_events = [
+            call for call in append_event.call_args_list if call.args[1] == "task_replan_attempt"
+        ]
+        self.assertEqual(len(replan_events), 1)
+
+    def test_finish_with_missing_evidence_returns_to_same_shared_loop(self):
+        orchestrator = Orchestrator()
+        orchestrator.state.task_id = "SHARED_GAP_FEEDBACK_TEST"
+        orchestrator.state.run_metadata = {"max_network_searches": 2}
+        orchestrator.planner.plan_next_action = Mock(
+            side_effect=[
+                {"action": "web_search", "args": {"query": "first evidence direction"}},
+                {"action": "finish_task", "args": {}},
+                {"action": "web_search", "args": {"query": "second evidence direction"}},
+                {"action": "finish_task", "args": {}},
+            ]
+        )
+        orchestrator.planner.observe_tool_result = Mock()
+        orchestrator._complete_model_tool_loop = Mock(return_value="done")
+        task_plan = {
+            "atomic_points": [
+                {
+                    "id": "P1",
+                    "task": "verify the requested fact",
+                    "objective": "verify the requested fact",
+                    "evidence_needed": ["direct source evidence"],
+                    "acceptance_criteria": ["the source supports the fact"],
+                }
+            ]
+        }
+        first = json.dumps({"status": "no_evidence", "results": []})
+        second = json.dumps(
+            {
+                "status": "ok",
+                "results": [
+                    {
+                        "title": "Fact source",
+                        "url": "https://example.com/fact",
+                        "content": "The requested fact is directly stated here. " * 20,
+                        "page_excerpt": "The requested fact is directly stated here. " * 20,
+                        "evidence_origin": "fetched_page_body",
+                        "body_verified": True,
+                    }
+                ],
+            }
+        )
+
+        with (
+            patch(
+                "tools.registry.ToolRegistry.execute",
+                side_effect=[first, second],
+            ) as execute,
+            patch("agent.unified_research.append_task_event") as append_event,
+        ):
+            result = orchestrator._run_single_loop(
+                "verify the requested fact",
+                {},
+                task_plan,
+                max_steps=4,
+            )
+
+        self.assertEqual(result, "done")
+        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(
+            [item["query"] for item in orchestrator.state.retrieval.query_history],
+            ["first evidence direction", "second evidence direction"],
+        )
+        gap_events = [
+            call for call in append_event.call_args_list if call.args[1] == "research_gap"
+        ]
+        self.assertEqual(len(gap_events), 1)
+
     def test_discovery_and_evidence_roles_are_phase_gated(self):
+        self.assertTrue(ToolRegistry.can_execute("finish_task", "DISCOVERY"))
+        self.assertIn("finish_task", ToolRegistry.model_visible_names("DISCOVERY"))
+        self.assertTrue(ToolRegistry.can_execute("finish_task", "RECOVERY"))
         self.assertTrue(ToolRegistry.can_execute("search_web_tavily", "DISCOVERY"))
         self.assertTrue(ToolRegistry.can_execute("search_web_keyless", "DISCOVERY"))
         self.assertTrue(ToolRegistry.can_execute("search_crossref", "DISCOVERY"))

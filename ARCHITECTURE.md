@@ -1,5 +1,7 @@
 # RWKV-ECRA 架构约定
 
+完整的当前架构、量化问题、目标架构和迁移计划见 [`docs/ARCHITECTURE_HANDOFF.zh-CN.md`](docs/ARCHITECTURE_HANDOFF.zh-CN.md)。
+
 ## 目录职责
 
 ```text
@@ -80,3 +82,31 @@ Orchestrator global loop
 `task_plan`、`RetrievalLedger`、网页正文证据和最终合成属于同一条链路；
 不再维护并行的 Fork/Runner 默认架构。实验脚本可以覆盖搜索预算，不能改变
 生产链路的证据边界。
+## Unified research runtime
+
+The production web path is one repeatable research loop. A finish request is
+validated against the shared task evidence store; when coverage is incomplete,
+the controller returns a bounded gap report and the model enters the same
+`web_search` loop again. There is no model-visible recovery/page-fetch branch.
+
+```text
+Planner (existing RWKV prompt contract)
+    -> web_search(query)
+        -> parallel providers
+        -> parallel page fetch
+        -> parallel page/chunk evidence work
+        -> shared EvidenceStore
+        -> compact routing observation
+    -> finish_task
+        -> coverage check
+        -> gap report -> web_search again
+        -> final synthesis when complete
+```
+
+`AgentState.retrieval` is the task-scoped shared state. It owns query history,
+deduplicated source bodies, chunk provenance and coverage metadata. The model
+transcript is only a routing view; it is not the evidence database.
+
+Concurrency is layered and bounded: network provider/page workers are
+independent from page-evidence workers, and every RWKV request still passes
+through the workspace-wide model request gate.

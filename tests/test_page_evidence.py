@@ -37,7 +37,7 @@ class _GroundedFakeLLM:
 
     def text_completion(self, prompt, max_tokens=None):
         self.prompts.append((prompt, max_tokens))
-        source_line = prompt.rsplit("\n\nAssistant:", 1)[0].splitlines()[-1]
+        source_line = prompt.rsplit("\n\n### Assistant", 1)[0].splitlines()[-1]
         return SimpleNamespace(
             content=json.dumps(
                 {
@@ -97,11 +97,11 @@ class PageEvidenceTests(unittest.TestCase):
         self.assertEqual(len(evidence["source_chunks"]), evidence["chunk_count"])
         self.assertIn("第79段", evidence["compact_facts"])
 
-    def test_short_cleaned_page_stays_single_pass(self):
-        page = "\n".join(f"事实{i}: 深圳地铁一号线站点信息。" for i in range(160))
+    def test_subthreshold_cleaned_page_stays_single_pass(self):
+        page = "\n".join(f"事实{i}: 深圳地铁一号线站点信息。" for i in range(120))
         from utils.chunker import get_token_count
 
-        self.assertLessEqual(get_token_count(page), 7000)
+        self.assertLessEqual(get_token_count(page), 2400)
         chunks = build_page_chunks(page)
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0]["token_count"], get_token_count(page))
@@ -110,10 +110,10 @@ class PageEvidenceTests(unittest.TestCase):
         page = "\n".join(f"事实{i}: 深圳地铁一号线站点信息。" for i in range(2600))
         from utils.chunker import get_token_count
 
-        self.assertGreater(get_token_count(page), 7000)
+        self.assertGreater(get_token_count(page), 2400)
         chunks = build_page_chunks(page)
         self.assertGreater(len(chunks), 1)
-        self.assertTrue(all(item["token_count"] <= 4096 for item in chunks))
+        self.assertTrue(all(item["token_count"] <= 2400 for item in chunks))
 
     def test_plain_candidate_is_not_allowed_to_be_a_tool_call(self):
         candidate = parse_chunk_candidate(

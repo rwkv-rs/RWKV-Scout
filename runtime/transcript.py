@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Sequence
 
-from utils.model_events import visible_model_text
+from utils.rwkv_prompt import render_tool_transcript
 
 
 def render_rwkv_transcript(
@@ -13,26 +13,36 @@ def render_rwkv_transcript(
     *,
     tools: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render the plain User/Assistant contract used by RWKV checkpoints."""
+    """Render the native G1i User/Assistant and Tool Call contract.
 
-    rows: list[str] = []
-    for message in messages or []:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "user").casefold()
-        label = {
-            "system": "System",
-            "assistant": "Assistant",
-            "tool": "Tool",
-        }.get(role, "User")
-        rows.append(f"{label}:\n{visible_model_text(message.get('content') or '')}")
+    Tool metadata is folded into a user block.  The renderer appends the
+    explicit ``**Tool Call:**`` continuation marker and never emits a separate
+    ``System:`` turn.
+    """
 
-    transcript = "\n\n".join(rows)
+    rendered_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
     if tools:
-        transcript += (
-            "\n\nSystem:\n"
-            "Select a tool only when the request requires it. Return one JSON object "
-            "with keys name and arguments, or answer directly. Available tools:\n"
+        tool_content = (
+            "Select a tool only when the request requires it. Continue after "
+            "**Tool Call:** with one fenced JSON object containing name and arguments. "
+            "Do not write Tool Output; the controller supplies it. Available tools:\n"
             f"{json.dumps(tools, ensure_ascii=False, separators=(',', ':'))}"
         )
-    return transcript + "\n\nAssistant:"
+        existing_system = next(
+            (
+                message
+                for message in rendered_messages
+                if str(message.get("role") or "").strip().casefold() == "system"
+            ),
+            None,
+        )
+        if existing_system is not None:
+            existing_system["content"] = (
+                f"{str(existing_system.get('content') or '').strip()}\n\n{tool_content}"
+            ).strip()
+        else:
+            rendered_messages.insert(
+                0,
+                {"role": "system", "content": tool_content},
+            )
+    return render_tool_transcript(rendered_messages, json_output=bool(tools))
