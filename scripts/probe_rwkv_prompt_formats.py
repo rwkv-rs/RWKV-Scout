@@ -12,7 +12,6 @@ from pathlib import Path
 
 from clients.llm_client import LLMClient
 from utils.rwkv_prompt import (
-    FINAL_CONTINUATION_STOP_SUFFIXES,
     JSON_CALL_STOP_SUFFIXES,
     build_final_continuation_prompt,
 )
@@ -26,7 +25,7 @@ def main() -> None:
             "prompt": build_final_continuation_prompt(
                 "问题：2024年诺贝尔物理学奖授予了谁？\n\n证据：\n[S1] Nobel Prize 页面说明相关获奖者。"
             ),
-            "stop": list(FINAL_CONTINUATION_STOP_SUFFIXES),
+            "stop": [],
         },
         {
             "id": "official_final_no_evidence",
@@ -34,7 +33,7 @@ def main() -> None:
                 "问题：请确认一个没有提供来源的冷门事实。\n\n证据状态：没有检索到可用页面正文或证据。\n"
                 "请只根据证据作答；如果无法确认，请明确说无法确认。"
             ),
-            "stop": list(FINAL_CONTINUATION_STOP_SUFFIXES),
+            "stop": [],
         },
         {
             "id": "official_tool_call",

@@ -2,6 +2,7 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
+import config
 from agent.tool_protocol import canonicalize_tool_call, normalize_tool_result
 from agent.planner import Planner
 from agent.orchestrator import Orchestrator
@@ -56,6 +57,117 @@ class AgentProductToolTests(unittest.TestCase):
         for row in catalog:
             self.assertIn(row["description"].splitlines()[0], prompt)
 
+    def test_rwkv_cross_validator_owns_finish_or_replan_decision(self):
+        planner = Planner()
+        raw = (
+            '"decision":"replan","missing_points":["P2"],"conflicts":[],'
+            '"next_focus":"confirm the current version","reason":"P2 is missing"}'
+        )
+        planner.llm = Mock()
+        planner.llm.text_completion.return_value = Mock(content=raw)
+        review = planner.cross_validate_research(
+            "question",
+            {
+                "goal": "answer",
+                "atomic_points": [
+                    {
+                        "id": "P2",
+                        "task": "current version",
+                        "objective": "confirm current version",
+                    }
+                ],
+            },
+            "ORIGINAL_SOURCE_SPAN",
+        )
+
+        self.assertEqual(review["decision"], "replan")
+        self.assertEqual(review["missing_points"], ["P2"])
+        self.assertEqual(review["raw_model_output"], raw)
+        prompt = planner.llm.text_completion.call_args.args[0]
+        self.assertIn("ORIGINAL_SOURCE_SPAN", prompt)
+        self.assertIn("There is no later page-summary", prompt)
+        self.assertIn("read their contents yourself", prompt)
+        self.assertNotIn("search query for P2", review["next_focus"])
+
+    def test_rebuilt_planner_uses_one_seeded_diversification_request(self):
+        planner = Planner()
+        seen = []
+
+        class SamplingAwareRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, _prompt, max_tokens=0, stop=None):
+                self_max_tokens = max_tokens
+                del stop
+                seen.append(
+                    {
+                        "temperature": config.get_llm_temperature(),
+                        "seed": config.get_llm_seed(),
+                        "max_tokens": self_max_tokens,
+                    }
+                )
+                return Mock(content='{"name":"finish_task","arguments":{}}')
+
+        planner.llm = SamplingAwareRWKV()
+        planner.rebuild_session(
+            "same question",
+            "shared evidence",
+            {"status": "cross_validation_replan"},
+            "REPLAN",
+        )
+
+        first = planner.plan_next_action("same question", {}, "shared evidence", "REPLAN")
+        second = planner.plan_next_action("same question", {}, "shared evidence", "DISCOVERY")
+
+        self.assertEqual(first["sampling_temperature"], 0.25)
+        self.assertIsInstance(first["sampling_seed"], int)
+        self.assertEqual(seen[0]["seed"], first["sampling_seed"])
+        self.assertEqual(second["sampling_temperature"], 0.1)
+        self.assertIsNone(second["sampling_seed"])
+        self.assertIsNone(seen[1]["seed"])
+
+    def test_repeated_replans_progress_temperature_and_change_only_the_seed(self):
+        planner = Planner()
+        seen = []
+
+        class SamplingAwareRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, _prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                seen.append(
+                    {
+                        "temperature": config.get_llm_temperature(),
+                        "seed": config.get_llm_seed(),
+                    }
+                )
+                return Mock(content='{"name":"finish_task","arguments":{}}')
+
+        planner.llm = SamplingAwareRWKV()
+        decisions = []
+        for generation in range(1, 6):
+            planner.rebuild_session(
+                "same question",
+                "unchanged shared evidence",
+                {"status": "cross_validation_replan", "generation": generation},
+                "REPLAN",
+            )
+            decisions.append(
+                planner.plan_next_action(
+                    "same question", {}, "unchanged shared evidence", "REPLAN"
+                )
+            )
+
+        self.assertEqual(
+            [round(row["sampling_temperature"], 2) for row in decisions],
+            [0.25, 0.35, 0.45, 0.55, 0.55],
+        )
+        seeds = [row["sampling_seed"] for row in decisions]
+        self.assertTrue(all(isinstance(seed, int) for seed in seeds))
+        self.assertEqual(len(set(seeds)), len(seeds))
+        self.assertEqual([row["temperature"] for row in seen], [0.25, 0.35, 0.45, 0.55, 0.55])
+        self.assertEqual([row["seed"] for row in seen], seeds)
+
     def test_multiple_deterministic_tools_run_in_one_model_owned_loop(self):
         orchestrator = Orchestrator()
         orchestrator.state.task_id = "MULTI_TOOL_LOOP_TEST"
@@ -83,6 +195,7 @@ class AgentProductToolTests(unittest.TestCase):
             ]
         )
         orchestrator.planner.observe_tool_result = Mock()
+        orchestrator._cross_validate_research = Mock(return_value={"decision": "finish"})
         orchestrator._complete_model_tool_loop = Mock(return_value="done")
         with patch("agent.orchestrator.append_task_event"):
             result = orchestrator._run_single_loop(
@@ -120,12 +233,14 @@ class AgentProductToolTests(unittest.TestCase):
             ]
         )
         orchestrator.planner.observe_tool_result = Mock()
+        orchestrator._cross_validate_research = Mock(return_value={"decision": "finish"})
         orchestrator._complete_model_tool_loop = Mock(return_value="current date")
         with patch("agent.orchestrator.append_task_event"):
             result = orchestrator._run_single_loop(
                 "现在的日期是什么？",
                 {},
                 {
+                    "task_mode": "current_time",
                     "atomic_points": [
                         {
                             "id": "P1",
@@ -184,6 +299,23 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["evidence_origin"], "structured_api_record")
         self.assertEqual(result["freshness_policy"]["mode"], "retrieval_time_only")
 
+    @patch("tools.connectors.get_current_weather")
+    def test_weather_not_found_is_not_promoted_to_structured_evidence(self, weather):
+        weather.return_value = json.dumps(
+            {"status": "not_found", "location": "Missing Place"}
+        )
+        result = json.loads(
+            ToolRegistry.execute(
+                "connector_lookup",
+                {"connector": "weather", "query": "Missing Place"},
+                {"agentic_tool_loop": True},
+                phase="ALL",
+            )
+        )
+        self.assertEqual(result["status"], "no_results")
+        self.assertEqual(result["results"], [])
+        self.assertFalse(result["evidence_ready"])
+
     def test_freshness_policy_is_explicit_and_unknown_dates_are_not_guessed(self):
         policy = build_freshness_policy("请给出截至 2024-12-31 的信息")
         self.assertEqual(policy["as_of"], "2024-12-31")
@@ -193,6 +325,9 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertEqual(within["freshness"]["state"], "within_cutoff")
         self.assertEqual(after["freshness"]["state"], "after_cutoff")
         self.assertEqual(unknown["freshness"]["state"], "unknown_date")
+        chinese_policy = build_freshness_policy("截至 2026 年 7 月 29 日，查询最新稳定版本")
+        self.assertEqual(chinese_policy["as_of"], "2026-07-29")
+        self.assertEqual(chinese_policy["mode"], "explicit_cutoff")
 
     def test_answer_fact_check_does_not_modify_model_text(self):
         answer = "发布日期是 2024-10-07，版本为 3.13.0，间隔 559 days。"
@@ -212,6 +347,67 @@ class AgentProductToolTests(unittest.TestCase):
         )
         self.assertEqual(cutoff["status"], "needs_review")
         self.assertEqual(len(cutoff["freshness_violations"]), 1)
+
+    def test_answer_fact_check_flags_unseen_compound_build_identifiers(self):
+        result = check_answer_facts(
+            "The source shows cu118, not cu117 or cu121.",
+            evidence=[{"source_excerpt": "Use the cu118 wheel index."}],
+        )
+
+        self.assertEqual(result["status"], "needs_review")
+        self.assertEqual(
+            {row["value"] for row in result["unsupported_claims"]},
+            {"cu117", "cu121"},
+        )
+        self.assertIn(
+            "cu118",
+            {row["value"] for row in result["supported_claims"]},
+        )
+
+    def test_answer_fact_check_keeps_prefixed_versions_whole(self):
+        result = check_answer_facts(
+            "Fetch was experimental in Node.js v18.0.0 and stable in v21.0.0.",
+            evidence=[
+                {
+                    "source_excerpt": (
+                        "Node.js v18.0.0 had an experimental Fetch API; "
+                        "Node.js v21.0.0 made it stable."
+                    )
+                }
+            ],
+        )
+
+        self.assertEqual(result["status"], "supported")
+        self.assertEqual(
+            {row["value"] for row in result["supported_claims"]},
+            {"v18.0.0", "v21.0.0"},
+        )
+
+    def test_answer_fact_check_ignores_versions_in_citation_destinations(self):
+        result = check_answer_facts(
+            (
+                "Python 3.14 supports this procedure. "
+                "[S1](https://docs.python.org/3.14/howto/example.html)"
+            ),
+            evidence=[{"source_excerpt": "Python 3.14 supports this procedure."}],
+        )
+
+        self.assertEqual(result["claim_count"], 1)
+        self.assertEqual(result["supported_claims"][0]["value"], "3.14")
+
+    def test_answer_fact_check_allows_a_literal_user_scope_anchor(self):
+        result = check_answer_facts(
+            "For Python 3.14, use the documented build option.",
+            evidence=[{"source_excerpt": "Use the documented build option."}],
+            user_supplied_literals=["3.14"],
+        )
+
+        self.assertEqual(result["status"], "supported")
+        self.assertEqual(result["unsupported_count"], 0)
+        self.assertEqual(
+            result["supported_claims"][0]["support_basis"],
+            "user_supplied_scope",
+        )
 
 if __name__ == "__main__":
     unittest.main()

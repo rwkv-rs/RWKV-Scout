@@ -54,7 +54,10 @@ class VLLMAnswerer:
             "RWKV_7B_CHAT_ENDPOINT",
             "http://127.0.0.1:29572/v1/chat/completions",
         )
-        self.api_key = os.environ.get("RWKV_7B_API_KEY", "rwkv-skills")
+        self.api_key = os.environ.get("RWKV_7B_API_KEY") or os.environ.get(
+            "RWKV_ECRA_LLM_API_KEY",
+            "",
+        )
         self.model = os.environ.get(
             "RWKV_7B_MODEL", "rwkv7-g1h-7.2b-20260710-ctx10240"
         )

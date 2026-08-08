@@ -35,7 +35,7 @@ class GlobalSharedLoopTests(unittest.TestCase):
             run_loop.assert_called_once()
             self.assertEqual(
                 orchestrator.state.run_metadata["retrieval_strategy"],
-                "single_loop",
+                "single_rwkv_loop",
             )
             self.assertEqual(
                 orchestrator.state.run_metadata["retrieval_strategy_decision"]["point_count"],

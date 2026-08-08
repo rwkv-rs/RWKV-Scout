@@ -16,6 +16,7 @@ from config import (
 )
 from runtime import get_model_backend
 from utils.chunker import get_token_count
+from utils.concurrency import shutdown_pool, submit_with_context
 from utils.runtime_gate import model_request_slot
 from utils.token_tracker import current_task_id, global_token_tracker, model_lane
 
@@ -204,11 +205,20 @@ class SLMClient:
             len(contents),
         )
         results = [""] * len(contents)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                executor.submit(contextvars.copy_context().run, generate_one, content): index
-                for index, content in enumerate(contents)
-            }
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+        futures = {
+            submit_with_context(executor, generate_one, content): index
+            for index, content in enumerate(contents)
+        }
+        cancelled = False
+        try:
             for future in concurrent.futures.as_completed(futures):
                 results[futures[future]] = future.result()
+        except concurrent.futures.TimeoutError:
+            # Do not wait on active RWKV requests after the outer case has
+            # expired; the runner owns the answer-shaped timeout fallback.
+            cancelled = True
+            raise
+        finally:
+            shutdown_pool(executor, list(futures), cancelled=cancelled)
         return results

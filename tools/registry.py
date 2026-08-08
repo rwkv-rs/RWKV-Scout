@@ -85,7 +85,6 @@ class ToolRegistry:
                 "calculator",
                 "current_time",
                 "date_diff",
-                "answer_user",
                 "finish_task",
             } and meta.get("phase") != "LEGACY"
         # Termination is a model-visible control action throughout the

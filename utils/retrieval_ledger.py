@@ -109,6 +109,17 @@ class RetrievalLedger:
         self._requests: dict[str, dict[str, Any]] = {}
         self._blocked_duplicates: Counter[str] = Counter()
 
+    def reset(self) -> None:
+        """Clear one task episode while preserving the ledger instance."""
+
+        with self._lock:
+            self._searches.clear()
+            self._query_counts.clear()
+            self._urls.clear()
+            self._branch_queries.clear()
+            self._requests.clear()
+            self._blocked_duplicates.clear()
+
     @staticmethod
     def request_key(action: Any, arguments: Mapping[str, Any] | None) -> str:
         """Build a stable identity for one model-selected tool request."""

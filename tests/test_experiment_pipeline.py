@@ -136,14 +136,14 @@ class ExperimentPipelineTests(unittest.TestCase):
         )
         self.assertEqual([item["ref_id"] for item in context["selected_evidence"]], ["S1", "S2", "S3"])
         self.assertLessEqual(context["context_tokens"], 10000)
-        self.assertIn("BEGIN EVIDENCE SOURCE S3", context["text"])
+        self.assertIn("[S3] Source 3", context["text"])
         self.assertEqual(context["usable_evidence_count"], 3)
         self.assertEqual(
             sum(item["chunk_count"] for item in context["selected_evidence"]),
             context["chunk_count"],
         )
 
-    def test_relevance_beats_large_generic_homepage_for_source_ordering(self):
+    def test_context_builder_does_not_override_upstream_source_ordering(self):
         generic = "nginx homepage navigation and unrelated release notes. " * 700
         relevant = (
             "nginx WebSocket reverse proxy configuration uses proxy_http_version 1.1, "
@@ -175,7 +175,7 @@ class ExperimentPipelineTests(unittest.TestCase):
             },
             constraints={"strategy_config": {"context_source_count": 1}},
         )
-        self.assertEqual(context["selected_evidence"][0]["url"], "https://nginx.org/en/docs/http/websocket.html")
+        self.assertEqual(context["selected_evidence"][0]["url"], "https://nginx.org/en/")
 
     def test_duplicate_source_rows_do_not_consume_context_slots(self):
         body = "The primary source states the release date is 2026-07-30. " * 12
@@ -219,7 +219,7 @@ class ExperimentPipelineTests(unittest.TestCase):
             ["https://example.org/fact/#section", "https://example.net/confirmation"],
         )
 
-    def test_configured_source_count_does_not_admit_unrelated_pages(self):
+    def test_configured_source_count_is_only_a_resource_cap(self):
         relevant = "The WebSocket reverse proxy uses the Upgrade header. " * 8
         unrelated = "This page is a generic download index with release archives. " * 30
         context = build_evidence_context(
@@ -247,14 +247,18 @@ class ExperimentPipelineTests(unittest.TestCase):
             constraints={"strategy_config": {"context_source_count": 2}},
             query="WebSocket reverse proxy Upgrade header",
         )
-        self.assertEqual([item["url"] for item in context["selected_evidence"]], ["https://example.org/websocket"])
+        self.assertEqual(
+            [item["url"] for item in context["selected_evidence"]],
+            ["https://example.org/websocket", "https://example.org/downloads"],
+        )
 
     def test_experiment_model_contract_is_the_active_rwkv_13b_profile(self):
         profile = get_experiment_model_config()
         self.assertEqual(profile["model"], "rwkv7-g1i-13.3b-20260805-ctx16384")
         self.assertEqual(profile["endpoint"], LLM_ENDPOINTS["local_13b"]["base_url"])
         self.assertEqual(profile["context_length"], 16384)
-        self.assertEqual(validate_experiment_model_contract()["api_key"], "rwkv-skills")
+        self.assertNotIn("api_key", profile)
+        self.assertNotIn("api_key", validate_experiment_model_contract())
 
     def test_historical_rwkv_7b_contract_remains_explicitly_validatable(self):
         profile = get_experiment_model_config("local_7b")
@@ -508,10 +512,11 @@ class ExperimentPipelineTests(unittest.TestCase):
                     "checkpoint_directory": str(root / "checkpoints"),
                 }, clear=False),
                 patch("scripts.preflight.probe_model_service", return_value={"available": True, "model_match": True}),
+                patch("scripts.preflight.config.get_llm_api_key", return_value="test-local-key"),
             ):
                 result = run_preflight()
             serialized = json.dumps(result, ensure_ascii=False)
-            self.assertNotIn("rwkv-skills", serialized)
+            self.assertNotIn("test-local-key", serialized)
             self.assertNotIn('"api_key"', serialized)
             self.assertTrue(result["contract"]["model"]["api_key_configured"])
 
@@ -634,6 +639,18 @@ class ExperimentPipelineTests(unittest.TestCase):
             self.assertEqual(calls["count"], 1)
             self.assertEqual([event["type"] for event in events], ["error"])
 
+    def test_retry_policy_does_not_repeat_exhausted_quota_failures(self):
+        calls = {"count": 0}
+
+        @retry_with_fallback(max_retries=3, delay=0, backoff=1)
+        def exhausted():
+            calls["count"] += 1
+            raise RuntimeError("HTTP 432: request exceeds the plan usage limit")
+
+        with self.assertRaises(RuntimeError):
+            exhausted()
+        self.assertEqual(calls["count"], 1)
+
     def test_retry_policy_can_fail_fast_on_timeouts(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "output"
@@ -650,6 +667,27 @@ class ExperimentPipelineTests(unittest.TestCase):
                     with self.assertRaises(TimeoutError):
                         timed_out()
                     events = reconstruct_run("TIMEOUT_1", output)["events"]
+            finally:
+                current_task_id.reset(token)
+            self.assertEqual(calls["count"], 1)
+            self.assertEqual([event["type"] for event in events], ["error"])
+
+    def test_retry_policy_never_repeats_exhausted_task_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            token = current_task_id.set("TASK_BUDGET_1")
+            calls = {"count": 0}
+
+            @retry_with_fallback(max_retries=3, delay=0, backoff=1)
+            def expired_task():
+                calls["count"] += 1
+                raise TaskTimeoutError("analysis task expired")
+
+            try:
+                with patch.dict("config.DATA_PIPELINE", {"output_directory": str(output)}, clear=False):
+                    with self.assertRaises(TaskTimeoutError):
+                        expired_task()
+                    events = reconstruct_run("TASK_BUDGET_1", output)["events"]
             finally:
                 current_task_id.reset(token)
             self.assertEqual(calls["count"], 1)
@@ -736,14 +774,18 @@ class ExperimentPipelineTests(unittest.TestCase):
                 orchestrator.planner.begin_task = lambda *_args: None
                 orchestrator.planner.plan_next_action = lambda *_args: next(decisions)
                 orchestrator.planner.observe_tool_result = lambda *_args: None
+                orchestrator.planner.rebuild_session_after_review = lambda *_args: None
+                orchestrator._cross_validate_research = lambda *_args, **_kwargs: {
+                    "decision": "replan",
+                    "missing_points": ["P1"],
+                }
                 result = orchestrator._run_model_tool_loop("find stations", {})
 
             self.assertIn("bounded summary", result)
-            self.assertEqual([item[0] for item in executed], ["web_search"] * 4)
+            # The controller reports exact duplicates to RWKV and never
+            # creates a replacement query of its own.
+            self.assertEqual([item[0] for item in executed], ["web_search"])
             self.assertEqual(len(synthesis_calls), 1)
-            # A blocked/repeated request is recoverable evidence feedback, not
-            # a terminal reason.  The loop now reaches its configured global
-            # step guard and then forces the final RWKV summary.
             self.assertEqual(synthesis_calls[0]["termination_reason"], "max_steps_reached")
 
     def test_runtime_gate_is_persisted_and_released(self):
@@ -795,7 +837,7 @@ class ExperimentPipelineTests(unittest.TestCase):
                         time.sleep(0.03)
             trace = reconstruct_run("BUDGET_TRACE", output)
             statuses = [event.get("status") for event in trace["events"] if event["type"] == "runtime_budget"]
-            self.assertEqual(statuses, ["started", "timed_out"])
+            self.assertEqual(statuses, ["started", "network_error"])
 
     def test_model_call_trace_keeps_visible_io_and_drops_hidden_thought(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -819,7 +861,7 @@ class ExperimentPipelineTests(unittest.TestCase):
             self.assertEqual(model_output["output"], "visible query")
             self.assertNotIn("private", json.dumps(trace))
 
-    def test_high_risk_policy_is_in_prompt_and_answer_gate(self):
+    def test_offline_risk_policy_does_not_enter_or_rewrite_runtime_answer(self):
         policy = {"domain": "medicine_literacy", "risk_checks": ["professional confirmation"]}
         self.assertFalse(validate_risk_answer("Take this as a diagnosis.", policy)["valid"])
         self.assertTrue(validate_risk_answer("仅供参考，请咨询专业人员。", policy)["valid"])
@@ -836,9 +878,10 @@ class ExperimentPipelineTests(unittest.TestCase):
             llm=llm,
             constraints=policy,
         )
-        self.assertIn("high-risk medical information", llm.prompt)
-        self.assertIn("qualified professional", llm.prompt)
-        self.assertTrue(result["content"])
+        self.assertNotIn("high-risk medical information", llm.prompt)
+        self.assertNotIn("qualified professional", llm.prompt)
+        self.assertEqual(result["content"], llm.prompt and result["model_output"])
+        self.assertEqual(result["answer_quality"], {})
 
 
 if __name__ == "__main__":

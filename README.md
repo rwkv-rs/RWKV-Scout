@@ -1,181 +1,317 @@
 # RWKV-ECRA
 
-模型运行时迁移说明见 [docs/MODEL_RUNTIME.zh-CN.md](docs/MODEL_RUNTIME.zh-CN.md)：项目支持直接加载本地 RWKV checkpoint，OpenAI 兼容服务仅作为过渡适配器。
+RWKV-ECRA 是一个以 RWKV 为决策核心的联网检索 Agent。它面向需要实时网页、官方资料、结构化数据和多来源核验的问题：RWKV 负责拆解任务、选择工具与查询、判断是否需要继续检索，以及生成最终回答；工程层负责稳定执行工具、抓取和清洗网页、分块提取证据、隔离并发状态、记录 trace 与控制资源。
 
-语言：中文 | [English](README.en.md)
+当前版本定位为**可运行、可审计的公开 Beta**。单轮检索 Agent 的主链路、并发控制、request-level temperature、网页证据抽取、交叉验证和前后端均已实现；它不是通用长程任务执行器，长任务持久化、断点恢复和 Task Graph 将在后续本地开发分支中实现。
 
-项目结构约定见 [ARCHITECTURE.md](ARCHITECTURE.md)。
-实验执行与评测见 [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)，外部项目评估见 [docs/external_projects/wigolo.md](docs/external_projects/wigolo.md)。
+## 设计边界
 
-## 功能介绍和效果展示
+- RWKV 拥有任务计划、工具、查询、来源、replan 和最终文本的决策权。
+- Controller 执行模型选择的动作，不用规则替换检索路线，也不改写最终回答。
+- Claim Ledger 和 Retrieval Ledger 用于整理共享证据与避免完全重复的请求，不作为算法拒答门禁。
+- 页面层允许确定性的抓取、正文清洗、结构解析和有限候选补偿，但最终事实选择与表达仍由 RWKV 完成。
+- 生产链路返回模型输出；`pass` / `no-pass` 只属于离线评测，不参与用户回答。
 
-本工具专注长文本精炼分析，对多元信息做分维度分析，进行「信息减法」帮助用户快速定位核心价值。
-与 DeepResearch 的深度扩散式调研不同，它不会造成可能的信息冗余，也不会替你做决定，而是呈现一份精炼的定性分析报告。
+## 当前架构
 
-启用前端后，可以逐个输入研究内容进行排队；
-![](./Imgs/example.png)
+下图根据当前代码入口和实际调用关系整理：
 
-最终的报告会呈现对于已有内容的分析并标注来源，更多示例可以在 data/output 目录下查看，为了避免版权问题，input目录下仅存放了在arxiv上开放获取的论文。
-![](./Imgs/example1.png)
+```mermaid
+flowchart TD
+    U["CLI / Web UI / API Client"] --> API["FastAPI + Task Runner"]
+    API --> O["Orchestrator"]
+    O --> TP["RWKV Task Plan"]
+    TP --> C["Single Research Controller"]
+    C --> P["RWKV Planner"]
+    P -->|tool + exact arguments| R["Tool Registry / Harness"]
+    R --> DT["Calculator / Date / Time / Structured Tools"]
+    R --> WS["Web Search Providers"]
+    WS --> FC["Fetch + Clean + Chunk"]
+    FC --> PE["RWKV Page Evidence Extraction"]
+    DT --> S["Per-task Shared State"]
+    PE --> S
+    S --> RL["Retrieval Ledger"]
+    S --> CL["Claim Ledger"]
+    RL --> P
+    CL --> P
+    P -->|finish_task| V["RWKV Cross-validation"]
+    V -->|missing evidence| RP["Rebuild Planner Session"]
+    RP --> P
+    V -->|finish| EC["Bounded Evidence Context"]
+    EC --> W["RWKV Final Writer"]
+    W --> A["Unmodified Final Answer"]
 
+    T["Request-level Temp Scope"] -.-> TP
+    T -.-> P
+    T -.-> PE
+    T -.-> V
+    T -.-> W
+    TP --> RT["LLM Client"]
+    P --> RT
+    PE --> RT
+    V --> RT
+    W --> RT
+    RT --> OC["OpenAI-compatible RWKV / Direct RWKV"]
+```
 
-## 使用方法
+### 核心组件
 
-### 1. 准备环境
+| 组件 | 主要文件 | 职责 |
+| --- | --- | --- |
+| API 与任务生命周期 | `api.py`, `app/services/task_runner.py` | 创建后台任务、隔离请求配置、记录历史、暴露 health/readiness/metrics |
+| Orchestrator | `agent/orchestrator.py` | 初始化单任务状态、调用 RWKV 任务规划、启动研究循环、构造最终证据上下文 |
+| Planner / Replanner | `agent/planner.py` | 由 RWKV 生成任务点、选择下一工具调用、交叉验证证据、在需要时重建 planner 会话 |
+| 单一研究循环 | `agent/unified_research.py` | 执行模型动作、反馈工具结果、冻结完全重复路径、连接 replan 和最终写作 |
+| 工具 Harness | `tools/registry.py`, `tools/builtin.py` | 暴露确定性的参数协议和工具目录；不替 RWKV 选择路线 |
+| 搜索与网页管线 | `tools/web_search_generic.py`, `agent/page_evidence.py` | 并发搜索、抓取、正文清洗、分块、RWKV 证据抽取和有限结构化补偿 |
+| 任务状态与账本 | `agent/state.py`, `agent/claim_ledger.py`, `utils/retrieval_ledger.py` | 保存本任务的 query、URL、证据、claim、重复请求、replan 和冻结路径 |
+| 最终写作 | `agent/retrieval_synthesis.py` | 在 16K 上下文预算内选择证据并请求 RWKV 写作，返回原始模型文本 |
+| 模型运行时 | `clients/llm_client.py`, `runtime/compat.py`, `runtime/direct_rwkv.py` | 连接 OpenAI-compatible `/v1` 服务或直接 RWKV runtime，传播采样配置 |
+| Trace 与资源控制 | `utils/task_events.py`, `utils/runtime_gate.py`, `utils/time_budget.py` | 记录模型输入/输出、工具调用、温度和错误；限制并发与单任务时长 |
 
-建议使用 Python 3.10 或更新版本。
+### 一次请求如何执行
 
-安装当前代码锁定的依赖（建议使用虚拟环境）：
+1. API 或 CLI 创建独立 `AgentState`。
+2. RWKV 生成任务计划；工程层不通过 Intake 规则改写计划。
+3. RWKV 在单一循环中逐步选择工具、查询、URL 和参数。
+4. 搜索结果被抓取、清洗和分块；页面证据抽取结果写入本任务的共享状态。
+5. RWKV 请求 `finish_task` 时，独立的 RWKV 交叉验证请求判断是结束还是重新规划。
+6. 若需要补证据，系统保留账本、重建 planner 会话，再由 RWKV 选择新路径。
+7. 若可以结束，系统只投影必要证据到最终上下文，RWKV 生成回答，代码不删句、不改写、不做摘录替代。
+
+## Temp 机制
+
+这里的 `temp` 指模型请求中的 `temperature`。它的目标**不是简单提高随机性**，而是让不同请求、不同推理阶段选择适合的生成行为：事实提取和最终写作倾向稳定，检索策略和 replanning 允许更多探索。
+
+### 当前策略
+
+| 阶段 | 当前默认值 | 行为 |
+| --- | ---: | --- |
+| Task-plan creation | 全局默认 `0.00001` | 当前尚未设置独立 task-plan stage，使用稳定低温 |
+| Planner tool decision | `0.1` | 保持工具 JSON 稳定，同时允许少量搜索策略变化 |
+| Replanner generation 1 | `0.25` | 在旧路径不足时扩大探索范围 |
+| Later replans | 每代 `+0.1`，最高 `0.55` | 避免每次重建仍生成完全相同的路径 |
+| Cross-validation | `0.1` | 稳定输出 `finish` / `replan` 结构 |
+| Page evidence extraction | 全局默认 `0.00001` | 当前使用低温抽取事实与 span |
+| Final answer writer | 全局默认 `0.00001` | 当前使用低温生成事实回答 |
+
+阶段值位于 `config.json` 的 `MODEL_RUNTIME.sampling`。全局默认值来自当前 provider 的 `temperature`，可用 `RWKV_ECRA_LLM_TEMPERATURE` 覆盖。
+
+### 完整调用链
+
+```text
+Planner / Cross-validation stage
+  -> get_model_stage_temperature(stage)
+  -> replanner 可调用 get_model_replan_temperature(generation)
+  -> model_sampling_parameters(temp, optional seed)
+  -> request-local ContextVar
+  -> LLMClient
+  -> runtime/compat.py 或 runtime/direct_rwkv.py
+  -> 当前请求 payload.temperature
+  -> 推理服务
+```
+
+`ContextVar` 的作用是隔离并发任务：一个任务的 replanner 即使临时使用 `0.45`，也不会把另一个任务的提取或最终回答改成同一温度。scope 退出后会自动恢复原值。
+
+OpenAI-compatible runtime 会在每个 `/chat/completions` 或 `/completions` 请求中读取当前温度并写入 payload。Replanner 还会生成 request-local seed；其他阶段默认不发送 seed。Direct RWKV runtime 同样逐请求读取当前温度，但当前不使用 seed。
+
+### Request-level temp 与全局固定 temp
+
+- 全局固定 temp：进程启动后所有请求共享一个值，无法区分规划、提取、验证和写作。
+- Request-level temp：每次模型调用都能独立选择值，并且并发隔离；这是当前 planner/replanner/cross-validation 已采用的方式。
+- 全局值仍作为未显式分类阶段的 fallback。目前 task-plan、页面提取和 final writer 还没有独立 stage policy，这是当前实现的已知不完整部分。
+- Planner 和 cross-validation 事件会记录 `sampling_temperature`、可选 `sampling_seed`、prompt 与模型输出，方便分析温度与结果的关系；并非所有模型请求都已记录独立的策略原因。
+
+## 并发模型
+
+并发分成互不混用的层级：
+
+- 跨任务并发：实验默认最多 4 个案例；每个案例拥有独立状态。
+- 搜索 provider 与网页抓取：网络 I/O 并发，并有单 host 限制。
+- 页面证据抽取：使用独立 chunk lane，并限制单任务占用的模型槽。
+- Planner、交叉验证和最终写作：保留 control slots，避免被大量 chunk 请求挤占。
+
+共享状态只在**同一个任务内部**共享。不同用户或不同测试题不会共享证据、claim、planner transcript 或 temp scope。
+
+## 环境要求
+
+- Linux 或 WSL2
+- Python 3.10+
+- [uv](https://docs.astral.sh/uv/)
+- Node.js 20.19+（仅前端需要）
+- OpenAI-compatible RWKV 服务，或能够直接加载的本地 RWKV checkpoint
+
+## 安装与配置
+
+安装 Python 依赖和开发测试依赖：
 
 ```bash
-pip install -r requirements.txt
+uv sync --dev
 ```
 
-> 当前生产实验仍使用本地 RWKV 13.3B 合约：模型 `rwkv7-g1i_preview4922-13.3b-20260720-ctx12288`，端点 `http://172.21.122.93:29613/v1`，上下文长度 `12288`。项目现在提供项目自有的 `direct_rwkv` 运行时，可直接加载 checkpoint；兼容 `/v1` 服务仅作为迁移适配器。切换前请阅读 [docs/MODEL_RUNTIME.zh-CN.md](docs/MODEL_RUNTIME.zh-CN.md)。旧 RWKV 7.2B 合约保留为独立历史基线，不能与 13.3B 结果混合比较。
-
-> 配置了基于火山引擎和飞桨星河的大模型调用，其中飞桨配置的大模型调用内嵌搜索引擎，已设置强制引用，针对火山引擎配置了`tavily`，后续会增加搜索更全面的其他引擎。
-
-### 可选：接入本地 wigolo 联网检索
-
-项目现在支持将 [wigolo](https://github.com/KnockOutEZ/wigolo) 作为本地网页检索后端。默认配置为 `auto`：
-
-- 如果本机的 wigolo REST 服务可用，优先使用 wigolo 的搜索和网页抓取；
-- 如果 wigolo 尚未安装、尚未启动或请求失败，自动回退到当前已有的无 API Key 公开搜索；
-- 当前不需要任何 Tavily、OpenAI 或其他云端 API Key。
-
-先按 wigolo 项目说明完成本地初始化，然后启动 REST 服务：
-
-    npx wigolo init
-    npx wigolo serve
-
-默认地址是 `http://127.0.0.1:3333`。如地址或模式不同，可通过环境变量调整：
-
-    # 默认：优先 wigolo，失败时回退
-    RWKV_ECRA_WIGOLO_MODE=auto
-    WIGOLO_BASE_URL=http://127.0.0.1:3333
-
-    # 只使用原有无 Key 搜索
-    RWKV_ECRA_WIGOLO_MODE=off
-
-    # 强制使用 wigolo，服务不可用时直接返回错误
-    RWKV_ECRA_WIGOLO_MODE=only
-
-wigolo 返回的网页内容会继续被标记为不可信证据，不能作为系统指令执行；搜索结果、原文摘录、引用 ID 和评分会写入检索报告，供后续引用展示使用。
-
-### 模型运行时配置说明
-
-工作流现在依赖内部 `ModelBackend`。将 `MODEL_RUNTIME.backend` 设置为 `direct_rwkv` 后，项目会通过 Albatross 直接加载本地 RWKV checkpoint，不需要模型 API 服务；`openai_compat` 只用于迁移或远程兼容服务。
-
-详细配置、环境变量、预检和直连烟囱测试见 [docs/MODEL_RUNTIME.zh-CN.md](docs/MODEL_RUNTIME.zh-CN.md)。
-
-### 3. 参数配置说明
-
-此处为 config.json 中的参数说明
-
-> 运行前需要配置的部分
-
-| 参数名 | 参数功能 | 可选项 |
-| :--- | :--- | :--- |
-| `LLM_PROVIDER` | 当前运行时模型来源 | `local_7b` `local_13b` `local_direct_1p5b` `baidu` `volcengine` |
-| `API_KEYS.baidu` | 飞桨星河的 API_Key | `任意合法 Key`（不用可以不配置） |
-| `API_KEYS.volcengine` | 火山引擎的 API_Key | `任意合法 Key`（不用可以不配置） |
-| `API_KEYS.tavily` | tavily 搜索引擎的 API_Key | `任意合法 Key` |
-
-其他已预制可修改的参数请查看附录
-
-### 4. 纯命令行启动
+创建本地配置。`.env.local` 会在 `config.py` 导入时自动加载，并且不会覆盖进程中已经设置的环境变量：
 
 ```bash
-cd RWKV-ECRA
-python main.py
+cp .env.example .env.local
+chmod 600 .env.local
 ```
 
-启动可以在命令行输入指令：
-```
-帮我看看基于RWKV的研究的动态，并看看有什么目前和RWKV无直接关系，但是有可能后续能支持RWKV研究或被RWKV支撑进行研究的，注意不要只看本地的文件，还要搜一下
-```
-
-### 5. 可视化启动
+至少配置以下项目：
 
 ```bash
-python api.py
+RWKV_ECRA_LLM_BASE_URL=http://127.0.0.1:29613/v1
+RWKV_ECRA_LLM_API_KEY=replace-with-local-api-key
+RWKV_ECRA_LLM_MODEL=rwkv7-g1i-13.3b-20260805-ctx16384
+RWKV_ECRA_LLM_CONTEXT_LENGTH=16384
 ```
-启动后，服务默认在 http://0.0.0.0:8787 运行，前端已适配此端口；
 
-然后启动另一个终端，进入 `RWKV-ECRA/frontend`
+若页面提取端使用不同凭证，可设置 `RWKV_ECRA_SLM_PASSWORD`；未设置时复用 `RWKV_ECRA_LLM_API_KEY`。
+
+搜索 provider 是可选的：
 
 ```bash
-npm install
+TAVILY_API_KEY=replace-with-your-key
+TAVILY_API_KEYS=["key-1","key-2"]
+RWKV_ECRA_WIGOLO_MODE=auto
+WIGOLO_BASE_URL=http://127.0.0.1:3333
+```
+
+没有 Tavily key 时仍可使用无 key provider；本地 [wigolo](https://github.com/KnockOutEZ/wigolo) 也可作为搜索后端。不要把真实 key 写入 `config.json`、`.env.example` 或任何 benchmark 文件。
+
+### Direct RWKV runtime
+
+默认 backend 是 `openai_compat`。若改为 `direct_rwkv`，需要自行准备 vllm-rwkv 源码、checkpoint 和词表路径：
+
+```bash
+RWKV_ECRA_RWKV_ENGINE_ROOT=/path/to/vllm-rwkv
+RWKV_ECRA_RWKV_MODEL_PATH=/path/to/model.pth
+RWKV_ECRA_RWKV_VOCAB_PATH=/path/to/rwkv_vocab_v20230424.txt
+RWKV_ECRA_RWKV_DEVICE=cuda
+```
+
+模型权重和外部推理引擎不属于本仓库，也不会上传 GitHub。
+
+## 运行
+
+命令行单次执行：
+
+```bash
+uv run python main.py "查询 Python 3.13.0 的正式发布日期并给出官方来源"
+```
+
+启动 API：
+
+```bash
+uv run rwkv-ecra-api
+```
+
+默认地址为 `http://127.0.0.1:8787`。可用 `RWKV_ECRA_API_HOST`、`RWKV_ECRA_API_PORT`、`RWKV_ECRA_API_WORKERS` 覆盖。
+
+启动前端：
+
+```bash
+cd frontend
+npm ci
 npm run dev
 ```
-> 此处需要提前配置 Node.js，配置方法请查看 Node.js 官网；
 
-启动后，默认运行在 `http://127.0.0.1:5177`
+默认前端地址为 `http://127.0.0.1:5177`。
 
-### 6. 生产预检与运行监控
+## 验证与常用命令
+
+Python 测试：
 
 ```bash
-python -m scripts.preflight --dataset data/evaluation/dynamic.jsonl
+uv run pytest -q
 ```
 
-服务提供 `/healthz`、`/readyz`、`/api/v1/metrics/operational` 和
-Prometheus 兼容的 `/metrics`。`/readyz` 会在本地 RWKV 服务不可用时明确
-返回 `not_ready`，不会把离线检索诊断当成质量通过。
+前端可复现构建：
 
-完整的动态评测、参考答案审核、盲测和回滚决策流程见
-[docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)。
+```bash
+cd frontend
+npm ci
+npm run build
+```
 
-## 后续优化计划
+不要求模型在线的预检：
 
-- 扩展直接 RWKV 运行时，增加安全的同长度批处理和独立本地 worker 进程；
-- 优化效果和执行路径
-- 美化前端和细化日志，目前前端不够漂亮，逻辑也不够优美
-- 支持更多来源的大模型和搜索引擎
-- 目前还存在一些引用解析和传递问题，近期会修复
+```bash
+uv run rwkv-ecra-preflight \
+  --dataset data/evaluation/preflight_smoke_10.jsonl \
+  --allow-model-down
+```
 
-## 附录
-### 1. 其他可修改参数
-> 已设置了默认参数，可更改的部分
+模型服务在线时执行完整 readiness 预检：
 
-| 参数名 | 参数功能 | 可选项 |
-| :--- | :--- | :--- |
-| `LLM_ENDPOINTS.volcengine.base_url` | 火山引擎的模型调用链接 | `https://ark.cn-beijing.volces.com/api/v3` |
-| `LLM_ENDPOINTS.volcengine.model` | 火山引擎的模型名，详情查询火山引擎文档 | `doubao-seed-2-0-lite-260428` |
-| `LLM_ENDPOINTS.volcengine.reasoning_effort` | 火山引擎模型的思考级别，详情查看火山引擎文档 | `medium` |
-| `LLM_ENDPOINTS.baidu.base_url` | 飞桨星河的模型调用链接 | `"https://aistudio.baidu.com/llm/lmapi/v3"` |
-| `LLM_ENDPOINTS.baidu.model` | 飞桨星河的模型名 | `ernie-5.1` |
-| `LLM_ENDPOINTS.baidu.max_completion_tokens` | 飞桨星河的最大输出 token 限制 | 需要小于`65536` |
-| `LLM_ENDPOINTS.baidu.enable_web_search` | 是否开启文心模型的内嵌网页搜索功能 | `true` |
-| `SEARCH_CONFIG.search_depth` | tavily 搜索引擎的搜索级别参数 | `advanced` |
-| `SEARCH_CONFIG.max_results` | tavily 搜索引擎的最大返回网页数 | `10` |
-| `SEARCH_CONFIG.time_range` | tavily 搜索引擎的时间范围 | `year` `month` `week` `day` `none`|
-| `SEARCH_CONFIG.chunks_per_source` | 每个回复的分块数 | `5` |
-| `DATA_PIPELINE.input_directory` | 工作区输入路径 | `./data/input` |
-| `DATA_PIPELINE.output_directory` | 工作区的结果输出路径| `./data/output` |
-| `DATA_PIPELINE.checkpoint_directory` | 暂存点路径 | `"./data/checkpoints"` |
-| `DATA_PIPELINE.debug_directory` | RWKV 模型的 debug 日志输出路径| `./data/debug_slm` |
-| `DATA_PIPELINE.enable_debug_slm` | 是否开启 RWKV 模型的 debug 日志输出| `false` `true`|
-| `DATA_PIPELINE.allowed_extensions` | 允许的输入文件类型，本项目未适配 pdf 或其他解析，建议先转换为当前可选项 | `[".txt", ".md"]` |
-| `DATA_PIPELINE.max_chunk_tokens` | RWKV 模型最大输入 token 数| 任意整数（建议在 1600~2400） |
-| `DATA_PIPELINE.overlap_ratio` | RWKV 模型处理时的上下文交叉比例 | 任意小数（建议 0，05） |
-| `DATA_PIPELINE.reduce_group_size` | RWKV 模型二次总结合并时的批大小 | 任意整数（建议小于 4） |
-| `DATA_PIPELINE.reduce_target_chunks` | | `1` |
-| `DATA_PIPELINE.reduce_max_tokens` | 在 RWKV 总结/压缩次数达到上限后，由 LLM 进行总结的最大输入 | 任意整数，建议取值为 min(32k,模型最大上下文/2) |
-| `DATA_PIPELINE.slm_reduce_steps` | RWKV 的最多压缩步数 | 任意整数，建议为 2 |
-| `DATA_PIPELINE.llm_safe_window_tokens` | 输入给大模型的最大输入 | `60000` |
-| `DATA_PIPELINE.map_focus` | 分片总结的指令 | `"保持原意压缩，提取核心逻辑，严格保留所有事实性内容"` |
-| `DATA_PIPELINE.reduce_rule` | 合并总结的指令 | `"保持原意压缩，去重并合并同类逻辑，绝对保留事实性数据和原始结论"` |
-| `DATA_PIPELINE.map_focus_en` | 分片总结的指令英文版 | `"Compress while maintaining original meaning, extract core logic, strictly preserve all factual content"` |
-| `DATA_PIPELINE.reduce_rule_en` | 合并总结的指令英文版| `"Compress while maintaining original meaning, deduplicate and merge similar logic, absolutely preserve factual data and original conclusions"` |
-| `DATA_PIPELINE.english_ratio_threshold` | 英文比例占比数大于此数字时判断为英文文档，否则为中文 | `0.5` |
-| `DATA_PIPELINE.reduce_max_tokens_internal` | 合并时的最大输入数 | `3500` |
-| `DATA_PIPELINE.slm_repeat_threshold` | | `5` |
-| `AGENT_CONFIG.max_files_per_batch` | 每轮处理的最大文件数 | `10` |
-| `AGENT_CONFIG.max_error_retries` | | `3` |
-| `AGENT_CONFIG.memory_truncate_length` | | `60000` |
-| `SLM_CONFIG.endpoint` | RWKV 的调用端点 | `"http://192.168.0.82:8080/v1/chat/completions"` |
-| `SLM_CONFIG.password` | RWKV 的调用密码（无密码可置空） | `"rwkv-skills"` |
-| `SLM_CONFIG.concurrency` | RWKV 的最大并发数 | 整数，7.2B 时，24G 显存设置为 16G 为较优 |
-| `TRACKING.enable` | 是否追踪日志 | `true` |
-| `TRACKING.enable_slm_log` | 是否追踪 RWKV 的处理日志| `false` |
-| `TRACKING.log_dir` | 日志存放路径 | `"./logs"` |
+```bash
+uv run rwkv-ecra-preflight \
+  --dataset data/evaluation/preflight_smoke_10.jsonl
+```
+
+服务启动后：
+
+```bash
+curl http://127.0.0.1:8787/healthz
+curl http://127.0.0.1:8787/readyz
+curl http://127.0.0.1:8787/api/v1/metrics/operational
+curl http://127.0.0.1:8787/metrics
+```
+
+仓库保留了 172 题拆分集、40 题随机/干扰集和 100 题强制检索集作为回归输入。生成的回答、trace、日志和 audit 位于本地 `outputs/`、`data/output/` 或 `logs/`，不会提交。
+
+## 从 GitHub 恢复
+
+下面的流程只依赖仓库文件、你自己的模型服务和私密配置：
+
+```bash
+git clone git@github.com:w1c2j3/rwkv-ecra-rebuild.git
+cd rwkv-ecra-rebuild
+git switch chase/agent-product-tools
+
+uv sync --frozen --dev
+cp .env.example .env.local
+chmod 600 .env.local
+```
+
+编辑 `.env.local`，填入自己的 RWKV endpoint、model、context length 和本地 API key；需要 Tavily 或 wigolo 时再添加对应配置。然后执行：
+
+```bash
+uv run pytest -q
+uv run rwkv-ecra-preflight \
+  --dataset data/evaluation/preflight_smoke_10.jsonl \
+  --allow-model-down
+
+cd frontend
+npm ci
+npm run build
+cd ..
+```
+
+启动 RWKV 推理服务后：
+
+```bash
+uv run rwkv-ecra-preflight \
+  --dataset data/evaluation/preflight_smoke_10.jsonl
+uv run rwkv-ecra-api
+```
+
+`data/input/`、`data/output/`、checkpoint、asset 和日志目录会按需创建。恢复不需要本机原有 `.env.local`、缓存、生成输出或旧 benchmark 运行目录。
+
+## 当前限制
+
+- 高时效问题仍可能把过期官方页面当作当前状态，freshness 与实体/版本绑定仍需加强。
+- Replanner 在重复检索场景可能重建过多，增加延迟和超时概率。
+- 交叉验证输入在极端证据量下仍可能接近上下文上限。
+- 本地推理端长时间无响应时，部分 Python 级 timeout 无法立即终止底层请求。
+- RWKV 偶尔产生重复长输出；项目不会用规则直接修改最终文本。
+- 当前状态主要保存在一次任务的内存和 trace 中，不支持通用长程任务的可靠中断恢复。
+- 本地积累大量历史 trace 后，operational metrics 的首次全量聚合可能超过 10 秒。
+
+这些限制会记录在执行 trace 中。当前归档代表可用 Beta，而不是对所有联网问题正确率或无超时的承诺。
+
+## 相关文档
+
+- `ARCHITECTURE.md`：早期架构演进记录；以本 README 的“当前架构”为归档版本事实来源。
+- `docs/MODEL_RUNTIME.zh-CN.md`：模型运行时与部署背景。
+- `docs/EXPERIMENTS.md`：实验工具和评测流程。
+- `docs/ARCHITECTURE_HANDOFF.zh-CN.md`：历史架构交接记录。

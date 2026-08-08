@@ -17,7 +17,6 @@ def load_builtin_tools() -> None:
     with _lock:
         if _loaded:
             return
-        import tools.chat  # noqa: F401
         import tools.calculator  # noqa: F401
         import tools.connectors  # noqa: F401
         import tools.crossref  # noqa: F401
@@ -35,7 +34,4 @@ def load_builtin_tools() -> None:
         import tools.web_search_keyless  # noqa: F401
         import tools.web_search_generic  # noqa: F401
         import tools.web_search_wigolo  # noqa: F401
-        import workflows.map_reduce_flow  # noqa: F401
-        import workflows.memory_query_flow  # noqa: F401
-        import workflows.report_flow  # noqa: F401
         _loaded = True

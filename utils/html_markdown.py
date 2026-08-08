@@ -53,6 +53,37 @@ _BLOCK_TAGS = {
     "pre",
     "section",
 }
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+_CHROME_TOKENS = {
+    "breadcrumb",
+    "breadcrumbs",
+    "headerlink",
+    "navigation",
+    "navbar",
+    "related",
+    "skip-link",
+    "sphinxsidebar",
+    "theme-switcher",
+    "theme-toggle",
+    "wy-nav",
+}
+
+
+def _is_chrome_container(tag: str, attributes: dict[str, str | None]) -> bool:
+    if tag not in {"aside", "div", "section", "ul"}:
+        return False
+    role = str(attributes.get("role") or "").casefold()
+    if role in {"navigation", "search"}:
+        return True
+    identity = " ".join(
+        str(attributes.get(key) or "").casefold()
+        for key in ("id", "class")
+    )
+    tokens = set(re.findall(r"[a-z0-9_-]+", identity))
+    return any(
+        token in _CHROME_TOKENS or any(token.startswith(prefix + "-") for prefix in _CHROME_TOKENS)
+        for token in tokens
+    )
 
 
 def _clean_cell(value: object) -> str:
@@ -122,9 +153,17 @@ class _MarkdownParser(HTMLParser):
         return self.table_cell if self.table_cell is not None else self.line_parts
 
     def _append(self, value: str) -> None:
-        value = re.sub(r"\s+", " ", unescape(value or ""))
+        raw = unescape(value or "")
+        value = re.sub(r"\s+", " ", raw)
         if value.strip():
             self.active_parts.append(value)
+            return
+        # HTML commonly separates adjacent inline elements with a text node
+        # containing only whitespace. Dropping it corrupts source facts such
+        # as ``-X gil`` and ``python -VV`` before they reach the model.
+        parts = self.active_parts
+        if raw and any(char.isspace() for char in raw) and parts and not parts[-1].endswith((" ", "\n")):
+            parts.append(" ")
 
     def _flush_line(self) -> None:
         value = re.sub(r"\s+", " ", "".join(self.line_parts)).strip()
@@ -134,6 +173,18 @@ class _MarkdownParser(HTMLParser):
         self.line_prefix = ""
 
     def _flush_table_row(self) -> None:
+        # HTML permits closing ``th``, ``td`` and ``tr`` tags to be omitted.
+        # Documentation generators commonly emit compact tables such as
+        # ``<tr><th>Version<th>Changes<tbody><tr><td>v21<td>Stable``.
+        # ``HTMLParser`` does not synthesize the omitted end tags, so flush the
+        # active cell whenever a row boundary is observed. Without this, the
+        # last cell of one row is shifted into the next row and version/status
+        # relations are corrupted before they reach the evidence extractor.
+        if self.table_cell is not None:
+            if self.table_row is None:
+                self.table_row = []
+            self.table_row.append(re.sub(r"\s+", " ", "".join(self.table_cell)).strip())
+            self.table_cell = None
         if self.table_row is not None:
             self.table_rows.append(self.table_row)
             self.table_row = None
@@ -149,10 +200,10 @@ class _MarkdownParser(HTMLParser):
         tag = tag.casefold()
         attributes = dict(attrs)
         if self.skip_depth:
-            if tag in _SKIP_TAGS:
+            if tag not in _VOID_TAGS:
                 self.skip_depth += 1
             return
-        if tag in _SKIP_TAGS:
+        if tag in _SKIP_TAGS or _is_chrome_container(tag, attributes):
             self.skip_depth = 1
             return
         if tag == "table":
@@ -201,6 +252,12 @@ class _MarkdownParser(HTMLParser):
             self._append("*")
         elif tag == "code":
             self._append("`")
+        elif tag == "sup":
+            # Preserve scientific notation such as 10<sup>22</sup> as 10^22
+            # instead of flattening it into the ambiguous integer 1022.
+            self._append("^")
+        elif tag == "sub":
+            self._append("_{")
         elif tag == "img":
             alt = str(attributes.get("alt") or "").strip()
             src = str(attributes.get("src") or "").strip()
@@ -210,8 +267,7 @@ class _MarkdownParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         tag = tag.casefold()
         if self.skip_depth:
-            if tag in _SKIP_TAGS:
-                self.skip_depth -= 1
+            self.skip_depth -= 1
             return
         if tag in {"td", "th"} and self.table_cell is not None:
             if self.table_row is None:
@@ -237,6 +293,8 @@ class _MarkdownParser(HTMLParser):
             self._append("*")
         elif tag == "code":
             self._append("`")
+        elif tag == "sub":
+            self._append("}")
         elif tag == "li" and self.table_cell is None:
             self._flush_line()
         elif tag in {"ul", "ol"} and self.table_cell is None:

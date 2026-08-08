@@ -144,7 +144,7 @@ def test_answer_alignment_marks_supported_and_unmatched_claim_lines():
     assert alignment["unsupported_line_count"] == 1
 
 
-def test_context_ranking_prefers_verified_structured_record_before_relevance_tiebreak():
+def test_context_builder_preserves_upstream_retrieval_order():
     page = _page(
         "https://blog.example/release",
         "release date: 2024-07-04. This is a long enough fetched body record for the ranking test and source context.",
@@ -161,8 +161,7 @@ def test_context_ranking_prefers_verified_structured_record_before_relevance_tie
         constraints={"strategy_config": {"context_source_count": 1}},
     )
 
-    assert context["selected_evidence"][0]["url"] == structured["url"]
-    assert context["selected_evidence"][0]["source_quality"]["kind"] == "structured_record"
+    assert context["selected_evidence"][0]["url"] == page["url"]
 
 
 def test_context_projection_keeps_evidence_available_to_alignment():
@@ -183,4 +182,29 @@ def test_context_projection_keeps_evidence_available_to_alignment():
     assert context["selected_evidence"][0]["evidence_text"]
     assert alignment["aligned_line_count"] == 1
     assert alignment["unsupported_line_count"] == 0
-    assert "[S1:C1]" in context["text"]
+    assert "[S1]" in context["text"]
+    assert "<chunk-1>" in context["text"]
+
+
+def test_cross_language_alignment_is_not_reported_as_unsupported():
+    selected = [
+        {
+            "ref_id": "S1",
+            "url": "https://nodejs.org/api/globals.html",
+            "evidence_text": "Node.js fetch: v21.0.0 no longer experimental.",
+            "evidence_origin": "fetched_page_body",
+            "evidence_boundary": "fetched_page_or_structured_record_only",
+        }
+    ]
+
+    alignment = assess_answer_alignment(
+        (
+            "Node.js \u5185\u7f6e fetch \u4ece v21.0.0 \u8d77"
+            "\u4e0d\u518d\u662f\u5b9e\u9a8c\u6027\u529f\u80fd\u3002[S1:C1]"
+        ),
+        selected,
+    )
+
+    assert alignment["unsupported_line_count"] == 0
+    assert alignment["non_applicable_line_count"] == 1
+    assert alignment["rows"][0]["applicable"] is False

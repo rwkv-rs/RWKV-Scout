@@ -13,6 +13,7 @@ from typing import Any
 
 
 _ISO_DATE = re.compile(r"\b((?:19|20)\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b")
+_ZH_DATE = re.compile(r"((?:19|20)\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
 _EN_DATE = re.compile(
     r"\b(?:on\s+)?(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+((?:19|20)\d{2})\b",
     re.IGNORECASE,
@@ -32,6 +33,9 @@ def extract_explicit_date(value: Any) -> str:
 
     text = str(value or "")
     match = _ISO_DATE.search(text)
+    if match:
+        return _date_value(match.group(1), match.group(2), match.group(3))
+    match = _ZH_DATE.search(text)
     if match:
         return _date_value(match.group(1), match.group(2), match.group(3))
     match = _EN_DATE.search(text)

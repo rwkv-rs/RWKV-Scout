@@ -98,7 +98,7 @@ class TaskStore:
                     "end_time": timestamp,
                     "timestamp": timestamp,
                     "query": item.name,
-                    "status": "completed",
+                    "status": "ready",
                     "result_dir": str(item),
                     "error": "",
                     "queued_at": timestamp,
@@ -127,7 +127,6 @@ class TaskStore:
         result_dir: str = "",
         error: str = "",
         queued_at: str | None = None,
-        acceptance_case_id: str | None = None,
     ) -> None:
         with self._lock:
             existing = self._task_index.get(task_id, {})
@@ -148,11 +147,7 @@ class TaskStore:
                 record["queued_at"] = queued_at
             elif existing.get("queued_at") is not None:
                 record["queued_at"] = existing["queued_at"]
-            if acceptance_case_id is not None:
-                record["acceptance_case_id"] = acceptance_case_id
-            elif existing.get("acceptance_case_id") is not None:
-                record["acceptance_case_id"] = existing["acceptance_case_id"]
-            if status in {"completed", "failed", "stopped"}:
+            if status in {"ready", "network_error", "stopped"}:
                 record["end_time"] = existing.get("end_time") or now_str
             self._apply_record(record)
             self._append_event(self._task_index[task_id].copy())
@@ -238,7 +233,6 @@ def record_task(
     result_dir: str = "",
     error: str = "",
     queued_at: str | None = None,
-    acceptance_case_id: str | None = None,
 ) -> None:
     _get_store().record_task(
         task_id,
@@ -247,7 +241,6 @@ def record_task(
         result_dir,
         error,
         queued_at,
-        acceptance_case_id,
     )
 
 

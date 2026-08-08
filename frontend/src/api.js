@@ -31,7 +31,6 @@ export async function getHistory() {
       title: item.title || item.task_id || item.id,
       query: item.query || "",
       status: item.status || "ready",
-      acceptance_case_id: item.acceptance_case_id || "",
       progress: item.progress || "",
       steps: Array.isArray(item.steps) && item.steps.length ? item.steps : steps,
       updated_at: item.timestamp || item.updated_at || "-",
@@ -174,9 +173,4 @@ export async function uploadFile(fileList) {
 export async function getTokenUsage() {
   const payload = await apiFetch("/frontend-api/tokens");
   return payload.data || { tasks: {} };
-}
-
-export async function getAcceptanceMetrics() {
-  const payload = await apiFetch("/frontend-api/metrics/acceptance");
-  return payload.data || null;
 }

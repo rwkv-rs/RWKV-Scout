@@ -6,7 +6,7 @@ import uuid
 import requests
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Form, HTTPException
-from fastapi.responses import PlainTextResponse, FileResponse, HTMLResponse
+from fastapi.responses import PlainTextResponse, FileResponse
 import config
 from runtime import get_model_backend
 from app.models import AnalyzeRequest, ChatRequest
@@ -25,8 +25,6 @@ from utils.task_manager import record_task, get_all_tasks, request_stop, delete_
 from utils.token_tracker import global_token_tracker
 from utils.task_events import get_task_events
 from utils.experiment_manifest import reconstruct_run
-from utils.harness_fixtures import fixture_payload
-from utils.acceptance_metrics import compute_acceptance_metrics
 from utils.operational_metrics import collect_operational_metrics, prometheus_text
 from main import setup_env
 
@@ -277,15 +275,6 @@ def chat_endpoint(req: ChatRequest):
         config.override_llm_provider.reset(provider_token)
 
 
-@app.get("/frontend-api/harness-fixtures/{variant}")
-def get_harness_fixture(variant: str):
-    return HTMLResponse(fixture_payload(variant)["html"])
-
-@app.get("/frontend-api/metrics/acceptance")
-def get_acceptance_metrics():
-    return {"code": 200, "data": compute_acceptance_metrics(get_all_tasks())}
-
-
 @app.get("/api/v1/metrics/operational")
 @app.get("/frontend-api/metrics/operational")
 def get_operational_metrics():
@@ -308,7 +297,7 @@ def analyze_endpoint(req: AnalyzeRequest, bg_tasks: BackgroundTasks):
     task_id = f"TASK_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     task_output_dir = os.path.join(config.DATA_PIPELINE["output_directory"], task_id)
     
-    record_task(task_id, req.query, "running", task_output_dir, queued_at=req.queued_at, acceptance_case_id=req.acceptance_case_id)
+    record_task(task_id, req.query, "running", task_output_dir, queued_at=req.queued_at)
     bg_tasks.add_task(run_background_analysis, task_id, req, task_output_dir)
     
     return {
@@ -345,11 +334,6 @@ def get_task_history():
             # user input persisted in the auditable event stream.
             enriched["query"] = str(user_inputs[0]).strip()
             enriched["title"] = str(user_inputs[0]).strip()
-        final_events = [event for event in events if event.get("type") == "final"]
-        if final_events:
-            final_status = str(final_events[-1].get("status") or "").strip()
-            if final_status:
-                enriched["status"] = final_status
         enriched["event_count"] = len(events)
         enriched_tasks.append(enriched)
     return {"code": 200, "data": enriched_tasks}

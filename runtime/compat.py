@@ -14,6 +14,7 @@ from config import (
     get_llm_api_key,
     get_llm_base_url,
     get_llm_model,
+    get_llm_seed,
     get_llm_temperature,
     get_model_connect_timeout_seconds,
     get_model_chunk_requests_per_task,
@@ -21,8 +22,8 @@ from config import (
     get_slm_concurrency,
 )
 from runtime.backend import BackendResponse
+from utils.concurrency import shutdown_pool, submit_with_context
 from utils.runtime_gate import model_request_slot
-from utils.text_encoding import repair_mojibake
 from utils.token_tracker import current_model_lane, current_task_id
 from utils.time_budget import bounded_timeout
 
@@ -96,7 +97,6 @@ class OpenAICompatBackend:
             content = choice.get("text", "") or ""
         else:
             content = message.get("content", "") or choice.get("text", "") or ""
-        content = repair_mojibake(content)
         usage = data.get("usage") or {}
         return BackendResponse(
             role=message.get("role", "assistant"),
@@ -125,6 +125,9 @@ class OpenAICompatBackend:
             "max_tokens": max_tokens or 768,
             "temperature": get_llm_temperature(),
         }
+        seed = get_llm_seed()
+        if seed is not None:
+            payload["seed"] = seed
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = {"type": "function", "function": {"name": "system_router"}}
@@ -144,6 +147,9 @@ class OpenAICompatBackend:
             "temperature": get_llm_temperature(),
             "stream": False,
         }
+        seed = get_llm_seed()
+        if seed is not None:
+            payload["seed"] = seed
         if stop:
             payload["stop"] = list(stop)
         return self._response(self._post("/completions", payload), text_key="text")
@@ -158,13 +164,22 @@ class OpenAICompatBackend:
         if current_model_lane.get() == "chunk":
             worker_count = min(worker_count, get_model_chunk_requests_per_task())
         results = [""] * len(prompts)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                executor.submit(contextvars.copy_context().run, generate, prompt): index
-                for index, prompt in enumerate(prompts)
-            }
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+        futures = {
+            submit_with_context(executor, generate, prompt): index
+            for index, prompt in enumerate(prompts)
+        }
+        cancelled = False
+        try:
             for future in concurrent.futures.as_completed(futures):
                 results[futures[future]] = future.result()
+        except concurrent.futures.TimeoutError:
+            # SIGALRM is also represented as TimeoutError here.  Do not let
+            # executor shutdown wait for model requests after a case timeout.
+            cancelled = True
+            raise
+        finally:
+            shutdown_pool(executor, list(futures), cancelled=cancelled)
         return results
 
     def health(self) -> dict[str, Any]:

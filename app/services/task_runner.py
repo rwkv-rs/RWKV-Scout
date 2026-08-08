@@ -10,7 +10,7 @@ from utils.error_policy import classify_error
 from utils.runtime_gate import analysis_slot
 from utils.task_events import append_task_event, get_task_events
 from utils.task_manager import is_task_stopped, record_task
-from utils.time_budget import TaskTimeoutError, task_time_budget
+from utils.time_budget import task_time_budget
 from utils.token_tracker import current_task_id
 
 
@@ -46,76 +46,71 @@ def run_background_analysis(
 
         from agent.orchestrator import Orchestrator
 
-        run_metadata = {
-            "experiment_id": request.experiment_id or task_id,
-            "variant": request.variant,
-            "baseline_run_id": request.baseline_run_id or "",
-            "dataset_version": request.dataset_version or "",
-            "persona": request.persona or "",
-            "domain": request.domain or "",
-            "task_type": request.task_type or "",
-            "difficulty": request.difficulty or "",
-            "hypothesis": request.hypothesis or "",
-            "changed_variable": request.changed_variable or "",
-            "expected_metrics": request.expected_metrics or [],
-            "side_effects": request.side_effects or [],
-            "acceptance_criteria": request.acceptance_criteria or [],
-            "rejection_criteria": request.rejection_criteria or [],
-            "risk_checks": request.risk_checks or [],
-            "prompt_version": request.prompt_version or "",
-            "strategy_config": request.strategy_config,
-        }
+        run_metadata = {"strategy_config": request.strategy_config}
         with task_time_budget(task_id), analysis_slot(task_id):
-            Orchestrator().run(user_query=request.query, task_id=task_id, run_metadata=run_metadata)
-            if not is_task_stopped(task_id):
-                final_events = [event for event in get_task_events(task_id) if event.get("type") == "final"]
-                terminal_status = str(final_events[-1].get("status") or "completed") if final_events else "completed"
-                record_task(
+            answer = Orchestrator().run(
+                user_query=request.query,
+                task_id=task_id,
+                run_metadata=run_metadata,
+            )
+            if is_task_stopped(task_id):
+                return
+            final_events = [
+                event for event in get_task_events(task_id) if event.get("type") == "final"
+            ]
+            if not final_events and str(answer or ""):
+                append_task_event(
                     task_id,
-                    request.query,
-                    "completed",
-                    task_output_dir,
-                    acceptance_case_id=request.acceptance_case_id,
+                    "final",
+                    content=str(answer),
+                    action="task_runner",
+                    mode="rwkv_final",
                 )
-                finalize_manifest(task_id, status=terminal_status)
-    except TaskTimeoutError as exc:
-        append_task_event(
-            task_id,
-            "error",
-            phase="RUNTIME",
-            error=f"{type(exc).__name__}: {exc}"[:1000],
-            error_class="timeout",
-        )
-        append_task_event(task_id, "final", status="timed_out", content="", error_class="timeout")
-        if not is_task_stopped(task_id):
-            record_task(
-                task_id,
-                request.query,
-                "timed_out",
-                task_output_dir,
-                str(exc),
-                acceptance_case_id=request.acceptance_case_id,
-            )
-            finalize_manifest(task_id, status="timed_out", error=str(exc))
+            elif not final_events:
+                raise ConnectionError("RWKV returned no final output")
+            record_task(task_id, request.query, "ready", task_output_dir)
+            finalize_manifest(task_id, status="ready")
     except Exception as exc:
+        failure_kind = classify_error(exc)
+        if failure_kind not in {
+            "timeout",
+            "network",
+            "auth",
+            "quota",
+            "rate_limit",
+            "provider",
+        }:
+            append_task_event(
+                task_id,
+                "error",
+                phase="RUNTIME",
+                error=f"{type(exc).__name__}: {exc}"[:1000],
+                error_class="engineering_error",
+            )
+            raise
         append_task_event(
             task_id,
             "error",
             phase="RUNTIME",
             error=f"{type(exc).__name__}: {exc}"[:1000],
-            error_class=classify_error(exc),
+            error_class="network_error",
         )
-        append_task_event(task_id, "final", status="failed", content="", error_class=classify_error(exc))
+        append_task_event(
+            task_id,
+            "final",
+            status="network_error",
+            content="",
+            message="The model or retrieval network did not return a final answer.",
+        )
         if not is_task_stopped(task_id):
             record_task(
                 task_id,
                 request.query,
-                "failed",
+                "network_error",
                 task_output_dir,
                 str(exc),
-                acceptance_case_id=request.acceptance_case_id,
             )
-            finalize_manifest(task_id, status="failed", error=str(exc))
+            finalize_manifest(task_id, status="network_error", error=str(exc))
     finally:
         for context, token in reversed(context_tokens):
             context.reset(token)

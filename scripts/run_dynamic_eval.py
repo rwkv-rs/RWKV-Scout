@@ -95,16 +95,42 @@ def main() -> int:
         try:
             try:
                 with task_time_budget(task_id), analysis_slot(task_id):
-                    Orchestrator().run(case["question"], task_id=task_id, run_metadata=metadata)
+                    answer = Orchestrator().run(case["question"], task_id=task_id, run_metadata=metadata)
                 run_trace = reconstruct_run(task_id)
                 final_events = [event for event in run_trace.get("events") or [] if event.get("type") == "final"]
-                terminal_status = str(final_events[-1].get("status") or "completed") if final_events else "completed"
-                record_task(task_id, case["question"], "completed", str(task_dir))
+                if not final_events:
+                    append_task_event(
+                        task_id,
+                        "final",
+                        status="failed",
+                        error_type="missing_final_event",
+                        content=(
+                            str(answer or "").strip()
+                            or "The task ended without a final result."
+                        ),
+                        action="dynamic_eval_runner",
+                        mode="runtime_contract_error",
+                    )
+                    run_trace = reconstruct_run(task_id)
+                    final_events = [
+                        event
+                        for event in run_trace.get("events") or []
+                        if event.get("type") == "final"
+                    ]
+                terminal_status = str(final_events[-1].get("status") or "failed")
+                record_task(task_id, case["question"], terminal_status, str(task_dir))
                 finalize_manifest(task_id, status=terminal_status)
             except TaskTimeoutError as exc:
                 if not any(event.get("type") == "final" for event in get_task_events(task_id)):
                     append_task_event(task_id, "error", phase="RUNTIME", error=str(exc)[:1000], error_class="timeout")
-                    append_task_event(task_id, "final", status="timed_out", content="", error_class="timeout")
+                    append_task_event(
+                        task_id,
+                        "final",
+                        status="timed_out",
+                        error_type="timeout",
+                        content="The task timed out before a reliable answer could be completed.",
+                        error_class="timeout",
+                    )
                 record_task(task_id, case["question"], "timed_out", str(task_dir), str(exc))
                 finalize_manifest(task_id, status="timed_out", error=str(exc))
             except Exception as exc:
@@ -116,7 +142,14 @@ def main() -> int:
                         error=f"{type(exc).__name__}: {exc}"[:1000],
                         error_class="runtime",
                     )
-                    append_task_event(task_id, "final", status="failed", content="", error_class="runtime")
+                    append_task_event(
+                        task_id,
+                        "final",
+                        status="failed",
+                        error_type="runtime_error",
+                        content="The task encountered a runtime failure before a reliable answer could be completed.",
+                        error_class="runtime",
+                    )
                 record_task(task_id, case["question"], "failed", str(task_dir), str(exc))
                 finalize_manifest(task_id, status="failed", error=str(exc))
         finally:
@@ -197,8 +230,7 @@ def main() -> int:
         },
         "results": results,
     }
-    # Never persist the API key in an experiment artifact.
-    payload["model"]["api_key"] = "<configured>" if payload["model"].get("api_key") else ""
+    payload["model"]["api_key_configured"] = bool(config.get_llm_api_key())
     args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
     print(f"ARTIFACT {args.output}")
     return 0

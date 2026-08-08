@@ -17,12 +17,19 @@ search provider or a rewritten query when parsing fails.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any
 
 from clients.llm_client import LLMClient
-from config import get_llm_context_length, is_local_provider
+from config import (
+    get_llm_context_length,
+    get_model_replan_temperature,
+    get_model_stage_temperature,
+    is_local_provider,
+    model_sampling_parameters,
+)
 from tools.builtin import load_builtin_tools
 from tools.registry import ToolRegistry
 from utils.model_events import visible_model_text
@@ -93,7 +100,7 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     # completion can legitimately begin with the first JSON field.  Recreate
     # only that protocol delimiter; do not recover prose or missing values.
     prefixed = re.match(
-        r'^"(?:name|schema_version|atomic_points|task_mode|goal)"\s*:',
+        r'^"(?:name|schema_version|atomic_points|task_mode|goal|decision)"\s*:',
         cleaned,
     )
     if prefixed:
@@ -116,7 +123,10 @@ def _extract_json_object(text: str) -> dict[str, Any]:
                     fallback = value
                 # Prefer the outer plan/tool object. This prevents a nested
                 # atomic point from being mistaken for the complete plan.
-                if any(key in value for key in ("schema_version", "atomic_points", *tool_keys)):
+                if any(
+                    key in value
+                    for key in ("schema_version", "atomic_points", "decision", *tool_keys)
+                ):
                     return value
     if fallback is not None:
         return fallback
@@ -154,12 +164,18 @@ class Planner:
         # only the latest routing projection below.
         self._latest_routing_observation = ""
         self._decision_count = 0
+        self._next_decision_sampling_stage = "planner"
+        self._next_decision_seed: int | None = None
+        self._replan_generation = 0
 
     def reset(self) -> None:
         self._messages = []
         self._task_plan = None
         self._latest_routing_observation = ""
         self._decision_count = 0
+        self._next_decision_sampling_stage = "planner"
+        self._next_decision_seed = None
+        self._replan_generation = 0
 
     def execution_transcript(self) -> str:
         """Return the visible routing transcript for final summarization."""
@@ -227,6 +243,15 @@ class Planner:
                 "output_format": str(point.get("output_format") or "prose").strip(),
                 "status": str(point.get("status") or "pending"),
                 "source_ids": [point_id],
+                "required_domains": list(dict.fromkeys(
+                    str(value).strip().casefold().removeprefix("www.").rstrip(".")
+                    for value in (
+                        [point.get("required_domains")]
+                        if isinstance(point.get("required_domains"), str)
+                        else point.get("required_domains") or []
+                    )
+                    if str(value).strip()
+                ))[:4],
             }
             normalized_points.append(normalized_point)
             points_by_signature[signature] = normalized_point
@@ -356,9 +381,7 @@ class Planner:
                 raw = str(response.content or "")
                 if raw.strip():
                     last_nonempty_raw = raw
-                plan = self._validate_task_plan(_extract_json_object(raw))
-                plan = self._normalize_simple_how_to_plan(plan, user_query)
-                return plan
+                return self._validate_task_plan(_extract_json_object(raw))
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 if classify_error(exc) == "timeout":
@@ -369,49 +392,6 @@ class Planner:
             "error_class": "task_plan_invalid",
             "message": last_error or "task plan generation failed",
             "raw_model_output": visible_model_text(last_nonempty_raw or raw),
-        }
-
-    @staticmethod
-    def _normalize_simple_how_to_plan(
-        plan: dict[str, Any],
-        user_query: str,
-    ) -> dict[str, Any]:
-        """Keep a short single how-to from expanding into invented subtopics."""
-
-        query = str(user_query or "").strip()
-        if not re.search(
-            r"(?:怎么|如何|怎样|开启|启用|安装|配置|设置|how to|enable|install|configure|set up)",
-            query.casefold(),
-        ):
-            return plan
-        if len(query) > 180 or re.search(
-            r"(?:比较|对比|分别|同时|多个|列表|清单|compare|versus| vs\.? )",
-            query.casefold(),
-        ):
-            return plan
-        return {
-            **plan,
-            "atomic_points": [
-                {
-                    "id": "P1",
-                    "task": query,
-                    "objective": "Find the direct procedure requested by the user and its minimal verification.",
-                    "evidence_needed": [
-                        "The authoritative source's direct procedure for the requested task.",
-                        "The source's minimal verification or expected result, when stated.",
-                    ],
-                    "acceptance_criteria": [
-                        "Answer the requested procedure directly with source-backed facts.",
-                        "Include only the minimal verification needed for that procedure.",
-                    ],
-                    "output_format": "prose",
-                    "status": "pending",
-                    "source_ids": ["P1"],
-                }
-            ],
-            "requested_fields": [],
-            "max_items": 0,
-            "completion_rule": "The direct procedure and minimal verification are supported by retrieved evidence.",
         }
 
     def begin_task(
@@ -426,6 +406,9 @@ class Planner:
         self._messages = []
         self._latest_routing_observation = ""
         self._decision_count = 0
+        self._next_decision_sampling_stage = "planner"
+        self._next_decision_seed = None
+        self._replan_generation = 0
         self._ensure_conversation(user_query, env_context, phase)
         self._messages.append(
             {
@@ -438,46 +421,163 @@ class Planner:
         )
         self._trim_conversation()
 
-    def begin_replan(
+    @staticmethod
+    def _validate_cross_review(payload: dict[str, Any]) -> dict[str, Any]:
+        """Validate the RWKV review protocol without judging its conclusion."""
+
+        if not isinstance(payload, dict):
+            raise ValueError("cross-validation output must be a JSON object")
+        decision = str(payload.get("decision") or "").strip().casefold()
+        if decision not in {"finish", "replan"}:
+            raise ValueError("cross-validation decision must be finish or replan")
+
+        missing_points = payload.get("missing_points") or []
+        if isinstance(missing_points, str):
+            missing_points = [missing_points]
+        if not isinstance(missing_points, list):
+            raise ValueError("cross-validation missing_points must be an array")
+
+        conflicts = payload.get("conflicts") or []
+        if isinstance(conflicts, (str, dict)):
+            conflicts = [conflicts]
+        if not isinstance(conflicts, list):
+            raise ValueError("cross-validation conflicts must be an array")
+
+        return {
+            "schema_version": "rwkv-cross-validation.v1",
+            "decision": decision,
+            "missing_points": [
+                str(value)[:500] for value in missing_points[:32] if str(value).strip()
+            ],
+            "conflicts": conflicts[:32],
+            "next_focus": str(payload.get("next_focus") or "")[:2000],
+            "reason": str(payload.get("reason") or "")[:2000],
+            "review_owner": "rwkv",
+        }
+
+    def cross_validate_research(
+        self,
+        user_query: str,
+        task_plan: dict[str, Any],
+        evidence_context: str,
+    ) -> dict[str, Any]:
+        """Ask RWKV whether research should finish or return to planning."""
+
+        user_prompt = (
+            "You are the RWKV cross-validator inside a research loop. This is not the final answer. "
+            "Inspect the user's requested scope, the model-generated task plan, deterministic tool results, "
+            "and the original fetched source spans. Decide whether the collected material supports a useful "
+            "answer or whether another retrieval round is needed. Choose replan only for a material missing "
+            "fact or material source conflict that another search could reasonably resolve. Minor uncertainty "
+            "does not require replan because the final RWKV writer can state uncertainty. The fetched source "
+            "spans are already the extracted evidence: read their contents yourself, and choose finish when "
+            "they explicitly contain the requested facts. There is no later page-summary or semantic-extraction "
+            "tool. Do not choose replan merely because a checklist says retrieved instead of supported, or "
+            "because no separate summary was produced. Do not generate a "
+            "search query, URL, tool call, answer, refusal, or rewritten evidence. The next planner will choose "
+            "all retrieval actions itself. Return exactly one JSON object with this schema: "
+            '{"schema_version":"rwkv-cross-validation.v1","decision":"finish|replan",'
+            '"missing_points":["P1 or a concise missing fact"],"conflicts":[], '
+            '"next_focus":"concise evidence need, not a query","reason":"concise model judgement"}.\n\n'
+            f"USER QUESTION:\n{str(user_query or '')}\n\n"
+            "MODEL-GENERATED TASK PLAN:\n"
+            f"{json.dumps(self._compact_task_plan(task_plan), ensure_ascii=False, separators=(',', ':'))}\n\n"
+            f"SHARED RESEARCH MATERIAL:\n{str(evidence_context or '')}\n\n"
+            "Return the cross-validation JSON now."
+        )
+        prompt = (
+            f"### User\n{user_prompt}\n"
+            f"{assistant_json_prefix(enable_think=False, prefill_object=True)}"
+        )
+        raw = ""
+        try:
+            sampling_temperature = get_model_stage_temperature("cross_validation")
+            with model_sampling_parameters(sampling_temperature):
+                response = self.llm.text_completion(
+                    prompt,
+                    max_tokens=min(2048, self._completion_budget(prompt)),
+                    stop=JSON_CALL_STOP_SUFFIXES,
+                )
+            raw = str(response.content or "")
+            review = self._validate_cross_review(_extract_json_object(raw))
+            review["raw_model_output"] = raw
+            review["prompt"] = prompt
+            review["sampling_temperature"] = sampling_temperature
+            review["sampling_seed"] = None
+            return review
+        except Exception as exc:
+            if classify_error(exc) in {
+                "timeout",
+                "network",
+                "auth",
+                "quota",
+                "rate_limit",
+                "provider",
+            }:
+                raise
+            return {
+                "schema_version": "rwkv-cross-validation.v1",
+                "decision": "protocol_error",
+                "error_class": "cross_validation_protocol",
+                "message": f"{type(exc).__name__}: {exc}"[:1000],
+                "raw_model_output": raw,
+                "prompt": prompt,
+                "review_owner": "rwkv",
+            }
+
+    def rebuild_session_after_review(
         self,
         user_query: str,
         env_context: str,
-        task_plan: dict[str, Any],
-        feedback: dict[str, Any],
+        review: dict[str, Any],
         phase: str = "DISCOVERY",
     ) -> None:
-        """Start a fresh planner session while retaining the task contract.
+        """Rebuild planner short-term context while preserving global state."""
 
-        The evidence store and retrieval ledger live on AgentState and are
-        intentionally not reset here.  Only the model-facing decision
-        transcript is rebuilt around the current recovery checkpoint.
-        """
-
-        checkpoint = (
-            "REPLAN CHECKPOINT (controller-owned): the previous retrieval path "
-            "is frozen. Use the missing evidence and blocked-query metadata "
-            "below to choose a materially different retrieval direction. Do "
-            "not repeat the blocked query.\n"
-            f"{json.dumps(feedback, ensure_ascii=False, separators=(',', ':'))}"
+        compact_review = {
+            key: value
+            for key, value in review.items()
+            if key not in {"prompt", "raw_model_output"}
+        }
+        self.rebuild_session(
+            user_query,
+            env_context,
+            {
+                "status": "cross_validation_replan",
+                "evidence_review": compact_review,
+            },
+            phase,
         )
-        try:
-            self.begin_task(
-                user_query,
-                f"{env_context}\n\n{checkpoint}",
-                task_plan,
-                phase=phase,
-            )
-        except TypeError as exc:
-            # Keep compatibility with lightweight test doubles and older
-            # callers that implement the verified three-argument begin_task.
-            if "unexpected keyword argument 'phase'" not in str(exc):
-                raise
-            self.begin_task(
-                user_query,
-                f"{env_context}\n\n{checkpoint}",
-                task_plan,
-            )
-        self.observe_tool_result(feedback)
+
+    def rebuild_session(
+        self,
+        user_query: str,
+        env_context: str,
+        observation: dict[str, Any],
+        phase: str = "DISCOVERY",
+    ) -> None:
+        """Drop prior action history while retaining task plan and global state."""
+
+        self._messages = []
+        self._latest_routing_observation = self._compact_routing_observation(observation)
+        self._next_decision_sampling_stage = "planner_replan"
+        self._replan_generation += 1
+        seed_material = (
+            f"{str(user_query or '')}\0planner_replan\0{self._replan_generation}"
+        ).encode("utf-8")
+        self._next_decision_seed = int.from_bytes(
+            hashlib.blake2s(seed_material, digest_size=4).digest(),
+            "big",
+        )
+        self._ensure_conversation(user_query, env_context, phase)
+        self._messages.append(
+            {
+                "role": "tool",
+                "content": self._compact_observation(observation),
+                "_routing_observation": True,
+            }
+        )
+        self._trim_conversation()
 
     @staticmethod
     def _system_prompt(phase: str, task_mode: str = "") -> str:
@@ -488,26 +588,6 @@ class Planner:
         catalog_rows = json.loads(
             ToolRegistry.get_json_catalog(catalog_phase, model_visible_only=True)
         )
-        mode = str(task_mode or "").strip().casefold()
-        allowed_for_mode = {
-            "computation": {"calculator", "finish_task"},
-            "current_time": {"current_time", "finish_task"},
-            "date_arithmetic": {"date_diff", "finish_task"},
-            "deterministic_done": {"finish_task"},
-        }.get(mode)
-        if mode == "date_arithmetic" and catalog_phase == "DISCOVERY":
-            # The registry correctly keeps date_diff out of generic
-            # discovery, but an explicitly classified date task needs this
-            # deterministic capability at the first decision.
-            catalog_phase = "ALL"
-            catalog_rows = json.loads(
-                ToolRegistry.get_json_catalog(catalog_phase, model_visible_only=True)
-            )
-        if allowed_for_mode:
-            catalog_rows = [
-                row for row in catalog_rows
-                if isinstance(row, dict) and row.get("name") in allowed_for_mode
-            ]
         # Keep the public descriptions and argument contracts, but remove
         # backend/plugin metadata.  Provider selection, fetching, cleaning,
         # chunking and evidence extraction are separate controller stages.
@@ -534,13 +614,12 @@ class Planner:
             "Use only the tool names and argument contracts in the catalog. Never emit an answer in tool arguments.\n"
             "Tools:\n"
             f"{catalog}\n"
-            "web_search/connector_lookup retrieve; calculator/date_diff/current_time compute or read time; finish_task requests final synthesis.\n"
-            "The controller owns provider choice, URL fetching, page cleaning, chunking and evidence extraction.\n"
-            "Tool Output is routing metadata, not a factual answer. Use candidate URLs to choose the next page, and use evidence_review only as a coverage/status signal.\n"
-            "Routing priority: pure numeric arithmetic -> calculator; current date/time -> current_time; exact YYYY-MM-DD distance -> date_diff; current weather or structured repository/paper lookup -> connector_lookup; web facts -> web_search. Do not web_search for a deterministic operation.\n"
-            "If task_mode is computation, current_time, or date_arithmetic, web_search is invalid: use calculator, current_time, or date_diff as applicable, then finish_task.\n"
-            "If the latest tool observation has status=ok and tool=current_time, calculator, or date_diff, the next action is finish_task; never repeat that deterministic tool.\n"
-            "Do not repeat an exact failed request. Continue only when a missing point, failed retrieval, or unresolved conflict requires it; otherwise finish_task.\n"
+            "web_search/connector_lookup retrieve; calculator/date_diff/current_time compute or read time; "
+            "finish_task requests an RWKV cross-validation review before final synthesis.\n"
+            "Retrieval tools internally handle provider selection, URL fetching, cleaning, chunking and evidence extraction.\n"
+            "Tool Output is context for your next decision. You decide whether to retrieve again, use another tool, or finish.\n"
+            "Choose calculator for arithmetic, current_time for the clock, date_diff for exact date distance, connector_lookup for structured sources, and web_search for general web research when useful.\n"
+            "Avoid needless exact repeats, but make every next-step and finish decision yourself.\n"
             "For date_diff, use only exact YYYY-MM-DD values already present in the question or visible evidence.\n"
             f"Current phase: {phase}"
         )
@@ -655,6 +734,8 @@ class Planner:
             "recovery_instruction",
             "task_point_id",
             "task_point_state",
+            "request",
+            "frozen_path",
         ):
             if key in value:
                 item = value[key]
@@ -697,9 +778,10 @@ class Planner:
                 continue
             chunk_candidates = [
                 candidate
-                for candidate in list(item.get("chunk_candidates") or [])[:4]
+                for candidate in list(item.get("chunk_candidates") or [])
                 if isinstance(candidate, dict)
-            ]
+                and candidate.get("supported") is True
+            ][:4]
             source_by_id = {
                 str(chunk.get("chunk_id") or ""): str(chunk.get("text") or "")
                 for chunk in list(item.get("source_chunks") or [])[:8]
@@ -708,11 +790,10 @@ class Planner:
             locators = []
             for candidate in chunk_candidates[:2]:
                 chunk_id = str(candidate.get("chunk_id") or "")
-                facts = [
-                    str(fact)[:300]
-                    for fact in (candidate.get("facts") or [])[:3]
-                    if str(fact).strip()
-                ]
+                # Generated facts are retained in the execution trace only.
+                # The recurrent planner may see the exact located source span
+                # and bounded original chunk, never an extractor paraphrase.
+                facts: list[str] = []
                 quote = str(candidate.get("quote") or "").strip()[:500]
                 source_text = source_by_id.get(chunk_id, "")[:700]
                 if facts or quote or source_text:
@@ -810,38 +891,14 @@ class Planner:
         )
         task_mode = str((self._task_plan or {}).get("task_mode") or "lookup").casefold()
         observation = self._latest_routing_observation or '{"status":"no_observation"}'
-        try:
-            observation_value = json.loads(observation)
-        except (TypeError, json.JSONDecodeError):
-            observation_value = {}
-        deterministic_done = (
-            isinstance(observation_value, dict)
-            and str(observation_value.get("status") or "").casefold() == "ok"
-            and str(observation_value.get("tool") or "").casefold()
-            in {"calculator", "current_time", "date_diff"}
-        )
-        prompt_mode = "deterministic_done" if deterministic_done else task_mode
-        mode_gate = (
-            "MANDATORY ROUTING GATE: the previous deterministic tool succeeded; choose finish_task now. "
-            "Do not call any deterministic tool again.\n"
-            if deterministic_done
-            else (
-            "MANDATORY ROUTING GATE: task_mode=computation requires calculator; "
-            "task_mode=current_time requires current_time; task_mode=date_arithmetic requires date_diff only after both dates are visible. "
-            "After a successful deterministic tool result, choose finish_task.\n"
-            if task_mode in {"computation", "current_time", "date_arithmetic"}
-            else ""
-            )
-        )
         return (
             f"Question: {str(user_query or '').strip()[:3000]}\n"
             f"Task plan: {plan}\n"
-            f"Runtime state: {str(env_context or '').strip()[:1200]}\n"
+            f"Runtime state: {str(env_context or '').strip()}\n"
             f"Latest tool observation (routing only): {observation}\n"
             f"Decision number: {self._decision_count + 1}\n"
             f"Phase: {phase}\n\n"
-            f"{mode_gate}"
-            f"{self._system_prompt(phase, task_mode=prompt_mode)}"
+            f"{self._system_prompt(phase, task_mode=task_mode)}"
         )
 
     @staticmethod
@@ -914,6 +971,9 @@ class Planner:
                 "allowed_tools",
                 "action",
                 "args",
+                "request",
+                "frozen_path",
+                "replan_count",
             "repeat_count",
             "alternative_urls",
             "recovery_instruction",
@@ -976,12 +1036,13 @@ class Planner:
                 row["evidence_candidates"] = [
                     {
                         "chunk_id": candidate.get("chunk_id", ""),
-                        "facts": [str(fact)[:400] for fact in (candidate.get("facts") or [])[:4]],
+                        "facts": [],
                         "quote": str(candidate.get("quote") or "")[:400],
                     }
-                    for candidate in candidates[:32]
+                    for candidate in candidates
                     if isinstance(candidate, dict)
-                ]
+                    and candidate.get("supported") is True
+                ][:32]
             if "snippet" in row["discovery_metadata"]:
                 row["discovery_metadata"]["snippet"] = str(row["discovery_metadata"]["snippet"] or "")[:260]
             rows.append(row)
@@ -1147,6 +1208,13 @@ class Planner:
         payload: dict[str, Any] = {}
         name = ""
         arguments: dict[str, Any] = {}
+        sampling_stage = self._next_decision_sampling_stage
+        sampling_temperature = (
+            get_model_replan_temperature(self._replan_generation)
+            if sampling_stage == "planner_replan"
+            else get_model_stage_temperature(sampling_stage)
+        )
+        sampling_seed = self._next_decision_seed
         # A malformed tool decision is a model/protocol failure. Do not
         # silently issue a controller-authored correction request; expose the
         # failure and let the caller decide what to do next.
@@ -1159,19 +1227,25 @@ class Planner:
                     '格式必须是 {"name":"工具名","arguments":{}}，工具名必须来自当前 Tools。'
                 )
             try:
-                if is_local_provider(self.llm.provider):
-                    response = self.llm.text_completion(
-                        request_prompt,
-                        max_tokens=self._completion_budget(request_prompt),
-                        stop=JSON_CALL_STOP_SUFFIXES,
-                    )
-                else:
-                    response = self.llm.chat_completion(
-                        [{"role": "user", "content": prompt}],
-                        max_tokens=self._completion_budget(
-                            request_prompt
-                        ),
-                    )
+                with model_sampling_parameters(
+                    sampling_temperature,
+                    seed=sampling_seed,
+                ):
+                    if is_local_provider(self.llm.provider):
+                        response = self.llm.text_completion(
+                            request_prompt,
+                            max_tokens=self._completion_budget(request_prompt),
+                            stop=JSON_CALL_STOP_SUFFIXES,
+                        )
+                    else:
+                        response = self.llm.chat_completion(
+                            [{"role": "user", "content": prompt}],
+                            max_tokens=self._completion_budget(
+                                request_prompt
+                            ),
+                        )
+                self._next_decision_sampling_stage = "planner"
+                self._next_decision_seed = None
                 raw = str(response.content or "")
                 payload = _canonicalize_tool_payload(_extract_json_object(raw))
                 function_value = payload.get("function")
@@ -1209,6 +1283,8 @@ class Planner:
                         "raw_model_output": visible_model_text(raw),
                         "planner_error": planner_error,
                         "planner_attempts": 1,
+                        "sampling_temperature": sampling_temperature,
+                        "sampling_seed": sampling_seed,
                     }
 
         if planner_error:
@@ -1219,6 +1295,8 @@ class Planner:
                 "raw_model_output": visible_model_text(raw),
                 "planner_error": planner_error,
                 "planner_attempts": 1,
+                "sampling_temperature": sampling_temperature,
+                "sampling_seed": sampling_seed,
             }
 
         task_point_id = str(payload.get("task_point_id") or payload.get("point_id") or "").strip()
@@ -1238,4 +1316,6 @@ class Planner:
             "router": "model_rwkv_json",
             "raw_model_output": visible_model_text(raw),
             "planner_attempts": 1,
+            "sampling_temperature": sampling_temperature,
+            "sampling_seed": sampling_seed,
         }

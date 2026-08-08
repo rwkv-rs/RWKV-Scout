@@ -1,0 +1,164 @@
+{
+  "cases": [
+    {
+      "case_id": "INT_001",
+      "query": "请根据 Python 3.14 官方文档说明：已经安装 free-threaded build 后，如何临时让它在运行时启用 GIL？不要回答如何构建 free-threaded Python。"
+    },
+    {
+      "case_id": "INT_002",
+      "query": "如何用 Python 3.14 官方提供的方式确认当前解释器是否启用了 GIL？给出 API 名称和返回值含义。"
+    },
+    {
+      "case_id": "INT_003",
+      "query": "截至 2026-08-08，Node.js 内置 WebSocket API 目前是什么稳定性状态？它在哪个版本不再是 experimental？请引用 Node.js 官方文档。"
+    },
+    {
+      "case_id": "INT_004",
+      "query": "截至 2026-08-08，Node.js 全局 EventSource API 是稳定还是 experimental？它最早加入哪个版本？请以 Node.js 官方文档为准，不要回答 WebSocket。"
+    },
+    {
+      "case_id": "INT_005",
+      "query": "从 PyTorch 官方 Start Locally 页面查找 Linux、pip、Python、ROCm 6.3 这一组合对应的安装命令；如果当前选择器已不提供 ROCm 6.3，要明确说明页面实际提供的版本。"
+    },
+    {
+      "case_id": "INT_006",
+      "query": "根据 JAX 官方安装文档，使用 pip 安装支持本机 CUDA 13 的 JAX 应执行什么命令？同时说明官方列出的 Linux 驱动最低版本。"
+    },
+    {
+      "case_id": "INT_007",
+      "query": "根据 PostgreSQL 当前官方文档，jsonb_path_ops 与默认 jsonb GIN operator class 相比支持哪些操作、主要性能取舍是什么？"
+    },
+    {
+      "case_id": "INT_008",
+      "query": "根据 nginx 官方 WebSocket proxying 文档，反向代理 WebSocket 时为什么必须显式传递 Upgrade 和 Connection 头？给出官方配置片段。"
+    },
+    {
+      "case_id": "INT_009",
+      "query": "截至 2026-08-08，FastAPI 官方 release notes 中最新发布版本号和发布日期是什么？"
+    },
+    {
+      "case_id": "INT_010",
+      "query": "截至 2026-08-08，Pydantic v2 的最新正式版本号和发布日期是什么？优先使用 Pydantic 官方 GitHub Release 或官方 release notes。"
+    },
+    {
+      "case_id": "INT_011",
+      "query": "截至 2026-08-08，Kubernetes 最新稳定 minor release 是哪一版，正式发布日期是哪天？请使用 Kubernetes 官方发布信息。"
+    },
+    {
+      "case_id": "INT_012",
+      "query": "截至 2026-08-08，Python 3.13 系列最新 maintenance release 是哪个版本，发布日期是什么？请以 python.org 官方页面为准。"
+    },
+    {
+      "case_id": "INT_013",
+      "query": "截至 2026-08-08，Node.js 当前 Active LTS 或 Maintenance LTS 的最高版本线及其代号是什么？请区分 Current，并引用官方 release schedule。"
+    },
+    {
+      "case_id": "INT_014",
+      "query": "截至 2026-08-08，Rust 官方最新 stable 版本号和发布日期是什么？"
+    },
+    {
+      "case_id": "INT_015",
+      "query": "截至 2026-08-08，Go 官方最新稳定版本号和发布日期是什么？不要把 release candidate 当成正式版。"
+    },
+    {
+      "case_id": "INT_016",
+      "query": "截至 2026-08-08，curl 官方最新发布版本号和发布日期是什么？"
+    },
+    {
+      "case_id": "INT_017",
+      "query": "截至 2026-08-08，从 CISA 官方 Known Exploited Vulnerabilities Catalog 找出最近加入的一条记录，给出 CVE、厂商/产品、加入日期和要求修复期限。"
+    },
+    {
+      "case_id": "INT_018",
+      "query": "截至 2026-08-08，astral-sh/uv GitHub 仓库最新正式 Release 的 tag、发布日期和标题是什么？"
+    },
+    {
+      "case_id": "INT_019",
+      "query": "查找 arXiv:2407.21783，给出论文准确标题、前三位作者以及首次提交日期，并附 arXiv 链接。"
+    },
+    {
+      "case_id": "INT_020",
+      "query": "根据 NVD 或 sudo 官方安全公告说明 CVE-2025-32463 影响什么功能、利用所需的关键条件以及官方给出的修复版本。"
+    },
+    {
+      "case_id": "INT_021",
+      "query": "截至 2026-08-08，Ubuntu 官方 Security Notices 列表中最新一条 USN 的编号、标题和发布日期是什么？"
+    },
+    {
+      "case_id": "INT_022",
+      "query": "只读取这个页面并回答：https://docs.python.org/3/library/concurrent.interpreters.html 。concurrent.interpreters 模块解决什么问题，Interpreter 与 InterpreterPoolExecutor 的职责分别是什么？"
+    },
+    {
+      "case_id": "INT_023",
+      "query": "只根据 https://nodejs.org/api/sqlite.html 回答：DatabaseSync 最早加入哪个 Node.js 版本，它的 API 是同步还是异步，并列出打开数据库时文档给出的两个 option。"
+    },
+    {
+      "case_id": "INT_024",
+      "query": "只读取 https://www.postgresql.org/docs/current/datatype-json.html ：官方示例中对 jsonb 建 GIN 索引的两种 operator class 写法是什么，各自适用什么查询？"
+    },
+    {
+      "case_id": "INT_025",
+      "query": "只根据 https://www.rfc-editor.org/rfc/rfc9110.html 回答：RFC 9110 如何定义 idempotent method，列出的幂等 HTTP 方法有哪些？"
+    },
+    {
+      "case_id": "INT_026",
+      "query": "在 V2EX 找一篇截至 2026-08-08 最近发布、主题明确涉及 macOS 升级体验的用户帖子，给出标题、发帖时间、主要问题和帖子链接；不要用节点导航页代替帖子。"
+    },
+    {
+      "case_id": "INT_027",
+      "query": "在 Stack Overflow 找到一个讨论 Python 报错“coroutine was never awaited”的高票问答，给出问题标题、被接受答案的核心修复方式和链接。"
+    },
+    {
+      "case_id": "INT_028",
+      "query": "在 Reddit r/LocalLLaMA 中查找截至 2026-08-08 最近一个月明确讨论 RWKV 新模型或新版本的帖子，概括帖子主张并给出链接；若没有可靠结果就说明未确认。"
+    },
+    {
+      "case_id": "INT_029",
+      "query": "在 astral-sh/uv 的 GitHub Issues 中找截至 2026-08-08 最近关闭、标题明确涉及 Windows 的 bug，给出 issue 编号、标题、关闭日期和链接。"
+    },
+    {
+      "case_id": "INT_030",
+      "query": "查询上海 2026-08-08 当天的官方天气预报：最高/最低气温、主要天气现象，以及是否存在生效中的气象预警。"
+    },
+    {
+      "case_id": "INT_031",
+      "query": "截至 2026-08-08 当前，北京市是否有生效中的官方气象预警？如有给出类型、级别和发布时间；如无要明确说明查询到的官方状态。"
+    },
+    {
+      "case_id": "INT_032",
+      "query": "查询深圳从 2026-08-08 起未来 24 小时的官方天气预报，给出温度范围、降水描述和风力信息。"
+    },
+    {
+      "case_id": "INT_033",
+      "query": "截至 2026-08-08，Minecraft Java Edition 最新正式版版本号是什么？根据 Minecraft 官方发布说明概括这次更新的核心主题或主要新增内容。"
+    },
+    {
+      "case_id": "INT_034",
+      "query": "截至 2026-08-08，Warframe 当前最新主要更新的官方名称是什么？用官方更新说明概括其主题和两项核心内容。"
+    },
+    {
+      "case_id": "INT_035",
+      "query": "截至 2026-08-08，No Man's Sky 最新主要更新叫什么？根据游戏官网说明概括更新主题和三项主要内容。"
+    },
+    {
+      "case_id": "INT_036",
+      "query": "截至 2026-08-08，Path of Exile 当前正式赛季或 challenge league 名称是什么？根据官方公告说明它的核心机制主题。"
+    },
+    {
+      "case_id": "INT_037",
+      "query": "截至 2026-08-08，FINAL FANTASY XIV 当前最新正式 patch 编号和标题是什么？根据官方 patch notes 概括主要内容主题。"
+    },
+    {
+      "case_id": "INT_038",
+      "query": "截至 2026-08-08，《原神》当前正式版本号和版本主题名是什么？请使用 HoYoverse 官方公告，并列出本版本两项主要内容。"
+    },
+    {
+      "case_id": "INT_039",
+      "query": "截至 2026-08-08，Blender 官方当前最新 LTS 版本是哪一条版本线，它的支持结束日期是什么？不要把普通稳定版当成 LTS。"
+    },
+    {
+      "case_id": "INT_040",
+      "query": "截至 2026-08-08，kernel.org 首页列出的 latest stable Linux kernel 版本和发布日期是什么？同时区分 mainline。"
+    }
+  ]
+}

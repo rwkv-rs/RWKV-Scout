@@ -775,7 +775,7 @@ function TaskTimingCard({ task }) {
   if (!task) return null;
 
   const runTime = parseTaskTime(task.id);
-  const isDone = ["completed", "failed", "ready"].includes(task.status);
+  const isDone = ["ready", "network_error"].includes(task.status);
   const entries = [
     ["排队", task.queued_at || "-"],
     ["运行", runTime || task.updated_at || "-"],
@@ -1364,7 +1364,7 @@ export function App() {
       ?.content || "",
     [executionEvents],
   );
-  const visibleFinalAnswer = String(markdown || eventFinalAnswer || "").trim();
+  const visibleFinalAnswer = String(markdown || eventFinalAnswer || "");
   const isAnyRunning = history.some((task) => task.status === "running");
   const activeTaskItem = history.find((task) => task.id === activeId) || null;
   const reportScrollAffordance = useReportScrollAffordance(
@@ -1492,7 +1492,7 @@ export function App() {
       const previous = prevStatusRef.current;
       const current = activeTaskItem.status;
 
-      if (previous === "running" && (current === "completed" || current === "ready")) {
+      if (previous === "running" && current === "ready") {
         selectReport(activeTaskItem.id);
       }
 
@@ -1615,7 +1615,6 @@ export function App() {
         model_key: taskObj.modelKey || modelKey,
         queued_at: taskObj.queuedAt,
         slm_async_enabled: asyncEnabled,
-        acceptance_case_id: taskObj.caseId || null,
       });
 
       toast.success("任务已提交");
@@ -1627,8 +1626,8 @@ export function App() {
     }
   }
 
-  async function handleQuerySubmit(newQuery, caseId = null) {
-    const taskObj = { query: newQuery, caseId, modelKey, queuedAt: formatCurrentTime() };
+  async function handleQuerySubmit(newQuery) {
+    const taskObj = { query: newQuery, modelKey, queuedAt: formatCurrentTime() };
 
     if (!asyncEnabled && (isAnyRunning || isSubmitting)) {
       setTaskQueue((current) => [...current, taskObj]);

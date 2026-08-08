@@ -39,7 +39,10 @@ from rwkv_search.service import SearchService  # noqa: E402
 class VLLMAnswerer:
     def __init__(self) -> None:
         self.endpoint = os.environ.get("RWKV_SEARCH_ENDPOINT", "http://127.0.0.1:29572/v1/chat/completions")
-        self.api_key = os.environ.get("RWKV_SEARCH_API_KEY", "rwkv-skills")
+        self.api_key = os.environ.get("RWKV_SEARCH_API_KEY") or os.environ.get(
+            "RWKV_ECRA_LLM_API_KEY",
+            "",
+        )
         self.model = os.environ.get("RWKV_SEARCH_MODEL", "rwkv7-g1h-7.2b-20260710-ctx10240")
 
     def answer(self, query, route, evidence, *, as_of, timezone, history=None, **_kwargs):

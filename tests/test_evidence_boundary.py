@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from agent.page_evidence import extract_single_page_evidence
 from agent.retrieval_loop import merge_retrieval_results
 from agent.retrieval_synthesis import _clean_answer, build_evidence_context, synthesize_retrieval_answer
-from utils.evidence_quality import evidence_kind, evidence_text, has_substantive_evidence
+from utils.evidence_quality import clean_page_body, evidence_kind, evidence_text, has_substantive_evidence
 
 
 class _Model:
@@ -36,7 +36,7 @@ def test_discovery_metadata_never_enters_final_evidence_context():
     )
     assert context["selected_evidence"] == []
     assert context["usable_evidence_count"] == 0
-    assert context["text"] == "(no retrieved evidence)"
+    assert context["text"] == "RETRIEVED SOURCES:\nNo source text was retrieved."
 
 
 def test_date_query_keeps_multiple_substantive_sources_and_separates_page_date():
@@ -54,7 +54,7 @@ def test_date_query_keeps_multiple_substantive_sources_and_separates_page_date()
     assert "Published:" not in context["text"]
     assert "unsupported summary" not in context["text"].casefold()
     assert "2026-07-30" not in context["text"]
-    assert all(item["evidence_boundary"].endswith("only") for item in context["selected_evidence"])
+    assert all(item["evidence_text"] for item in context["selected_evidence"])
 
 
 def test_merge_discards_title_only_results_before_ranking():
@@ -94,6 +94,26 @@ def test_model_extraction_is_not_the_final_evidence_body():
     )
     assert "The original source body" in context["text"]
     assert "model-only unsupported claim" not in context["text"]
+
+
+def test_final_context_repeats_only_grounded_locator_spans():
+    source = "Install the tool, then verify it with `tool --version`."
+    context = build_evidence_context(
+        {
+            "results": [
+                {
+                    "url": "https://example.com/install",
+                    "source_excerpt": source,
+                    "model_locator_facts": "[chunk-1] verify it with `tool --version`.",
+                    "model_extracted_facts": "The model invented `other --version`.",
+                }
+            ]
+        }
+    )
+
+    assert "VERBATIM SOURCE LOCATORS" in context["text"]
+    assert "tool --version" in context["text"]
+    assert "other --version" not in context["text"]
 
 
 def test_discovery_snippet_cannot_be_promoted_by_model_facts():
@@ -138,13 +158,64 @@ def test_short_page_is_rejected_without_model_extraction_call():
     assert model.calls == []
 
 
-def test_final_cleanup_removes_protocol_and_exact_repeats():
-    cleaned = _clean_answer(
+def test_short_technical_configuration_is_substantive_evidence():
+    body = 'proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";'
+    item = {
+        "content": body,
+        "evidence_origin": "fetched_page_body",
+        "body_verified": True,
+    }
+    assert has_substantive_evidence(item)
+    assert clean_page_body(body)["body_eligible"] is True
+
+
+def test_short_factual_page_survives_navigation_cleanup():
+    body = (
+        "Skip to content\n登录\n[Image/Complex Table Filtered]\n"
+        "百度百科：Python 是一种广泛使用的高级编程语言，强调代码可读性和开发效率。"
+        "它支持面向对象、函数式和过程式编程，常用于数据分析、自动化和人工智能开发。"
+    )
+    quality = clean_page_body(body)
+    assert quality["body_eligible"] is True
+    assert quality["clean_chars"] >= 70
+    assert "Skip to" not in quality["text"]
+    assert "登录" not in quality["text"]
+    assert "Image/Complex Table Filtered" not in quality["text"]
+    assert "Python" in quality["text"]
+
+
+def test_navigation_only_body_is_not_substantive_evidence():
+    body = "\n".join(
+        ["Skip to content", "Log in", "Sign up", "[Image/Complex Table Filtered]", "[Home](https://example.com)"]
+        * 20
+    )
+    quality = clean_page_body(body)
+    assert quality["body_eligible"] is False
+    assert quality["text"] == ""
+
+
+def test_long_markdown_navigation_line_keeps_facts_but_drops_targets():
+    body = (
+        "[Skip](javascript:void((function(){open_menu()}))) "
+        "[TypeScript 6.0 RC: Temporal API and Breaking Changes](https://example.com/share) "
+        "March 11, 2026. "
+        "The release notes describe the Temporal API changes and the compatibility impact for applications."
+    )
+    quality = clean_page_body(body)
+    assert quality["body_eligible"] is True
+    assert "javascript:" not in quality["text"]
+    assert "https://example.com/share" in quality["text"]
+    assert "TypeScript 6.0 RC" in quality["text"]
+    assert "March 11, 2026" in quality["text"]
+
+
+def test_final_answer_adapter_preserves_protocol_and_exact_repeats():
+    output = (
         "Assistant: <think>hidden</think>\n"
         "The answer is supported.\n\nThe answer is supported.\n"
         "Function output: {\"name\":\"web_search\"}"
     )
-    assert cleaned == "The answer is supported."
+    assert _clean_answer(output) == output
 
 
 def test_final_no_evidence_prompt_excludes_discovery_facts():
@@ -158,6 +229,7 @@ def test_final_no_evidence_prompt_excludes_discovery_facts():
         },
         llm=model,
     )
-    assert "NO_USABLE_EVIDENCE" in model.calls[0][0]
+    assert "No source text was retrieved." in model.calls[0][0]
+    assert "do not substitute a plausible value or invent an example" in model.calls[0][0]
     assert "2024-01-01" not in model.calls[0][0]
     assert result["citation_refs"] == []

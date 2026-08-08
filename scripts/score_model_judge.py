@@ -53,8 +53,8 @@ def main() -> int:
         "sample_count": len(results),
         "dry_run": args.dry_run,
         "model": {
-            **{key: value for key, value in config.get_experiment_model_config().items() if key != "api_key"},
-            "api_key_configured": bool(config.get_experiment_model_config().get("api_key")),
+            **config.get_experiment_model_config(),
+            "api_key_configured": bool(config.get_llm_api_key()),
         },
         "prompt_version": config.get_prompt_version(),
         "rubric": packet["rubric"],

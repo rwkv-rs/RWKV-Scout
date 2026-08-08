@@ -1,0 +1,514 @@
+{
+  "suite": "retrieval-required-generalization-100",
+  "created_at": "2026-08-08",
+  "anti_cheating_contract": "Cases contain no reference answers. Only query is passed to the agent; category is retained for post-run audit stratification.",
+  "cases": [
+    {
+      "case_id": "game_live_001_genshin",
+      "category": "game_live_version",
+      "query": "截至测试当天，《原神》正式服当前版本号、版本名称和上线日期分别是什么？请用游戏官方公告核对，并概括该版本的主题。"
+    },
+    {
+      "case_id": "game_live_002_hsr",
+      "category": "game_live_version",
+      "query": "截至测试当天，《崩坏：星穹铁道》当前正式版本的版本号、版本标题和发布日期是什么？请依据官方版本公告说明其核心主题。"
+    },
+    {
+      "case_id": "game_live_003_zzz",
+      "category": "game_live_version",
+      "query": "截至测试当天，《绝区零》正式服正在运行哪个版本？给出官方版本名称、上线日期，并用一句话概括版本主题。"
+    },
+    {
+      "case_id": "game_live_004_wuthering_waves",
+      "category": "game_live_version",
+      "query": "截至测试当天，《鸣潮》当前正式版本号和版本名称是什么？请从官方公告核对上线时间与主要剧情或区域主题。"
+    },
+    {
+      "case_id": "game_live_005_fortnite",
+      "category": "game_live_season",
+      "query": "截至测试当天，Fortnite Battle Royale 当前属于第几章第几赛季？官方给出的赛季名称或主题是什么，并有哪些代表性的地图或玩法变化？"
+    },
+    {
+      "case_id": "game_live_006_apex",
+      "category": "game_live_season",
+      "query": "截至测试当天，Apex Legends 当前赛季的编号和名称是什么？请依据 EA 官方赛季页面列出两项核心玩法更新。"
+    },
+    {
+      "case_id": "game_live_007_overwatch",
+      "category": "game_live_season",
+      "query": "截至测试当天，Overwatch 2 当前是第几赛季？请用 Blizzard 官方公告说明赛季主题及最主要的新英雄、地图或模式内容。"
+    },
+    {
+      "case_id": "game_live_008_valorant",
+      "category": "game_live_patch",
+      "query": "截至测试当天，VALORANT 正式服最新补丁版本号和发布日期是什么？从 Riot 官方补丁说明中概括两项最重要的英雄、地图或系统调整。"
+    },
+    {
+      "case_id": "game_live_009_league",
+      "category": "game_live_patch",
+      "query": "截至测试当天，《英雄联盟》正式服最新补丁版本号是什么？请依据 Riot 官方补丁说明概括最重要的两项英雄或系统变化。"
+    },
+    {
+      "case_id": "game_live_010_dota2",
+      "category": "game_live_patch",
+      "query": "截至测试当天，Dota 2 最新游戏性更新的版本号和发布日期是什么？请从 Valve 官方更新说明概括两个主要平衡方向。"
+    },
+    {
+      "case_id": "game_live_011_cs2",
+      "category": "game_live_patch",
+      "query": "截至测试当天，Counter-Strike 2 最新一篇官方 Release Notes 发布于哪一天？其中最主要的两项游戏性或地图变化是什么？"
+    },
+    {
+      "case_id": "game_live_012_minecraft_java",
+      "category": "game_live_version",
+      "query": "截至测试当天，Minecraft: Java Edition 最新稳定版版本号和发布日期是什么？请依据 Minecraft 官方发布说明概括该版本的主要内容主题。"
+    },
+    {
+      "case_id": "game_live_013_ffxiv",
+      "category": "game_live_patch",
+      "query": "截至测试当天，FINAL FANTASY XIV 正式服当前主要补丁版本号与补丁标题是什么？请用官方 Patch Notes 概括新增主线或核心玩法。"
+    },
+    {
+      "case_id": "game_live_014_wow",
+      "category": "game_live_patch",
+      "query": "截至测试当天，World of Warcraft 正式服当前主要内容更新的版本号和名称是什么？请依据 Blizzard 官方说明列出一项核心新内容。"
+    },
+    {
+      "case_id": "game_live_015_diablo4",
+      "category": "game_live_season",
+      "query": "截至测试当天，Diablo IV 当前赛季编号和官方名称是什么？请用 Blizzard 官方赛季介绍说明其核心赛季机制。"
+    },
+    {
+      "case_id": "game_live_016_path_of_exile",
+      "category": "game_live_league",
+      "query": "截至测试当天，Path of Exile 当前挑战联盟的名称和上线日期是什么？请依据官方公告概括联盟核心机制。"
+    },
+    {
+      "case_id": "game_live_017_warframe",
+      "category": "game_live_update",
+      "query": "截至测试当天，Warframe 最近一次主要内容更新的官方名称和发布日期是什么？其核心任务、区域或玩法焦点是什么？"
+    },
+    {
+      "case_id": "game_live_018_destiny2",
+      "category": "game_live_episode",
+      "query": "截至测试当天，Destiny 2 当前主要赛季或 Episode 内容叫什么？请根据 Bungie 官方页面说明上线日期和主题。"
+    },
+    {
+      "case_id": "game_live_019_pubg",
+      "category": "game_live_patch",
+      "query": "截至测试当天，PUBG: BATTLEGROUNDS PC 正式服最新 Update 版本号是什么？请依据官方 Patch Notes 概括最重要的地图或系统变化。"
+    },
+    {
+      "case_id": "game_live_020_rainbow6",
+      "category": "game_live_season",
+      "query": "截至测试当天，Rainbow Six Siege 当前赛季行动的官方名称是什么？新干员是谁，其核心装备如何工作？请使用 Ubisoft 官方资料。"
+    },
+
+    {
+      "case_id": "release_current_001_python",
+      "category": "current_release",
+      "query": "截至测试当天，Python 最新稳定版的完整版本号和发布日期是什么？请使用 python.org 官方发布页核对。"
+    },
+    {
+      "case_id": "release_current_002_node",
+      "category": "current_release",
+      "query": "截至测试当天，Node.js 当前 LTS 主版本、代号和最新补丁版本分别是什么？请使用 nodejs.org 官方 release 信息核对。"
+    },
+    {
+      "case_id": "release_current_003_go",
+      "category": "current_release",
+      "query": "截至测试当天，Go 最新稳定版版本号和发布日期是什么？请使用 go.dev 官方发布历史核对。"
+    },
+    {
+      "case_id": "release_current_004_rust",
+      "category": "current_release",
+      "query": "截至测试当天，Rust 最新稳定版版本号和发布日期是什么？从 Rust 官方发布说明中列出两项主要变化。"
+    },
+    {
+      "case_id": "release_current_005_kubernetes",
+      "category": "current_release",
+      "query": "截至测试当天，Kubernetes 最新稳定 minor release 及其最新 patch 版本是什么？分别给出官方发布日期。"
+    },
+    {
+      "case_id": "release_current_006_docker_desktop",
+      "category": "current_release",
+      "query": "截至测试当天，Docker Desktop 最新稳定版本号和发布日期是什么？请依据 Docker 官方 Release Notes。"
+    },
+    {
+      "case_id": "release_current_007_git",
+      "category": "current_release",
+      "query": "截至测试当天，Git 最新正式版本号和发布日期是什么？请使用 git-scm.com 或 Git 官方发布记录核对。"
+    },
+    {
+      "case_id": "release_current_008_postgresql",
+      "category": "current_release",
+      "query": "截至测试当天，PostgreSQL 官方最近一次 minor release 覆盖哪些受支持主版本？给出发布日期和各分支的新版本号。"
+    },
+    {
+      "case_id": "release_current_009_redis",
+      "category": "current_release",
+      "query": "截至测试当天，Redis Community Edition 最新稳定版本号和发布日期是什么？请从 Redis 官方发布记录核对。"
+    },
+    {
+      "case_id": "release_current_010_sqlite",
+      "category": "current_release",
+      "query": "截至测试当天，SQLite 最新正式版本号与发布日期是什么？请使用 sqlite.org 官方 chronology 核对。"
+    },
+    {
+      "case_id": "release_current_011_firefox",
+      "category": "current_release",
+      "query": "截至测试当天，Firefox Desktop 最新稳定版版本号和发布日期是什么？从 Mozilla 官方 Release Notes 概括一项面向用户的新功能。"
+    },
+    {
+      "case_id": "release_current_012_chrome",
+      "category": "current_release",
+      "query": "截至测试当天，Chrome Stable 桌面版最新版本号和发布时间是什么？官方博文披露修复了多少项安全问题？"
+    },
+    {
+      "case_id": "release_current_013_ubuntu",
+      "category": "current_release",
+      "query": "截至测试当天，Ubuntu 最新 LTS point release 的版本号和发布日期是什么？请使用 Ubuntu 官方发布信息。"
+    },
+    {
+      "case_id": "release_current_014_debian",
+      "category": "current_release",
+      "query": "截至测试当天，Debian stable 最新 point release 的版本号和发布日期是什么？请使用 Debian 官方 News。"
+    },
+    {
+      "case_id": "release_current_015_android_bulletin",
+      "category": "current_release",
+      "query": "截至测试当天，Android 最新月度安全公告对应哪个月份，列出了哪些 security patch level？请使用 Android 官方 bulletin。"
+    },
+    {
+      "case_id": "release_current_016_windows11",
+      "category": "current_release",
+      "query": "截至测试当天，Windows 11 当前公开正式版本和最新 OS Build 是什么？请依据 Microsoft 官方 release health 页面。"
+    },
+    {
+      "case_id": "release_current_017_cmake",
+      "category": "current_release",
+      "query": "截至测试当天，CMake 最新正式版本号和发布日期是什么？请依据 Kitware 官方发布记录。"
+    },
+    {
+      "case_id": "release_current_018_llvm",
+      "category": "current_release",
+      "query": "截至测试当天，LLVM 最新稳定 release 的完整版本号和发布日期是什么？请使用 LLVM 官方 Release Notes 或 GitHub release。"
+    },
+    {
+      "case_id": "release_current_019_dotnet",
+      "category": "current_release",
+      "query": "截至测试当天，.NET 当前受支持版本最近一次 servicing release 的版本号和发布日期是什么？请使用 Microsoft 官方下载或 release 页面。"
+    },
+    {
+      "case_id": "release_current_020_cuda",
+      "category": "current_release",
+      "query": "截至测试当天，NVIDIA CUDA Toolkit 最新 production release 的版本号和发布日期是什么？请依据 NVIDIA 官方 Release Notes。"
+    },
+
+    {
+      "case_id": "github_release_001_uv",
+      "category": "github_release",
+      "query": "截至测试当天，astral-sh/uv GitHub 仓库最新正式 release 的 tag 和发布时间是什么？概括 release notes 中两项主要变化。"
+    },
+    {
+      "case_id": "github_release_002_ruff",
+      "category": "github_release",
+      "query": "截至测试当天，astral-sh/ruff 最新 GitHub release 的 tag、发布时间和两项主要改动是什么？"
+    },
+    {
+      "case_id": "github_release_003_fastapi",
+      "category": "github_release",
+      "query": "截至测试当天，fastapi/fastapi 最新正式 GitHub release tag 和发布时间是什么？发布说明的核心变化是什么？"
+    },
+    {
+      "case_id": "github_release_004_pydantic",
+      "category": "github_release",
+      "query": "截至测试当天，pydantic/pydantic 最新正式 GitHub release 的版本号和发布时间是什么？列出两项用户可见变化。"
+    },
+    {
+      "case_id": "github_release_005_vllm",
+      "category": "github_release",
+      "query": "截至测试当天，vllm-project/vllm 最新正式 GitHub release tag 和发布日期是什么？概括两个重要功能或兼容性变化。"
+    },
+    {
+      "case_id": "github_release_006_llama_cpp",
+      "category": "github_release",
+      "query": "截至测试当天，ggml-org/llama.cpp 最新 GitHub release tag 与发布时间是什么？该 release 说明中最主要的变化是什么？"
+    },
+    {
+      "case_id": "github_release_007_ollama",
+      "category": "github_release",
+      "query": "截至测试当天，ollama/ollama 最新正式 GitHub release 版本号和发布时间是什么？概括两项 release notes 变化。"
+    },
+    {
+      "case_id": "github_release_008_bun",
+      "category": "github_release",
+      "query": "截至测试当天，oven-sh/bun 最新正式 GitHub release tag、发布时间和两项主要更新是什么？"
+    },
+    {
+      "case_id": "github_release_009_deno",
+      "category": "github_release",
+      "query": "截至测试当天，denoland/deno 最新正式 GitHub release 的版本号和发布时间是什么？概括两项关键变化。"
+    },
+    {
+      "case_id": "github_release_010_pytorch",
+      "category": "github_release",
+      "query": "截至测试当天，pytorch/pytorch 最新正式 GitHub release tag 与发布日期是什么？从官方 release notes 概括两个重点。"
+    },
+
+    {
+      "case_id": "security_current_001_cisa_kev",
+      "category": "current_security",
+      "query": "截至测试当天，CISA Known Exploited Vulnerabilities Catalog 最近一次新增记录是哪一天？列出该批新增 CVE、相关产品和整改截止日。"
+    },
+    {
+      "case_id": "security_current_002_android",
+      "category": "current_security",
+      "query": "Android 最新月度安全公告中，最高严重级别的问题影响哪个组件？列出公告明确标为 Critical 的 CVE 与修复 patch level。"
+    },
+    {
+      "case_id": "security_current_003_chrome",
+      "category": "current_security",
+      "query": "Chrome Stable 最近一次安全更新修复了哪些被官方点名的高危 CVE？给出更新日期、受影响平台和修复后版本。"
+    },
+    {
+      "case_id": "security_current_004_firefox",
+      "category": "current_security",
+      "query": "截至测试当天，Mozilla 最近一份 Firefox Security Advisory 的编号、影响等级、受影响版本和修复版本是什么？"
+    },
+    {
+      "case_id": "security_current_005_github_enterprise",
+      "category": "current_security",
+      "query": "截至测试当天，GitHub Enterprise Server 最近发布的安全修复公告影响哪些版本系列，建议升级到哪些版本？"
+    },
+    {
+      "case_id": "security_current_006_openssl",
+      "category": "current_security",
+      "query": "截至测试当天，OpenSSL 官方最近发布的安全公告涉及哪些 CVE、严重级别和修复版本？"
+    },
+    {
+      "case_id": "security_current_007_kubernetes",
+      "category": "current_security",
+      "query": "截至测试当天，Kubernetes 官方最新 Security Advisory 的 CVE 编号、受影响组件、受影响版本和缓解或修复方式是什么？"
+    },
+    {
+      "case_id": "security_current_008_cisco",
+      "category": "current_security",
+      "query": "截至测试当天，Cisco 最近一份 Critical Security Advisory 的公告编号、受影响产品和可用修复是什么？请仅使用 Cisco 官方公告。"
+    },
+    {
+      "case_id": "security_current_009_microsoft",
+      "category": "current_security",
+      "query": "Microsoft 最近一个月度安全更新日公开了哪些当时已被利用的零日漏洞？列出 CVE 和受影响产品，并引用 Microsoft 官方资料。"
+    },
+    {
+      "case_id": "security_current_010_gitlab",
+      "category": "current_security",
+      "query": "截至测试当天，GitLab 最近一份 Critical Security Release 公告修复了哪些高危或严重问题，受影响与修复版本分别是什么？"
+    },
+
+    {
+      "case_id": "procedure_official_001_github_oidc",
+      "category": "official_procedure",
+      "query": "按照 GitHub 官方文档，GitHub Actions 工作流使用 OIDC 获取云端令牌时，job 至少要声明哪些 permissions？给出最小 YAML 片段。"
+    },
+    {
+      "case_id": "procedure_official_002_k8s_rollout",
+      "category": "official_procedure",
+      "query": "按照 Kubernetes 官方文档，如何重启一个 Deployment 并等待 rollout 完成？给出两条最小 kubectl 命令。"
+    },
+    {
+      "case_id": "procedure_official_003_compose_health",
+      "category": "official_procedure",
+      "query": "按照 Docker Compose 官方文档，怎样让一个服务等待依赖服务 healthcheck 通过后再启动？给出最小 compose.yaml 片段。"
+    },
+    {
+      "case_id": "procedure_official_004_systemd_restart",
+      "category": "official_procedure",
+      "query": "按照 systemd 官方手册，怎样让服务仅在异常退出时自动重启，并设置重启等待时间？给出最小 [Service] 配置。"
+    },
+    {
+      "case_id": "procedure_official_005_pg_parallel",
+      "category": "official_procedure",
+      "query": "按照 PostgreSQL 官方文档，如何创建并行逻辑备份并并行恢复？给出 pg_dump 与 pg_restore 的最小命令和格式限制。"
+    },
+    {
+      "case_id": "procedure_official_006_redis_acl",
+      "category": "official_procedure",
+      "query": "按照 Redis 官方文档，如何创建一个只能读取 app:* 键的 ACL 用户？给出 ACL SETUSER 的最小命令。"
+    },
+    {
+      "case_id": "procedure_official_007_nginx_rate_limit",
+      "category": "official_procedure",
+      "query": "按照 nginx 官方文档，如何按客户端 IP 设置每秒请求速率限制并允许少量突发？给出最小 http/location 配置。"
+    },
+    {
+      "case_id": "procedure_official_008_caddy_health",
+      "category": "official_procedure",
+      "query": "按照 Caddy 官方文档，reverse_proxy 如何配置主动健康检查的 URI 和检查间隔？给出最小 Caddyfile 片段。"
+    },
+    {
+      "case_id": "procedure_official_009_codeowners",
+      "category": "official_procedure",
+      "query": "按照 GitHub 官方文档，CODEOWNERS 文件可放在哪些位置？给出让 /docs/ 目录由两个团队共同负责的最小规则。"
+    },
+    {
+      "case_id": "procedure_official_010_gitlab_cache",
+      "category": "official_procedure",
+      "query": "按照 GitLab CI 官方文档，如何让 cache key 随依赖锁文件内容变化？给出使用 cache:key:files 的最小 YAML。"
+    },
+    {
+      "case_id": "procedure_official_011_uv_frozen",
+      "category": "official_procedure",
+      "query": "按照 uv 官方文档，在 CI 中如何严格按现有 uv.lock 同步环境且禁止修改锁文件？给出最小命令。"
+    },
+    {
+      "case_id": "procedure_official_012_pip_hashes",
+      "category": "official_procedure",
+      "query": "按照 pip 官方文档，怎样强制 requirements 文件中的每个依赖都校验哈希？给出命令及最小 requirements 示例。"
+    },
+    {
+      "case_id": "procedure_official_013_poetry_lock",
+      "category": "official_procedure",
+      "query": "按照 Poetry 当前官方文档，如何在不更新已锁定版本的前提下重新生成或同步锁文件环境？列出对应命令及差异。"
+    },
+    {
+      "case_id": "procedure_official_014_k8s_default_deny",
+      "category": "official_procedure",
+      "query": "按照 Kubernetes 官方文档，如何为某命名空间设置同时拒绝所有入站和出站流量的默认 NetworkPolicy？给出最小 YAML。"
+    },
+    {
+      "case_id": "procedure_official_015_terraform_lock",
+      "category": "official_procedure",
+      "query": "按照 HashiCorp Terraform 官方文档，如何更新 provider 选择并刷新 dependency lock file？给出命令并说明普通 init 与 -upgrade 的区别。"
+    },
+
+    {
+      "case_id": "current_data_001_shanghai_warning",
+      "category": "current_public_data",
+      "query": "截至查询时刻，上海市是否有正在生效的气象预警？如有，列出预警类型、级别和发布时间；如无，明确说明未查到生效预警。"
+    },
+    {
+      "case_id": "current_data_002_china_warnings",
+      "category": "current_public_data",
+      "query": "截至查询时刻，中国国家预警信息发布中心当前展示的最高等级气象预警有哪些？列出预警类型和涉及地区。"
+    },
+    {
+      "case_id": "current_data_003_noaa_cyclones",
+      "category": "current_public_data",
+      "query": "截至查询时刻，NOAA/NHC 当前有哪些活跃热带气旋？列出名称、所在海盆和最新强度；若没有则明确说明。"
+    },
+    {
+      "case_id": "current_data_004_usgs_earthquake",
+      "category": "current_public_data",
+      "query": "USGS 最近记录的一次 M5.0 及以上地震发生在何时、何地、震级和深度是多少？请使用 USGS 实时数据。"
+    },
+    {
+      "case_id": "current_data_005_nasa_apod",
+      "category": "current_public_data",
+      "query": "NASA Astronomy Picture of the Day 在测试当天的标题是什么？用两句话概括官方说明并给出对应日期。"
+    },
+    {
+      "case_id": "current_data_006_github_status",
+      "category": "current_public_data",
+      "query": "截至查询时刻，GitHub Status 是否有未解决事件或服务降级？列出受影响组件和最新状态；若无则明确说明。"
+    },
+    {
+      "case_id": "current_data_007_pypi_transformers",
+      "category": "current_public_data",
+      "query": "截至测试当天，PyPI 上 transformers 包的最新稳定版本号和发布时间是什么？请使用 PyPI 项目元数据核对。"
+    },
+    {
+      "case_id": "current_data_008_npm_typescript",
+      "category": "current_public_data",
+      "query": "截至测试当天，npm registry 中 typescript 包的 latest dist-tag 指向哪个版本，该版本何时发布？"
+    },
+    {
+      "case_id": "current_data_009_crates_serde",
+      "category": "current_public_data",
+      "query": "截至测试当天，crates.io 上 serde 的最新非预发布版本号和发布时间是什么？"
+    },
+    {
+      "case_id": "current_data_010_docker_hub_ubuntu",
+      "category": "current_public_data",
+      "query": "截至测试当天，Docker Hub 官方 ubuntu 镜像最近更新的两个 LTS 标签是什么，最近更新时间分别是什么？"
+    },
+
+    {
+      "case_id": "paper_lookup_001_deepseek_r1",
+      "category": "paper_lookup",
+      "query": "检索论文《DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning》的最新 arXiv 版本号和修订日期，并概括其核心训练方法。"
+    },
+    {
+      "case_id": "paper_lookup_002_rwkv7",
+      "category": "paper_lookup",
+      "query": "检索 RWKV-7 ‘Goose’ 论文当前最新公开版本、发布日期或修订日期，并说明论文声称解决的核心架构问题。"
+    },
+    {
+      "case_id": "paper_lookup_003_mamba",
+      "category": "paper_lookup",
+      "query": "检索《Mamba: Linear-Time Sequence Modeling with Selective State Spaces》的最新 arXiv 版本信息，并用两句话概括 selective SSM 的核心机制。"
+    },
+    {
+      "case_id": "paper_lookup_004_titans",
+      "category": "paper_lookup",
+      "query": "检索《Titans: Learning to Memorize at Test Time》的最新 arXiv 版本与修订日期，并列出论文提出的记忆模块或架构变体。"
+    },
+    {
+      "case_id": "paper_lookup_005_blt",
+      "category": "paper_lookup",
+      "query": "检索《Byte Latent Transformer: Patches Scale Better Than Tokens》的最新公开版本信息，并说明动态 patch 的划分依据和主要结论。"
+    },
+    {
+      "case_id": "paper_lookup_006_swebench",
+      "category": "paper_lookup",
+      "query": "检索 SWE-bench 原始论文的最新 arXiv 版本、数据规模和任务构造方式；只使用论文或项目官方资料。"
+    },
+    {
+      "case_id": "paper_lookup_007_llama3",
+      "category": "paper_lookup",
+      "query": "检索《The Llama 3 Herd of Models》的正式论文版本信息，并核对论文给出的最大上下文长度和训练数据规模。"
+    },
+    {
+      "case_id": "paper_lookup_008_flashattention3",
+      "category": "paper_lookup",
+      "query": "检索 FlashAttention-3 论文的最新版本信息，并说明它针对哪类 GPU、用了哪两项主要优化。"
+    },
+    {
+      "case_id": "paper_lookup_009_vllm",
+      "category": "paper_lookup",
+      "query": "检索 vLLM/PagedAttention 论文的正式题目、最新版本日期，并概括 PagedAttention 如何减少 KV cache 内存浪费。"
+    },
+    {
+      "case_id": "paper_lookup_010_rag",
+      "category": "paper_lookup",
+      "query": "检索《Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks》的 DOI 或正式发表信息，并概括论文比较的两种 RAG 形式。"
+    },
+
+    {
+      "case_id": "direct_page_001_python314",
+      "category": "direct_page",
+      "query": "只阅读这个页面并回答：https://docs.python.org/3/whatsnew/3.14.html 。列出 Python 3.14 页面明确介绍的两项核心语言或运行时变化。"
+    },
+    {
+      "case_id": "direct_page_002_k8s_networkpolicy",
+      "category": "direct_page",
+      "query": "只阅读这个页面并回答：https://kubernetes.io/docs/concepts/services-networking/network-policies/ 。页面中的 default deny ingress 与 default deny egress 示例分别如何选择 Pod？"
+    },
+    {
+      "case_id": "direct_page_003_github_oidc",
+      "category": "direct_page",
+      "query": "只阅读这个页面并回答：https://docs.github.com/en/actions/concepts/security/openid-connect 。OIDC 的信任流程包含哪些参与方，GitHub 每次 job 会提供什么令牌？"
+    },
+    {
+      "case_id": "direct_page_004_pgdump",
+      "category": "direct_page",
+      "query": "只阅读这个页面并回答：https://www.postgresql.org/docs/current/app-pgdump.html 。并行 dump 需要哪种输出格式，-j 会额外占用多少数据库连接？"
+    },
+    {
+      "case_id": "direct_page_005_cache_control",
+      "category": "direct_page",
+      "query": "只阅读这个页面并回答：https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control 。no-cache 与 no-store 的语义差异是什么？"
+    }
+  ]
+}

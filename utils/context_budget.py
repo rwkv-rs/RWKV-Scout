@@ -24,7 +24,9 @@ def evidence_tokens(configured: int) -> int:
     # RWKV can handle a larger bounded evidence packet than the old fixed
     # 7.5K ceiling. Keep one shared packer, but scale the packet with the
     # actual model window instead of silently throwing away relevant chunks.
-    return max(2048, min(10000, limit - 3000))
+    # Reserve roughly 5K output tokens plus system/instruction margin for the
+    # final writer.  Evidence is packed claim-first inside the remaining room.
+    return max(2048, min(8000, limit - 6000))
 
 
 def planner_prompt_tokens(configured: int) -> int:

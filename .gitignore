@@ -39,6 +39,28 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+.env
+.env.*
+!.env.example
+
+# Reproducible dependency locks
+!uv.lock
+!frontend/package-lock.json
+
+# Generated evaluation and audit artefacts stay local.  Keep only the
+# canonical input suites needed to reproduce the archived benchmark.
+outputs/
+data/archive/
+data/evaluation/**
+!data/evaluation/date_retrieval_tasks_20260729.jsonl
+!data/evaluation/rwkv_search_100_fixed_20260729.json
+!data/evaluation/rwkv_search_50_fixed_20260729.json
+!data/evaluation/url_summary_tasks_20260731.json
+!data/evaluation/random_40_from_172_20260806.json
+!data/evaluation/remaining_132_from_172_20260807.json
+!data/evaluation/interference_40_query_only_20260808.json
+!data/evaluation/retrieval_required_100_20260808.json
+!data/evaluation/preflight_smoke_10.jsonl
 
 # Local frontend/build artefacts
 frontend/node_modules/

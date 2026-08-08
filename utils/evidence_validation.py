@@ -264,7 +264,13 @@ def _point_rows(constraints: dict[str, Any] | None, query: str) -> list[dict[str
                 "text": " ".join(
                     str(point.get(key) or "")
                     for key in ("task", "objective", "question", "output_format")
-                ).strip(),
+                ).strip()
+                + " "
+                + " ".join(
+                    str(value)
+                    for value in point.get("evidence_needed") or []
+                    if str(value).strip()
+                ),
                 "acceptance": [
                     str(value)
                     for value in point.get("acceptance_criteria") or []
@@ -288,10 +294,9 @@ def _coverage(point_text: str, body: str, query: str = "") -> dict[str, Any]:
     query_required = _semantic_terms(query)
     query_matched = sorted(query_required & _semantic_terms(body))
     query_score = len(query_matched) / max(1, len(query_required))
-    # Use the user's original query as a bilingual topic anchor.  A Chinese
-    # planner point such as "获取 Python free threading 的启用方式" cannot
-    # be expected to share its Chinese n-grams with an English docs.python.org
-    # body, but the entity/topic anchors still identify the intended page.
+    # Keep Latin entity/topic anchors from the user's query when planner and
+    # source body use different languages; translated prose need not share
+    # n-grams with the retained page even when both identify the same topic.
     query_topic_required = _latin_topic_terms(query)
     point_topic_required = _latin_topic_terms(point_text)
     topic_required = query_topic_required & point_topic_required
@@ -300,14 +305,24 @@ def _coverage(point_text: str, body: str, query: str = "") -> dict[str, Any]:
     topic_observed = _latin_topic_terms(body)
     topic_matched = sorted(topic_required & topic_observed)
     topic_score = len(topic_matched) / max(1, len(topic_required))
+    qualifier_rules = (
+        (
+            re.compile(r"(?i)(performance|benchmark|throughput|latency|性能|基准|吞吐|延迟)"),
+            re.compile(r"(?i)(performance|benchmark|throughput|latency|ops/?s|tokens?/?s|性能|基准|吞吐|延迟)"),
+        ),
+    )
+    qualifiers_satisfied = all(
+        not required.search(point_text) or observed.search(body)
+        for required, observed in qualifier_rules
+    )
     structured_list_point = bool(
         re.search(
             r"(?i)(list|table|order|整理|列表|顺序|清单|表格)",
             point_text,
         )
     )
-    compact_threshold = max(4, min(10, (len(compact_required) + 3) // 4))
-    compact_covered = len(compact_matched) >= compact_threshold and compact_score >= 0.18
+    compact_threshold = max(3, min(10, (len(compact_required) + 1) // 2))
+    compact_covered = len(compact_matched) >= compact_threshold and compact_score >= 0.50
     query_anchor_covered = (
         structured_list_point
         and len(query_matched) >= 3
@@ -317,9 +332,10 @@ def _coverage(point_text: str, body: str, query: str = "") -> dict[str, Any]:
     bilingual_topic_covered = (
         len(topic_required) >= 2
         and len(topic_matched) == len(topic_required)
+        and qualifiers_satisfied
     )
     covered = (
-        len(matched) >= minimum_matches and score >= 0.30
+        len(matched) >= minimum_matches and score >= 0.60
     ) or compact_covered or query_anchor_covered or bilingual_topic_covered
     return {
         "score": round(score, 4),
@@ -334,7 +350,7 @@ def _coverage(point_text: str, body: str, query: str = "") -> dict[str, Any]:
         "topic_anchor_score": round(topic_score, 4),
         "coverage_basis": (
             "direct_terms"
-            if len(matched) >= minimum_matches and score >= 0.30
+            if len(matched) >= minimum_matches and score >= 0.60
             else "compact_topic_terms"
             if compact_covered
             else "query_anchor_and_structure"
@@ -355,7 +371,9 @@ def _fact_signatures(item: dict[str, Any]) -> set[str]:
     for candidate in item.get("chunk_candidates") or []:
         if not isinstance(candidate, dict) or not candidate.get("supported"):
             continue
-        values.extend(str(value) for value in candidate.get("facts") or [] if str(value).strip())
+        quote = str(candidate.get("quote") or "").strip()
+        if quote:
+            values.append(quote)
     signatures: set[str] = set()
     for value in values:
         terms = sorted(_terms(value))
@@ -495,6 +513,17 @@ def build_evidence_validation(
     }
 
 
+def _alignment_script_family(value: Any) -> str:
+    text = re.sub(r"`[^`\n]+`|https?://\S+|\[S\d+(?::C\d+)?\]", " ", str(value or ""), flags=re.IGNORECASE)
+    cjk = len(re.findall(r"[\u3400-\u9fff]", text))
+    latin = len(re.findall(r"[A-Za-z]", text))
+    if cjk >= 4 and cjk * 2 >= latin:
+        return "cjk"
+    if latin >= 12 and latin > cjk * 2:
+        return "latin"
+    return "mixed"
+
+
 def assess_answer_alignment(answer: str, selected_evidence: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Measure whether answer lines cite and overlap selected source bodies."""
 
@@ -505,6 +534,7 @@ def assess_answer_alignment(answer: str, selected_evidence: Iterable[dict[str, A
             "claim_line_count": 0,
             "aligned_line_count": 0,
             "unsupported_line_count": 0,
+            "non_applicable_line_count": 0,
             "rows": [],
             "policy": "No selected evidence; alignment is not applicable.",
         }
@@ -529,6 +559,27 @@ def assess_answer_alignment(answer: str, selected_evidence: Iterable[dict[str, A
             continue
         refs = [int(value) - 1 for value in re.findall(r"\[S(\d+)(?::C\d+)?\]", line, flags=re.IGNORECASE)]
         targets = [sources[index] for index in refs if 0 <= index < len(sources)] if refs else sources
+        line_script = _alignment_script_family(line)
+        evidence_script = _alignment_script_family(
+            "\n".join(evidence_text(item) for item in targets)
+        )
+        if (
+            line_script in {"cjk", "latin"}
+            and evidence_script in {"cjk", "latin"}
+            and line_script != evidence_script
+        ):
+            rows.append(
+                {
+                    "text": line[:500],
+                    "refs": refs,
+                    "best_ref": f"S{refs[0] + 1}" if refs else "",
+                    "overlap": None,
+                    "aligned": None,
+                    "applicable": False,
+                    "basis": "cross_language_lexical_alignment_not_applicable",
+                }
+            )
+            continue
         answer_terms = _terms(line)
         best = 0.0
         best_ref = ""
@@ -541,12 +592,13 @@ def assess_answer_alignment(answer: str, selected_evidence: Iterable[dict[str, A
         aligned = best >= 0.12
         if not aligned:
             unsupported += 1
-        rows.append({"text": line[:500], "refs": refs, "best_ref": best_ref, "overlap": round(best, 4), "aligned": aligned})
+        rows.append({"text": line[:500], "refs": refs, "best_ref": best_ref, "overlap": round(best, 4), "aligned": aligned, "applicable": True, "basis": "lexical_overlap"})
     return {
         "alignment_version": "answer-alignment.v1",
         "claim_line_count": len(rows),
-        "aligned_line_count": sum(row["aligned"] for row in rows),
+        "aligned_line_count": sum(row.get("aligned") is True for row in rows),
         "unsupported_line_count": unsupported,
+        "non_applicable_line_count": sum(row.get("applicable") is False for row in rows),
         "rows": rows[:64],
-        "policy": "Diagnostic signal only; it does not rewrite or assert the answer is true.",
+        "policy": "Diagnostic signal only; cross-language lexical overlap is not applicable and does not assert support or non-support.",
     }

@@ -19,6 +19,9 @@ dependencies = [
 [project.optional-dependencies]
 cloud = ["openai>=2.48,<3"]
 
+[dependency-groups]
+dev = ["pytest>=9,<10"]
+
 [project.scripts]
 rwkv-ecra-api = "api:main"
 rwkv-ecra-eval-dataset = "scripts.generate_eval_dataset:main"

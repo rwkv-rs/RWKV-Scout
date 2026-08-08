@@ -9,6 +9,23 @@ def classify_error(error: BaseException | str) -> str:
     combined = f"{name} {text}"
     if "timeout" in combined or "timed out" in combined:
         return "timeout"
+    if any(
+        term in combined
+        for term in (
+            "402 ",
+            "http 402",
+            "432 ",
+            "http 432",
+            "usage limit",
+            "quota exceeded",
+            "quota exhausted",
+            "plan limit",
+            "insufficient credit",
+            "credits exhausted",
+            "payment required",
+        )
+    ):
+        return "quota"
     if any(term in combined for term in ("401", "403", "unauthorized", "forbidden", "api key", "authentication")):
         return "auth"
     if "429" in combined or "rate limit" in combined or "too many" in combined:

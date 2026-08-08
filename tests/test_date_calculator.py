@@ -112,9 +112,9 @@ class DateCalculatorTests(unittest.TestCase):
             constraints={"task_plan": {"task_mode": "lookup"}},
         )
         self.assertIn("559", result["content"])
-        self.assertIn("DETERMINISTIC TOOL RESULTS", result["prompt"])
+        self.assertIn("TOOL RESULTS", result["prompt"])
         self.assertEqual(result["context_stats"]["calculation_count"], 1)
-        self.assertFalse(result["answer_quality"]["closed_world_boundary_enforced"])
+        self.assertEqual(result["answer_quality"], {})
 
     def test_orchestrator_records_model_selected_calculation(self):
         orchestrator = Orchestrator()
@@ -134,6 +134,7 @@ class DateCalculatorTests(unittest.TestCase):
             ]
         )
         orchestrator.planner.observe_tool_result = Mock()
+        orchestrator._cross_validate_research = Mock(return_value={"decision": "finish"})
         orchestrator._complete_model_tool_loop = Mock(return_value="done")
         with patch("agent.unified_research.append_task_event") as append_event:
             result = orchestrator._run_single_loop(

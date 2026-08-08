@@ -60,6 +60,7 @@ def build_part_command(
     output_path: Path,
     *,
     case_timeout_seconds: float | None,
+    max_tool_steps: int | None = None,
 ) -> list[str]:
     command = [
         str(UV), "run", "--project", str(ROOT), "python", str(RUNNER),
@@ -67,6 +68,8 @@ def build_part_command(
     ]
     if case_timeout_seconds is not None:
         command.extend(["--case-timeout-seconds", str(case_timeout_seconds)])
+    if max_tool_steps is not None:
+        command.extend(["--max-tool-steps", str(max_tool_steps)])
     return command
 
 
@@ -78,11 +81,13 @@ def run_part(
     log_path: Path,
     *,
     case_timeout_seconds: float | None,
+    max_tool_steps: int | None,
 ) -> int:
     command = build_part_command(
         input_path,
         output_path,
         case_timeout_seconds=case_timeout_seconds,
+        max_tool_steps=max_tool_steps,
     )
     with log_path.open("w", encoding="utf-8") as log:
         log.write(f"START {label} part={part} {datetime.now().isoformat(timespec='seconds')}\n")
@@ -107,14 +112,19 @@ def merge_parts(label: str, parts: list[Path], output_path: Path, input_path: Pa
         aggregate = {}
     report = {
         "suite": "manual-real-web-concurrent",
-        "status": "completed" if all(item.get("status") == "completed" for item in reports) else "failed",
+        "state": "ready" if all(item.get("state") == "ready" for item in reports) else "running",
         "input": str(input_path),
         "started_at": min((item.get("started_at") for item in reports if item.get("started_at")), default=None),
         "finished_at": datetime.now().isoformat(timespec="seconds"),
-        "completed_cases": len(rows),
+        "processed_cases": len(rows),
+        "returned_answer_cases": sum(row.get("delivery") == "answer" for row in rows),
+        "network_error_cases": sum(row.get("runtime_error") == "network_error" for row in rows),
+        "pass_cases": sum(row.get("quality") == "pass" for row in rows),
+        "no_pass_cases": sum(row.get("quality") == "no-pass" for row in rows),
         "total_cases": len(cases),
         "workers": len(parts),
         "case_timeout_seconds": reports[0].get("case_timeout_seconds") if reports else None,
+        "max_tool_steps_override": reports[0].get("max_tool_steps_override") if reports else None,
         "cases": rows,
         "aggregate_trace_summary": aggregate,
     }
@@ -130,6 +140,7 @@ def run_dataset(
     *,
     limit: int = 0,
     case_timeout_seconds: float | None,
+    max_tool_steps: int | None,
 ) -> dict[str, Any]:
     cases = load_cases(input_path)
     if limit > 0:
@@ -159,6 +170,7 @@ def run_dataset(
                 output_paths[index],
                 log_paths[index],
                 case_timeout_seconds=case_timeout_seconds,
+                max_tool_steps=max_tool_steps,
             )
             for index in range(effective_workers)
         ]
@@ -200,6 +212,12 @@ def main() -> int:
         default=0,
         help="Optional maximum number of cases from the selected input; 0 runs all cases.",
     )
+    parser.add_argument(
+        "--max-tool-steps",
+        type=int,
+        default=None,
+        help="Optional suite-wide step budget override; takes precedence over values embedded in cases.",
+    )
     args = parser.parse_args()
     if args.case_timeout_seconds <= 0:
         raise SystemExit("--case-timeout-seconds must be positive")
@@ -208,6 +226,8 @@ def main() -> int:
         raise SystemExit("--workers must be positive")
     if args.limit < 0:
         raise SystemExit("--limit must be non-negative")
+    if args.max_tool_steps is not None and args.max_tool_steps < 1:
+        raise SystemExit("--max-tool-steps must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     datasets = (
         [(args.label, args.input)]
@@ -231,12 +251,13 @@ def main() -> int:
             workers,
             limit=args.limit,
             case_timeout_seconds=args.case_timeout_seconds,
+            max_tool_steps=args.max_tool_steps,
         )
         with queue_log.open("a", encoding="utf-8") as log:
-            log.write(f"DONE {label} completed={report['completed_cases']} total={report['total_cases']} status={report['status']} {datetime.now().isoformat(timespec='seconds')}\n")
+            log.write(f"DONE {label} returned={report['returned_answer_cases']} total={report['total_cases']} state={report['state']} {datetime.now().isoformat(timespec='seconds')}\n")
     with queue_log.open("a", encoding="utf-8") as log:
         log.write(f"ALL_DONE {datetime.now().isoformat(timespec='seconds')}\n")
-    print(json.dumps({"output_dir": str(args.output_dir), "status": "completed"}, ensure_ascii=False))
+    print(json.dumps({"output_dir": str(args.output_dir), "state": "ready"}, ensure_ascii=False))
     return 0
 
 

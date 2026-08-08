@@ -14,10 +14,8 @@ from pathlib import Path
 
 from clients.llm_client import LLMClient
 from utils.rwkv_prompt import (
-    FINAL_CONTINUATION_STOP_SUFFIXES,
     JSON_CALL_STOP_SUFFIXES,
     build_final_continuation_prompt,
-    clean_final_continuation,
 )
 
 
@@ -37,12 +35,10 @@ def _metrics(raw: str, *, kind: str) -> dict[str, object]:
         "has_tool_fence": "```json" in lowered or "<tool_call>" in lowered,
         "looks_flat_tool_call": bool(re.search(r'\{\s*"name"\s*:', value)),
         "looks_native_tool_envelope": '"tool_calls"' in lowered,
-        "clean_chars": len(clean_final_continuation(value)) if kind == "final" else None,
-        "clean_has_role_boundary": bool(
-            re.search(r"(?im)^\s*(?:User:|Assistant:|System:)", clean_final_continuation(value))
-        )
-        if kind == "final"
-        else None,
+        "published_chars": len(value) if kind == "final" else None,
+        "published_has_role_boundary": bool(
+            re.search(r"(?im)^\s*(?:User:|Assistant:|System:)", value)
+        ) if kind == "final" else None,
     }
 
 
@@ -56,7 +52,7 @@ def _cases() -> list[dict[str, object]]:
         "\n证据状态：NO_USABLE_EVIDENCE，没有检索到页面正文、记录或 chunk。"
         "\n如果不能确认，请明确说无法确认，不要根据记忆猜测。"
     )
-    final_role_stops = list(FINAL_CONTINUATION_STOP_SUFFIXES)
+    final_role_stops: list[str] = []
     role_only_stops = ["\nUser:", "\nSystem:", "\nAssistant:"]
     tool_prompt = (
         "System: Tools:\n"

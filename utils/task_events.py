@@ -74,9 +74,14 @@ def append_task_event(task_id: str, event_type: str, **payload: Any) -> dict[str
                 prompt_version=payload.get("prompt_version") or "",
             )
         elif event_type == "final":
+            manifest_status = (
+                "network_error"
+                if str(payload.get("status") or "") == "network_error"
+                else "ready"
+            )
             update_manifest(
                 task_id,
-                status=str(payload.get("status") or "completed"),
+                status=manifest_status,
                 summary={
                     "answer_mode": payload.get("mode") or "",
                     "citation_count": len(payload.get("citation_refs") or []),

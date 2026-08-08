@@ -14,7 +14,9 @@ from tools.github_rest import fetch_github_rest, search_github_rest
 from tools.paper_search import search_papers
 from tools.registry import ToolRegistry
 from tools.weather import get_current_weather
+from tools.weather_alerts import get_current_weather_alerts
 from utils.freshness import annotate_result_freshness, build_freshness_policy
+from utils.source_authority import annotate_source
 
 
 def _payload(value: Any) -> dict[str, Any]:
@@ -30,7 +32,9 @@ def _payload(value: Any) -> dict[str, Any]:
 def _structured_rows(payload: dict[str, Any], connector: str) -> dict[str, Any]:
     result = dict(payload)
     rows = []
-    for raw in result.get("results") or []:
+    provider_status = str(result.get("status") or "").casefold()
+    source_rows = result.get("results") or [] if provider_status == "ok" else []
+    for raw in source_rows:
         if not isinstance(raw, dict):
             continue
         row = dict(raw)
@@ -53,7 +57,7 @@ def _structured_rows(payload: dict[str, Any], connector: str) -> dict[str, Any]:
     result["results"] = rows
     result["connector"] = connector
     result["retrieval_role"] = "evidence"
-    result["evidence_ready"] = bool(rows)
+    result["evidence_ready"] = bool(rows) and provider_status == "ok"
     if not result.get("citation_refs"):
         result["citation_refs"] = [
             {
@@ -75,14 +79,14 @@ def _structured_rows(payload: dict[str, Any], connector: str) -> dict[str, Any]:
     name="connector_lookup",
     phase="ALL",
     plugin="connectors.domain",
-    capabilities=("weather", "github", "papers", "structured_api"),
+    capabilities=("weather", "weather_alerts", "github", "papers", "structured_api"),
     retrieval_role="discovery",
     model_visible=True,
     category="connector",
-    description="Query one structured domain connector: weather for current conditions, github for repositories/files, or papers for scholarly records.",
+    description="Query one structured domain connector: weather, weather alerts, GitHub, or scholarly records.",
     signature="""[Tool] connector_lookup
 - Function: use one curated structured connector rather than general web search.
-- Parameters: connector (weather|github|papers), query, scope (optional), max_results (optional).
+- Parameters: connector (weather|weather_alerts|github|papers), query, scope (optional), max_results (optional).
 - The result is structured evidence with provider/source metadata; it is not a final answer.
 - Use weather for current conditions, github for repositories/files, and papers for scholarly records.""",
 )
@@ -97,7 +101,7 @@ def connector_lookup(
     aliases = {"weather": "weather", "天气": "weather", "github": "github", "代码": "github", "papers": "papers", "paper": "papers", "论文": "papers"}
     name = aliases.get(name, name)
     text = " ".join(str(query or "").split()).strip()
-    if name not in {"weather", "github", "papers"}:
+    if name not in {"weather", "weather_alerts", "github", "papers"}:
         return json.dumps({"status": "error", "tool": "connector_lookup", "error_class": "unsupported_connector", "connector": name, "results": []}, ensure_ascii=False)
     if not text:
         return json.dumps({"status": "error", "tool": "connector_lookup", "error_class": "empty_query", "connector": name, "results": []}, ensure_ascii=False)
@@ -109,22 +113,33 @@ def connector_lookup(
         "task_plan": kwargs.get("task_plan") if isinstance(kwargs.get("task_plan"), dict) else {},
     }
     try:
-        if name == "weather":
+        if name == "weather_alerts":
+            payload = _structured_rows(
+                get_current_weather_alerts(text, max_results=max_results, **context),
+                name,
+            )
+        elif name == "weather":
             payload = _payload(get_current_weather(text, **context))
+            weather_status = str(payload.get("status") or "error").casefold()
             payload = _structured_rows(
                 {
-                    "status": payload.get("status") or "ok",
+                    **payload,
+                    "status": weather_status,
                     "provider": "open-meteo",
                     "query": text,
                     "sources": payload.get("sources") or [],
-                    "results": [
-                        {
-                            "title": f"Current weather: {payload.get('location') or text}",
-                            "url": (payload.get("sources") or [""])[-1] if payload.get("sources") else "",
-                            "structured_evidence_text": json.dumps(payload, ensure_ascii=False),
-                            "source": "Open-Meteo",
-                        }
-                    ],
+                    "results": (
+                        [
+                            {
+                                "title": f"Current weather: {payload.get('location') or text}",
+                                "url": (payload.get("sources") or [""])[-1] if payload.get("sources") else "",
+                                "structured_evidence_text": json.dumps(payload, ensure_ascii=False),
+                                "source": "Open-Meteo",
+                            }
+                        ]
+                        if weather_status == "ok" and isinstance(payload.get("current"), dict)
+                        else []
+                    ),
                 },
                 name,
             )
@@ -144,6 +159,15 @@ def connector_lookup(
 
     policy = build_freshness_policy(kwargs.get("original_goal") or text, context["task_plan"])
     payload = annotate_result_freshness(payload, policy)
+    payload["results"] = [
+        annotate_source(
+            row,
+            str(kwargs.get("original_goal") or text),
+            {"task_plan": context["task_plan"]},
+        )
+        for row in payload.get("results") or []
+        if isinstance(row, dict)
+    ]
     payload.update({"tool": "connector_lookup", "connector": name, "real_network": True})
     return json.dumps(payload, ensure_ascii=False, indent=2)
 

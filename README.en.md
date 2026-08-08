@@ -168,7 +168,7 @@ for dynamic evaluation, blind review, and rollback gates.
 | `AGENT_CONFIG.max_error_retries` | Maximum error retries | `3` |
 | `AGENT_CONFIG.memory_truncate_length` | Memory truncation length | `60000` |
 | `SLM_CONFIG.endpoint` | RWKV API endpoint | `"http://192.168.0.82:8080/v1/chat/completions"` |
-| `SLM_CONFIG.password` | RWKV API password (leave empty if none) | `"rwkv-skills"` |
+| `SLM_CONFIG.password` | RWKV API password (prefer a local environment variable) | `""` |
 | `SLM_CONFIG.concurrency` | RWKV maximum concurrency | Integer. For the 7.2B model with 24GB VRAM, setting this to 16GB is optimal. |
 | `TRACKING.enable` | Whether to enable log tracking | `true` |
 | `TRACKING.enable_slm_log` | Whether to track RWKV processing logs | `false` |

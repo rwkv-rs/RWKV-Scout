@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import unittest
+from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 import config
@@ -14,7 +15,7 @@ from runtime.direct_rwkv import DirectRWKVBackend
 from runtime.factory import get_model_backend, reset_model_backend
 from runtime.transcript import render_rwkv_transcript
 from scripts.preflight import probe_model_service
-from utils.token_tracker import current_task_id
+from utils.token_tracker import current_task_id, model_lane
 
 
 class ModelRuntimeTests(unittest.TestCase):
@@ -60,6 +61,51 @@ class ModelRuntimeTests(unittest.TestCase):
         self.assertEqual(response.content, "answer")
         self.assertEqual(response.usage["prompt_tokens"], 4)
 
+    def test_compat_response_preserves_every_model_character(self):
+        output = "  Assistant: <think>model text</think>\nanswer  \n"
+        response = OpenAICompatBackend._response(
+            {"choices": [{"text": output, "finish_reason": "stop"}]},
+            text_key="text",
+        )
+        self.assertEqual(response.content, output)
+
+    def test_compat_request_scopes_only_temperature_and_optional_seed(self):
+        backend = OpenAICompatBackend()
+        backend._post = Mock(
+            return_value={"choices": [{"text": "ok", "finish_reason": "stop"}]}
+        )
+
+        with config.model_sampling_parameters(0.25, seed=17):
+            response = backend.text_completion("prompt", max_tokens=12)
+
+        self.assertEqual(response.content, "ok")
+        path, payload = backend._post.call_args.args
+        self.assertEqual(path, "/completions")
+        self.assertEqual(payload["temperature"], 0.25)
+        self.assertEqual(payload["seed"], 17)
+        for name in ("top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty"):
+            self.assertNotIn(name, payload)
+        self.assertIsNone(config.get_llm_seed())
+
+    def test_direct_backend_preserves_every_decoded_model_character(self):
+        output = "  Assistant: <think>model text</think>\nanswer  \n"
+        backend = DirectRWKVBackend(
+            {"temperature": 0, "top_p": 1, "top_k": 0, "stop_tokens": [0]}
+        )
+        backend._load = lambda: None
+        backend._torch = type("Torch", (), {"inference_mode": staticmethod(nullcontext)})()
+        backend._model = Mock()
+        backend._model.generate_zero_state.return_value = object()
+        backend._model.forward_batch.return_value = [object()]
+        backend._tokenizer = Mock()
+        backend._tokenizer.encode.return_value = [1]
+        backend._tokenizer.decode.return_value = output
+        tokens = iter([2, 0])
+        backend._sample = lambda *_args, **_kwargs: next(tokens)
+
+        response = backend._generate("prompt", max_tokens=2)
+        self.assertEqual(response.content, output)
+
     def test_compat_backend_decodes_utf8_json_when_server_omits_charset(self):
         payload = json.dumps(
             {"choices": [{"text": "深圳地铁"}]},
@@ -70,7 +116,7 @@ class ModelRuntimeTests(unittest.TestCase):
         backend._session.post = Mock(return_value=http_response)
         with (
             patch("runtime.compat.get_llm_base_url", return_value="http://model/v1"),
-            patch("runtime.compat.get_llm_api_key", return_value="rwkv-skills"),
+            patch("runtime.compat.get_llm_api_key", return_value="test-local-key"),
         ):
             result = backend._post("/completions", {})
         self.assertEqual(result["choices"][0]["text"], "深圳地铁")
@@ -107,6 +153,39 @@ class ModelRuntimeTests(unittest.TestCase):
             response = LLMClient().text_completion("User:\nhello\n\nAssistant:", max_tokens=8)
         self.assertEqual(response.content, "local answer")
         backend.text_completion.assert_called_once()
+
+    def test_model_event_records_lane_generation_budget_stop_and_finish_reason(self):
+        fake = BackendResponse(
+            content="bounded answer",
+            usage={"prompt_tokens": 3, "completion_tokens": 2},
+            finish_reason="length",
+        )
+        backend = Mock()
+        backend.backend_name = "openai_compat"
+        backend.text_completion.return_value = fake
+        token = current_task_id.set("MODEL_AUDIT_METADATA")
+        try:
+            with (
+                model_lane("writer"),
+                patch("clients.llm_client.get_model_backend", return_value=backend),
+                patch("clients.llm_client.record_model_event") as record,
+            ):
+                LLMClient().text_completion(
+                    "exact prompt",
+                    max_tokens=9,
+                    stop=["### User"],
+                )
+        finally:
+            current_task_id.reset(token)
+
+        self.assertEqual(record.call_args.args[0], "MODEL_AUDIT_METADATA")
+        payload = record.call_args.kwargs
+        self.assertEqual(payload["model_lane"], "writer")
+        self.assertEqual(payload["request_max_tokens"], 9)
+        self.assertEqual(payload["stop"], ["### User"])
+        self.assertEqual(payload["finish_reason"], "length")
+        self.assertEqual(payload["prompt"], "exact prompt")
+        self.assertEqual(payload["output"], "bounded answer")
 
     def test_slm_client_routes_batch_generation_to_direct_backend(self):
         backend = Mock()

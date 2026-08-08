@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 
 from utils.error_policy import classify_error
+from utils.time_budget import TaskTimeoutError
 
 
 def _record_retry_event(
@@ -67,10 +68,24 @@ def retry_with_fallback(
             for attempt in range(attempts):
                 try:
                     return func(*args, **kwargs)
+                except TaskTimeoutError as exc:
+                    # A task budget is a hard boundary, not a transient
+                    # provider failure. Retrying here reacquires model
+                    # leases after the case has already expired and can keep
+                    # an outer worker alive indefinitely.
+                    last_exception = exc
+                    _record_retry_event(
+                        "error",
+                        function=f"{func.__module__}.{func.__qualname__}",
+                        attempt=attempt + 1,
+                        max_retries=attempts,
+                        error=exc,
+                    )
+                    raise
                 except Exception as exc:
                     last_exception = exc
                     error_class = classify_error(exc)
-                    retryable = error_class not in {"auth", "validation", "filesystem"}
+                    retryable = error_class not in {"auth", "quota", "validation", "filesystem"}
                     if error_class == "timeout" and not allow_timeout_retry:
                         retryable = False
                     next_delay = base_delay * (backoff**attempt) if attempt < attempts - 1 else 0.0

@@ -11,28 +11,22 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 const STATUS_STYLES = {
-  completed: "border-emerald-200 bg-emerald-50 text-emerald-700",
   ready: "border-emerald-200 bg-emerald-50 text-emerald-700",
   running: "border-amber-200 bg-amber-50 text-amber-700",
-  failed: "border-rose-200 bg-rose-50 text-rose-700",
+  network_error: "border-rose-200 bg-rose-50 text-rose-700",
   queued: "border-stone-200 bg-stone-100 text-stone-700",
   stopped: "border-stone-200 bg-stone-50 text-stone-600",
 };
 
 const STATUS_LABELS = {
-  completed: "已完成",
-  ready: "已完成",
+  ready: "已有回答",
   running: "运行中",
-  failed: "失败",
+  network_error: "网络错误",
   queued: "排队中",
   stopped: "已停止",
 };
 
 const STATUS_INDICATORS = {
-  completed: {
-    className: "bg-emerald-500 text-white",
-    icon: Check,
-  },
   ready: {
     className: "bg-emerald-500 text-white",
     icon: Check,
@@ -41,7 +35,7 @@ const STATUS_INDICATORS = {
     className: "bg-amber-400 text-amber-950",
     icon: LoaderCircle,
   },
-  failed: {
+  network_error: {
     className: "bg-rose-500 text-white",
     icon: X,
   },

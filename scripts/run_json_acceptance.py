@@ -13,6 +13,7 @@ import signal
 import statistics
 import re
 import sys
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ if str(ROOT) not in sys.path:
 from agent.orchestrator import Orchestrator
 from config import get_analysis_timeout_seconds
 from utils.runtime_gate import analysis_slot
+from utils.error_policy import classify_error
 from utils.token_tracker import current_task_id
 from utils.task_events import append_task_event, get_task_events
 
@@ -92,6 +94,115 @@ def _load_cases(path: Path) -> list[dict[str, Any]]:
         case.setdefault("case_id", case.get("id") or f"case_{index:03d}")
         normalized.append(case)
     return normalized
+
+
+_CASE_RUNTIME_METADATA_KEYS: tuple[str, ...] = ()
+_CASE_RUNTIME_BOOLEAN_KEYS: frozenset[str] = frozenset()
+
+
+def _runtime_metadata_for_case(
+    case: dict[str, Any],
+    *,
+    max_tool_steps_override: int | None = None,
+) -> dict[str, Any]:
+    """Project technical controls only; references never reach runtime."""
+
+    metadata: dict[str, Any] = {}
+    if max_tool_steps_override is not None:
+        metadata["max_tool_steps"] = int(max_tool_steps_override)
+    elif case.get("max_tool_steps") is not None:
+        metadata["max_tool_steps"] = int(case["max_tool_steps"])
+    for key in _CASE_RUNTIME_METADATA_KEYS:
+        if key not in case:
+            continue
+        metadata[key] = bool(case[key]) if key in _CASE_RUNTIME_BOOLEAN_KEYS else case[key]
+    return metadata
+
+
+_MONTHS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+
+
+def _normalise_offline_fact(value: Any) -> str:
+    """Canonicalise formatting for post-run fact comparison only."""
+
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    text = re.sub(
+        r"\b(" + "|".join(_MONTHS) + r")\s+(\d{1,2}),?\s+(\d{4})\b",
+        lambda match: (
+            f"{int(match.group(3)):04d}-{_MONTHS[match.group(1)]:02d}-{int(match.group(2)):02d}"
+        ),
+        text,
+    )
+    text = re.sub(
+        r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
+        lambda match: f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}",
+        text,
+    )
+    text = re.sub(
+        r"(?<!\d)(\d{4})[./-](\d{1,2})[./-](\d{1,2})(?!\d)",
+        lambda match: f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}",
+        text,
+    )
+    text = re.sub(r"\b(?:about|around|approximately|approx\.?|roughly)\b|大约|大概|约", "", text)
+    return re.sub(r"[^0-9a-z\u3400-\u9fff.+/_-]+", "", text)
+
+
+def _offline_quality(case: dict[str, Any], answer: str) -> tuple[str | None, dict[str, Any] | None]:
+    """Compare a completed answer with explicit gold facts after runtime.
+
+    This function is intentionally located in the evaluation runner.  Its
+    result is never sent to the orchestrator, planner, retrieval tools, RWKV,
+    task events, or the public API.
+    """
+
+    gold = case.get("gold") if isinstance(case.get("gold"), dict) else {}
+    required = [str(value) for value in gold.get("required_facts") or [] if str(value).strip()]
+    forbidden = [str(value) for value in gold.get("forbidden_facts") or [] if str(value).strip()]
+    if not required and not forbidden:
+        return None, None
+
+    normalised_answer = _normalise_offline_fact(answer)
+    required_rows = [
+        {
+            "fact": fact,
+            "matched": bool(_normalise_offline_fact(fact))
+            and _normalise_offline_fact(fact) in normalised_answer,
+        }
+        for fact in required
+    ]
+    forbidden_rows = [
+        {
+            "fact": fact,
+            "matched": bool(_normalise_offline_fact(fact))
+            and _normalise_offline_fact(fact) in normalised_answer,
+        }
+        for fact in forbidden
+    ]
+    passed = bool(str(answer or "").strip()) and all(
+        row["matched"] for row in required_rows
+    ) and not any(row["matched"] for row in forbidden_rows)
+    return (
+        "pass" if passed else "no-pass",
+        {
+            "method": "offline_explicit_fact_match.v1",
+            "required": required_rows,
+            "forbidden": forbidden_rows,
+            "reference_answer": str(case.get("final_answer") or case.get("reference_answer") or ""),
+        },
+    )
 
 
 def _json_result(event: dict[str, Any]) -> dict[str, Any]:
@@ -413,6 +524,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             finals.append(
                 {
                     "status": event.get("status"),
+                    "error_type": event.get("error_type") or "",
                     "content": event.get("content", ""),
                     "mode": event.get("mode", ""),
                     "action": event.get("action", ""),
@@ -424,6 +536,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "validation": event.get("validation") or {},
                     "answer_alignment": event.get("answer_alignment") or {},
                     "answer_quality": event.get("answer_quality") or {},
+                    "answer_requirement_validation": event.get("answer_requirement_validation") or {},
                 }
             )
 
@@ -518,6 +631,11 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                 collections.Counter(str(item.get("status") or "unknown") for item in judgements)
             ),
             "final_statuses": dict(collections.Counter(str(item.get("status") or "unknown") for item in finals)),
+            "final_error_types": dict(
+                collections.Counter(
+                    str(item.get("error_type") or "none") for item in finals
+                )
+            ),
         },
     }
 
@@ -536,13 +654,22 @@ def _aggregate_trace_summaries(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "validation_event_count",
         ):
             aggregate[key] += int(stats.get(key) or 0)
-        for namespace in ("tool_result_statuses", "error_class_counts", "page_evidence_statuses", "completion_statuses", "final_statuses"):
+        for namespace in (
+            "tool_result_statuses",
+            "error_class_counts",
+            "page_evidence_statuses",
+            "completion_statuses",
+            "final_statuses",
+            "final_error_types",
+        ):
             for key, value in (stats.get(namespace) or {}).items():
                 aggregate[f"{namespace}.{key}"] += int(value or 0)
     return {
         "case_count": len(rows),
-        "completed_cases": sum(str(row.get("status") or "").startswith("completed") for row in rows),
-        "failed_cases": sum(not str(row.get("status") or "").startswith("completed") for row in rows),
+        "returned_answer_cases": sum(row.get("delivery") == "answer" for row in rows),
+        "network_error_cases": sum(row.get("runtime_error") == "network_error" for row in rows),
+        "pass_cases": sum(row.get("quality") == "pass" for row in rows),
+        "no_pass_cases": sum(row.get("quality") == "no-pass" for row in rows),
         "counters": dict(aggregate),
     }
 
@@ -551,6 +678,7 @@ def run(
     input_path: Path,
     output_path: Path,
     case_timeout_seconds: float | None = None,
+    max_tool_steps: int | None = None,
 ) -> dict[str, Any]:
     cases = _load_cases(input_path)
     started_at = datetime.now().isoformat(timespec="seconds")
@@ -559,19 +687,23 @@ def run(
         if case_timeout_seconds is None
         else max(0.0, float(case_timeout_seconds))
     )
+    if max_tool_steps is not None and int(max_tool_steps) < 1:
+        raise ValueError("max_tool_steps must be positive")
+    tool_step_override = int(max_tool_steps) if max_tool_steps is not None else None
     rows = []
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     def write_checkpoint(*, finished: bool = False) -> dict[str, Any]:
         report = {
             "suite": "manual-real-web",
-            "status": "completed" if finished else "running",
+            "state": "ready" if finished else "running",
             "input": str(input_path),
             "started_at": started_at,
             "finished_at": datetime.now().isoformat(timespec="seconds") if finished else None,
-            "completed_cases": len(rows),
+            "processed_cases": len(rows),
             "total_cases": len(cases),
             "case_timeout_seconds": case_timeout,
+            "max_tool_steps_override": tool_step_override,
             "cases": rows,
             "aggregate_trace_summary": _aggregate_trace_summaries(rows),
         }
@@ -583,22 +715,10 @@ def run(
     for case in cases:
         case_id = _safe_id(case.get("case_id") or f"case_{len(rows) + 1}")
         task_id = f"JSON_ACCEPTANCE_{case_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        metadata = {}
-        if case.get("max_tool_steps") is not None:
-            metadata["max_tool_steps"] = int(case["max_tool_steps"])
-        for key in (
-            "generic_web_search_only",
-            "retrieval_fork",
-            "retrieval_strategy",
-            "retrieval_branch_width",
-            "architecture",
-        ):
-            if key in case:
-                metadata[key] = (
-                    bool(case[key])
-                    if key in {"generic_web_search_only", "retrieval_fork"}
-                    else case[key]
-                )
+        metadata = _runtime_metadata_for_case(
+            case,
+            max_tool_steps_override=tool_step_override,
+        )
         query = str(case["query"])
         task_token = current_task_id.set(task_id)
         try:
@@ -614,52 +734,38 @@ def run(
                 error=str(exc),
                 timeout_seconds=case_timeout,
             )
-            answer = (
-                "The retrieval run exceeded its execution limit before a reliable answer could be completed. "
-                "The available evidence is therefore insufficient to confirm the remaining details."
-            )
+            answer = ""
             error = f"TimeoutError: {exc}"
         except Exception as exc:
-            answer = (
-                "The retrieval run encountered an execution problem before a reliable answer could be completed. "
-                "I cannot confirm the missing details from the available evidence."
-            )
+            if classify_error(exc) not in {"network", "timeout", "provider", "auth", "quota"}:
+                raise
+            answer = ""
             error = f"{type(exc).__name__}: {exc}"
         finally:
             current_task_id.reset(task_token)
         trace = _trace_summary(task_id)
         final_record = trace.get("final") if isinstance(trace.get("final"), dict) else {}
-        final_status = str(final_record.get("status") or "")
-        if not final_status.startswith("completed"):
-            # A signal timeout or an unexpected outer-runner exception can
-            # interrupt the orchestrator before it writes its final event.
-            # Keep that diagnostic in ``error`` but make the public case
-            # result answer-shaped and explicitly uncertain.
+        final_answer = str(final_record.get("content") or answer or "")
+        if not final_answer and str(final_record.get("status") or "") != "network_error":
             append_task_event(
                 task_id,
                 "final",
-                status="completed_refusal",
-                content=answer,
+                status="network_error",
+                content="",
                 action="acceptance_runner",
-                mode="controller_refusal",
-                termination_reason="case_timeout" if error.startswith("TimeoutError:") else "runner_exception",
+                mode="runtime",
                 error=error,
-                answer_quality={
-                    "fallback_used": True,
-                    "fallback_kind": "refusal",
-                    "fallback_reason": "acceptance_runner_boundary",
-                    "model_error_recorded": bool(error),
-                },
             )
             trace = _trace_summary(task_id)
             final_record = trace.get("final") if isinstance(trace.get("final"), dict) else {}
-            final_status = str(final_record.get("status") or "completed_refusal")
-        status = "completed" if final_status.startswith("completed") else "failed"
+        answer = str(final_record.get("content") or answer or "")
+        delivery = "answer" if answer else "none"
+        runtime_error = "" if answer else "network_error"
         task_events = get_task_events(task_id) or []
         last_event = task_events[-1] if task_events else {}
         last_event_type = str(last_event.get("type") or "")
         failure_reason = ""
-        if status != "completed":
+        if runtime_error:
             last_model_error = next(
                 (
                     str(event.get("error"))
@@ -668,10 +774,11 @@ def run(
                 ),
                 "",
             )
-            failure_reason = error or str(final_record.get("content") or "") or last_model_error or (
-                f"orchestrator ended without a completed final event"
-                f" (final_status={final_status or 'missing'}, last_event_type={last_event_type or 'missing'})"
+            failure_reason = error or last_model_error or (
+                "orchestrator ended without RWKV output"
+                f" (last_event_type={last_event_type or 'missing'})"
             )
+        quality, quality_comparison = _offline_quality(case, answer)
         rows.append(
             {
                 "case_id": case_id,
@@ -687,14 +794,17 @@ def run(
                     or case.get("architecture")
                     or "single_loop"
                 ),
-                "validation_mode": "mechanical_evidence_validation",
-                "status": status,
+                "validation_mode": "offline_reference_comparison_only",
+                "max_tool_steps": metadata.get("max_tool_steps"),
+                "delivery": delivery,
+                "runtime_error": runtime_error,
+                "quality": quality,
+                "quality_comparison": quality_comparison,
                 "answer": answer,
                 "final_output": answer,
                 "final_output_chars": len(answer),
                 "error": error,
                 "failure_reason": failure_reason,
-                "final_status": final_status,
                 "trace": trace,
             }
         )
@@ -721,11 +831,20 @@ def main() -> None:
         default=None,
         help="Optional hard wall-clock limit per case; omitted means no single-case timeout.",
     )
+    parser.add_argument(
+        "--max-tool-steps",
+        type=int,
+        default=None,
+        help="Optional suite-wide step budget override; takes precedence over values embedded in cases.",
+    )
     args = parser.parse_args()
+    if args.max_tool_steps is not None and args.max_tool_steps < 1:
+        parser.error("--max-tool-steps must be positive")
     report = run(
         Path(args.input),
         Path(args.output),
         case_timeout_seconds=args.case_timeout_seconds,
+        max_tool_steps=args.max_tool_steps,
     )
     # Keep stdout ASCII-safe on Windows; the full UTF-8 report is the file.
     print(json.dumps({"output": str(args.output), "case_count": len(report["cases"])}, ensure_ascii=True))

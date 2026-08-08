@@ -1,476 +1,430 @@
-from __future__ import annotations
-
 import json
-import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
-from agent.orchestrator import Orchestrator
+from agent.orchestrator import Orchestrator, runtime_metadata_only
 from agent.planner import Planner
-from retrieval_plugins import PluginRegistry, normalize_result
-from tools.builtin import load_builtin_tools
+from agent.state import AgentState
+from agent.unified_research import run_unified_research_loop
 from tools.registry import ToolRegistry
+from app.services.workspace_files import read_task_report
+from utils.task_events import get_task_events
 
 
-class RetrievalRuntimeTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        load_builtin_tools()
+class FakePlanner:
+    def __init__(self, decisions):
+        self.decisions = list(decisions)
+        self.observations = []
+        self.rebuilt_sessions = []
 
-    def test_provider_result_has_one_canonical_envelope(self):
-        result = normalize_result(
+    def plan_next_action(self, *_args):
+        return self.decisions.pop(0)
+
+    def observe_tool_result(self, result):
+        self.observations.append(result)
+
+    def rebuild_session_after_review(self, user_query, env_context, review, phase):
+        self.rebuilt_sessions.append(
+            {
+                "user_query": user_query,
+                "env_context": env_context,
+                "review": review,
+                "phase": phase,
+            }
+        )
+
+    def rebuild_session(self, user_query, env_context, observation, phase):
+        self.observations.append(observation)
+        self.rebuilt_sessions.append(
+            {
+                "user_query": user_query,
+                "env_context": env_context,
+                "observation": observation,
+                "phase": phase,
+            }
+        )
+
+
+class FakeOwner:
+    def __init__(self, decisions, reviews=None):
+        self.state = AgentState(task_id="TEST", user_query="question")
+        self.state.run_metadata = {}
+        self.planner = FakePlanner(decisions)
+        self._retrieval_ledger = self.state.retrieval.progress
+        self._model_protocol_failure = False
+        self._calculation_results = []
+        self._time_results = []
+        self._arithmetic_results = []
+        self.finished = []
+        self.reviews = list(reviews or [{"decision": "finish"}])
+        self.review_calls = []
+
+    def _agentic_tool_context(self):
+        return {"agent_state": self.state, "task_id": self.state.task_id}
+
+    def _record_retrieval_progress(self, result, **_kwargs):
+        return result
+
+    def _cross_validate_research(self, *args, **kwargs):
+        self.review_calls.append({"args": args, "kwargs": kwargs})
+        return self.reviews.pop(0)
+
+    def _complete_model_tool_loop(self, query, action, rounds, step, *, termination_reason):
+        self.finished.append(
+            {
+                "query": query,
+                "action": action,
+                "rounds": list(rounds),
+                "step": step,
+                "termination_reason": termination_reason,
+            }
+        )
+        return "rwkv final"
+
+
+def _plan():
+    return {
+        "atomic_points": [
+            {"id": "P1", "task": "question", "objective": "answer question"}
+        ]
+    }
+
+
+def test_loop_executes_exact_rwkv_tool_and_query(monkeypatch):
+    calls = []
+    owner = FakeOwner(
+        [
+            {
+                "action": "web_search",
+                "args": {"query": "exact RWKV query"},
+                "task_point_id": "P1",
+                "raw_model_output": "model call",
+            },
+            {"action": "finish_task", "args": {}, "task_point_id": "P1"},
+        ]
+    )
+    monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: name == "web_search"))
+    monkeypatch.setattr(
+        ToolRegistry,
+        "metadata",
+        classmethod(lambda cls, name: {"retrieval_role": "discovery"}),
+    )
+
+    def execute(_cls, action, args, context, phase=None):
+        calls.append((action, dict(args), phase))
+        return json.dumps(
             {
                 "status": "ok",
-                "provider": "test-provider",
-                "results": [{"title": "Source", "url": "https://example.com"}],
-            },
-            provider="test.plugin",
-            query="query",
-            role="discovery",
-        )
-        self.assertEqual(result["schema_version"], "retrieval.v1")
-        self.assertEqual(result["retrieval_role"], "discovery")
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["sources"], ["https://example.com"])
-
-    def test_model_plan_keeps_fixed_generic_schema(self):
-        class FakeLLM:
-            def text_completion(self, prompt, max_tokens=1024, stop=None):
-                return SimpleNamespace(
-                    content=(
-                        '{"schema_version":"task_plan.v1","goal":"goal",'
-                        '"atomic_points":[{"id":"P1","task":"check the fact",'
-                        '"objective":"check fact","evidence_needed":["source"],'
-                        '"acceptance_criteria":["the fact is directly supported"],'
-                        '"output_format":"prose","status":"pending"}],'
-                        '"completion_rule":"supported"}'
-                    )
-                )
-
-        planner = Planner()
-        planner.llm = FakeLLM()
-        plan = planner.create_task_plan("goal")
-        self.assertEqual(plan["schema_version"], "task_plan.v1")
-        self.assertEqual(plan["atomic_points"][0]["task"], "check the fact")
-        self.assertEqual(
-            plan["atomic_points"][0]["acceptance_criteria"],
-            ["the fact is directly supported"],
+                "results": [
+                    {
+                        "title": "source",
+                        "url": "https://example.com",
+                        "content": "retrieved body",
+                    }
+                ],
+            }
         )
 
-    def test_legacy_provider_is_not_executable_in_agent_phase(self):
-        self.assertFalse(ToolRegistry.can_execute("search_web_keyless", "EXTRACTION"))
-        result = json.loads(
-            ToolRegistry.execute(
-                "search_web_keyless",
-                {"query": "test"},
-                {},
-                phase="EXTRACTION",
-            )
-        )
-        self.assertEqual(result["status"], "error")
-        self.assertEqual(result["error_class"], "tool_not_allowed_in_phase")
+    monkeypatch.setattr(ToolRegistry, "execute", classmethod(execute))
+    answer = run_unified_research_loop(owner, "question", {}, _plan(), 5)
+    assert answer == "rwkv final"
+    assert calls == [("web_search", {"query": "exact RWKV query"}, None)]
+    assert owner.finished[0]["termination_reason"] == "rwkv_cross_validation_finish"
 
-    def test_unknown_arguments_are_rejected_before_provider_execution(self):
-        result = json.loads(
-            ToolRegistry.execute(
-                "search_web_tavily",
-                {"query": "test", "unknown_option": True},
-                {},
-                phase="DISCOVERY",
-            )
-        )
-        self.assertEqual(result["status"], "error")
-        self.assertEqual(result["error_class"], "tool_protocol")
-        self.assertEqual(result["unknown_arguments"], ["unknown_option"])
 
-    def test_unknown_tool_uses_the_same_error_envelope(self):
-        result = json.loads(ToolRegistry.execute("not_registered", {}, {}, phase="DISCOVERY"))
-        self.assertEqual(result["schema_version"], "retrieval.v1")
-        self.assertEqual(result["status"], "error")
-        self.assertEqual(result["error_class"], "unknown_tool")
+def test_finish_request_is_decided_by_rwkv_review_not_claim_rules():
+    owner = FakeOwner([{"action": "finish_task", "args": {}, "task_point_id": "P1"}])
+    answer = run_unified_research_loop(owner, "question", {}, _plan(), 5)
+    assert answer == "rwkv final"
+    assert owner.finished[0]["rounds"] == []
+    assert owner.finished[0]["termination_reason"] == "rwkv_cross_validation_finish"
 
-    def test_current_catalog_contains_roles_not_provider_routing_rules(self):
-        catalog = json.loads(ToolRegistry.get_json_catalog("DISCOVERY"))
-        rows = {row["name"]: row for row in catalog}
-        self.assertEqual(rows["search_web_tavily"]["retrieval_role"], "discovery")
-        self.assertNotIn("fetch_web_url", rows)
-        self.assertEqual(rows["search_web_keyless"]["retrieval_role"], "discovery")
-        self.assertEqual(rows["search_crossref"]["plugin"], "crossref.rest")
-        self.assertEqual(rows["search_github_rest"]["plugin"], "github.rest")
-        self.assertEqual(rows["search_mediawiki"]["plugin"], "mediawiki.api")
-        self.assertTrue(rows["search_mediawiki"]["description"])
-        self.assertIn("properties", rows["search_mediawiki"]["arguments"])
 
-        extraction = json.loads(ToolRegistry.get_json_catalog("EXTRACTION"))
-        extraction_rows = {row["name"]: row for row in extraction}
-        self.assertEqual(extraction_rows["fetch_web_url"]["retrieval_role"], "evidence")
-        self.assertNotIn("search_web_tavily", extraction_rows)
-        self.assertEqual(extraction_rows["fetch_crossref_record"]["retrieval_role"], "evidence")
-        self.assertEqual(extraction_rows["fetch_github_rest"]["retrieval_role"], "evidence")
-        self.assertEqual(extraction_rows["fetch_mediawiki_page"]["retrieval_role"], "evidence")
+def test_exact_duplicate_is_reviewed_by_rwkv_without_controller_recovery_route(monkeypatch):
+    calls = []
+    decision = {
+        "action": "web_search",
+        "args": {"query": "same query"},
+        "task_point_id": "P1",
+    }
+    owner = FakeOwner([decision, decision])
+    monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
+    monkeypatch.setattr(
+        ToolRegistry,
+        "metadata",
+        classmethod(lambda cls, name: {"retrieval_role": "discovery"}),
+    )
 
-        all_tools = json.loads(ToolRegistry.get_json_catalog("ALL"))
-        all_rows = {row["name"]: row for row in all_tools}
-        self.assertIn("search_web_keyless", all_rows)
-        self.assertIn("fetch_web_url", all_rows)
-        self.assertTrue(ToolRegistry.can_execute("search_web_keyless", "ALL"))
-        self.assertTrue(ToolRegistry.can_execute("fetch_web_url", "ALL"))
+    def execute(_cls, action, args, context, phase=None):
+        calls.append((action, dict(args)))
+        return json.dumps({"status": "ok", "results": []})
 
-    def test_model_catalog_matches_single_public_web_capability(self):
-        catalog = json.loads(
-            ToolRegistry.get_json_catalog("ALL", model_visible_only=True)
-        )
-        rows = {row["name"]: row for row in catalog}
-        self.assertEqual(
-            set(rows),
+    monkeypatch.setattr(ToolRegistry, "execute", classmethod(execute))
+    answer = run_unified_research_loop(owner, "question", {}, _plan(), 5)
+    assert answer == "rwkv final"
+    assert calls == [("web_search", {"query": "same query"})]
+    assert len(owner.review_calls) == 1
+    assert owner.state.retrieval.routing_snapshot()["frozen_path_count"] == 1
+    assert owner.state.retrieval.replan_count == 0
+    assert owner.planner.rebuilt_sessions == []
+    assert owner.finished[0]["termination_reason"] == "rwkv_cross_validation_finish_after_duplicate"
+    assert not hasattr(owner.planner, "begin_replan")
+
+
+def test_duplicate_review_replan_runs_only_the_next_rwkv_selected_query(monkeypatch):
+    first = {
+        "action": "web_search",
+        "args": {"query": "same query"},
+        "task_point_id": "P1",
+    }
+    follow_up = {
+        "action": "web_search",
+        "args": {"query": "RWKV selected missing evidence query"},
+        "task_point_id": "P1",
+    }
+    owner = FakeOwner(
+        [first, first, follow_up, {"action": "finish_task", "args": {}}],
+        reviews=[
             {
-                "web_search",
-                "connector_lookup",
-                "calculator",
-                "current_time",
-                "date_diff",
-                "finish_task",
+                "decision": "replan",
+                "missing_points": ["P1"],
+                "conflicts": [],
+                "next_focus": "an independent official confirmation",
             },
+            {"decision": "finish", "missing_points": [], "conflicts": []},
+        ],
+    )
+    calls = []
+    monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
+    monkeypatch.setattr(
+        ToolRegistry,
+        "metadata",
+        classmethod(lambda cls, name: {"retrieval_role": "discovery"}),
+    )
+
+    def execute(_cls, action, args, context, phase=None):
+        calls.append((action, dict(args)))
+        return json.dumps({"status": "ok", "results": []})
+
+    monkeypatch.setattr(ToolRegistry, "execute", classmethod(execute))
+    answer = run_unified_research_loop(owner, "question", {}, _plan(), 6)
+
+    assert answer == "rwkv final"
+    assert calls == [
+        ("web_search", {"query": "same query"}),
+        ("web_search", {"query": "RWKV selected missing evidence query"}),
+    ]
+    assert len(owner.review_calls) == 2
+    assert len(owner.planner.rebuilt_sessions) == 1
+    assert owner.planner.rebuilt_sessions[0]["review"]["decision"] == "replan"
+    assert owner.state.retrieval.replan_count == 1
+
+
+def test_repeated_frozen_path_reuses_pending_rwkv_replan_without_reviewer_loop(monkeypatch):
+    repeated = {
+        "action": "web_search",
+        "args": {"query": "same frozen query"},
+        "task_point_id": "P1",
+    }
+    alternative = {
+        "action": "web_search",
+        "args": {"query": "RWKV independently selected alternative"},
+        "task_point_id": "P1",
+    }
+    owner = FakeOwner(
+        [repeated, repeated, repeated, alternative, {"action": "finish_task", "args": {}}],
+        reviews=[
+            {
+                "decision": "replan",
+                "missing_points": ["P1"],
+                "conflicts": [],
+                "next_focus": "another source route",
+            },
+            {"decision": "finish", "missing_points": [], "conflicts": []},
+        ],
+    )
+    calls = []
+    monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
+    monkeypatch.setattr(
+        ToolRegistry,
+        "metadata",
+        classmethod(lambda cls, name: {"retrieval_role": "discovery"}),
+    )
+
+    def execute(_cls, action, args, context, phase=None):
+        calls.append((action, dict(args)))
+        results = (
+            [{"title": "new source", "url": "https://example.com/new", "content": "new evidence"}]
+            if args.get("query") == "RWKV independently selected alternative"
+            else []
         )
-        self.assertEqual(
-            ToolRegistry.model_visible_names("ALL"),
-            [
-                "finish_task",
-                "web_search",
-                "connector_lookup",
-                "calculator",
-                "date_diff",
-                "current_time",
+        return json.dumps({"status": "ok", "results": results})
+
+    monkeypatch.setattr(ToolRegistry, "execute", classmethod(execute))
+    answer = run_unified_research_loop(owner, "question", {}, _plan(), 7)
+
+    assert answer == "rwkv final"
+    assert calls == [
+        ("web_search", {"query": "same frozen query"}),
+        ("web_search", {"query": "RWKV independently selected alternative"}),
+    ]
+    assert len(owner.review_calls) == 2
+    assert len(owner.planner.rebuilt_sessions) == 2
+    assert owner.state.retrieval.replan_count == 2
+
+
+def test_rwkv_cross_validation_can_rebuild_planner_and_run_another_round(monkeypatch):
+    owner = FakeOwner(
+        [
+            {"action": "finish_task", "args": {}, "task_point_id": "P1"},
+            {
+                "action": "web_search",
+                "args": {"query": "model selected follow-up"},
+                "task_point_id": "P1",
+            },
+            {"action": "finish_task", "args": {}, "task_point_id": "P1"},
+        ],
+        reviews=[
+            {
+                "decision": "replan",
+                "missing_points": ["P1"],
+                "conflicts": [],
+                "next_focus": "missing official confirmation",
+            },
+            {"decision": "finish", "missing_points": [], "conflicts": []},
+        ],
+    )
+    calls = []
+    monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
+    monkeypatch.setattr(
+        ToolRegistry,
+        "metadata",
+        classmethod(lambda cls, name: {"retrieval_role": "discovery"}),
+    )
+
+    def execute(_cls, action, args, context, phase=None):
+        calls.append((action, dict(args), phase))
+        return json.dumps(
+            {
+                "status": "ok",
+                "results": [
+                    {
+                        "title": "official",
+                        "url": "https://example.com/official",
+                        "content": "original confirmation",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(ToolRegistry, "execute", classmethod(execute))
+    answer = run_unified_research_loop(owner, "question", {}, _plan(), 6)
+
+    assert answer == "rwkv final"
+    assert calls == [("web_search", {"query": "model selected follow-up"}, None)]
+    assert len(owner.planner.rebuilt_sessions) == 1
+    assert owner.planner.rebuilt_sessions[0]["review"]["decision"] == "replan"
+    assert owner.state.retrieval.replan_count == 1
+
+
+def test_planner_context_keeps_original_source_spans_after_feedback_changes():
+    state = AgentState(task_id="PERSISTENT_EVIDENCE", user_query="question")
+    state.retrieval.claims.initialize(_plan(), "question")
+    state.retrieval.record_query(
+        "first query",
+        {
+            "status": "ok",
+            "results": [
+                {
+                    "title": "source",
+                    "url": "https://example.com/source",
+                    "source_chunks": [
+                        {
+                            "chunk_id": "chunk-1",
+                            "index": 0,
+                            "text": "ORIGINAL_PERSISTENT_SPAN exact source text",
+                        }
+                    ],
+                    "model_extracted_facts": "GENERATED_PARAPHRASE_MUST_NOT_ENTER",
+                }
             ],
-        )
-        self.assertEqual(rows["web_search"]["category"], "retrieval")
-        self.assertEqual(rows["date_diff"]["category"], "computation")
-        self.assertEqual(rows["finish_task"]["category"], "control")
-        self.assertEqual(rows["calculator"]["category"], "computation")
-        self.assertEqual(rows["connector_lookup"]["category"], "connector")
-        self.assertNotIn("search_web_tavily", rows)
-        self.assertNotIn("fetch_web_url", rows)
+        },
+        task_point_id="P1",
+        step=1,
+    )
+    state.last_feedback = json.dumps(
+        {"status": "no_new_evidence", "error_class": "exact_duplicate_request"}
+    )
 
-    def test_planner_prompt_does_not_leak_provider_routing_matrix(self):
-        prompt = Planner._system_prompt("ALL")
-        self.assertIn('"name": "web_search"', prompt)
-        self.assertNotIn('"name": "search_web_tavily"', prompt)
-        self.assertNotIn('"name": "search_web_keyless"', prompt)
-        self.assertNotIn('"name": "fetch_web_url"', prompt)
-        self.assertNotIn("provider-specific search API", prompt)
-        self.assertIn('"name": "date_diff"', prompt)
-        self.assertIn("YYYY-MM-DD", prompt)
+    context = state.to_retrieval_context()
+    assert "ORIGINAL_PERSISTENT_SPAN exact source text" in context
+    assert "GENERATED_PARAPHRASE_MUST_NOT_ENTER" not in context
 
-    def test_planner_prompt_scopes_public_tools_by_phase_and_point(self):
-        discovery = Planner._system_prompt("DISCOVERY")
-        extraction = Planner._system_prompt("EXTRACTION")
-        self.assertIn('"name": "web_search"', discovery)
-        self.assertNotIn('"name": "open_page"', discovery)
-        self.assertNotIn('"name": "open_page"', extraction)
-        self.assertIn('"name": "web_search"', extraction)
-        self.assertIn('"task_point_id":"P1"', discovery)
+    planner = Planner()
+    planner._task_plan = _plan()
+    planner._latest_routing_observation = '{"status":"latest"}'
+    decision_body = planner._build_isolated_decision_body(
+        "question",
+        context,
+        "DISCOVERY",
+    )
+    assert "ORIGINAL_PERSISTENT_SPAN exact source text" in decision_body
 
-    def test_planner_decision_does_not_replay_audit_or_page_evidence_history(self):
-        prompts = []
 
-        class FakeLLM:
-            provider = "local"
+def test_runtime_has_no_answer_quality_status_classifier():
+    orchestrator = Orchestrator()
+    assert not hasattr(orchestrator, "_final_answer_status")
+    assert not hasattr(orchestrator, "_final_answer_error_type")
 
-            def text_completion(self, prompt, max_tokens=1024, stop=None):
-                prompts.append(prompt)
-                return SimpleNamespace(content='{"name":"finish_task","arguments":{}}')
 
-        planner = Planner()
-        planner.llm = FakeLLM()
-        planner.begin_task(
-            "Find the requested fact",
-            "Task: Find the requested fact",
-            {
-                "schema_version": "task_plan.v1",
-                "goal": "Find the requested fact",
-                "atomic_points": [
-                    {
-                        "id": "P1",
-                        "task": "find the fact",
-                        "objective": "verify the fact",
-                        "evidence_needed": ["the direct fact"],
-                        "acceptance_criteria": ["a source supports it"],
-                    }
-                ],
-            },
-        )
-        planner._messages.append(
-            {"role": "tool", "content": "HISTORICAL_CONTROLLER_ERROR_SHOULD_NOT_BE_SENT"}
-        )
-        planner.observe_tool_result(
-            {
-                "status": "ok",
-                "results": [
-                    {
-                        "title": "Current page",
-                        "url": "https://example.com/current",
-                        "chunk_candidates": [
-                            {"facts": ["SECRET_PAGE_FACT"], "quote": "SECRET_PAGE_QUOTE"}
-                        ],
-                    }
-                ],
-            }
-        )
-
-        action = planner.plan_next_action(
-            "Find the requested fact",
-            None,
-            "Task: Find the requested fact",
-            "DISCOVERY",
-        )
-
-        self.assertEqual(action["action"], "finish_task")
-        self.assertEqual(len(prompts), 1)
-        self.assertIn("Latest tool observation (routing only)", prompts[0])
-        self.assertIn("https://example.com/current", prompts[0])
-        self.assertNotIn("HISTORICAL_CONTROLLER_ERROR_SHOULD_NOT_BE_SENT", prompts[0])
-        self.assertIn("SECRET_PAGE_FACT", prompts[0])
-        self.assertIn("SECRET_PAGE_QUOTE", prompts[0])
-
-    def test_global_loop_blocks_successful_duplicate_web_search_before_execution(self):
-        orchestrator = Orchestrator()
-        orchestrator.state.task_id = "DUPLICATE_SEARCH_TEST"
-        orchestrator.planner.plan_next_action = Mock(
-            side_effect=[
-                {"action": "web_search", "args": {"query": "same query"}},
-                {"action": "web_search", "args": {"query": "same query"}},
-                {"action": "finish_task", "args": {}},
-            ]
-        )
-        orchestrator.planner.observe_tool_result = Mock()
-        orchestrator._complete_model_tool_loop = Mock(return_value="done")
-        task_plan = {"atomic_points": []}
-        tool_result = json.dumps(
-            {
-                "status": "ok",
-                "results": [{"url": "https://example.com/fact"}],
-                "evidence_ready": True,
-            }
-        )
-
-        with patch("tools.registry.ToolRegistry.execute", return_value=tool_result) as execute:
-            with patch("agent.unified_research.append_task_event") as append_event:
-                result = orchestrator._run_single_loop("goal", {}, task_plan, max_steps=3)
-
-        self.assertEqual(result, "done")
-        self.assertEqual(execute.call_count, 1)
-        rounds = orchestrator._complete_model_tool_loop.call_args.args[2]
-        self.assertEqual(len(rounds), 1)
-        self.assertEqual(rounds[0][0], "same query")
-        self.assertTrue(rounds[0][1]["evidence_ready"])
-        duplicate_events = [
-            call
-            for call in append_event.call_args_list
-            if call.args[1] == "retrieval_duplicate_blocked"
-        ]
-        self.assertEqual(len(duplicate_events), 1)
-        blocked_results = [
-            call
-            for call in append_event.call_args_list
-            if call.args[1] == "tool_result"
-            and call.kwargs.get("execution_status") == "blocked_duplicate"
-        ]
-        self.assertEqual(len(blocked_results), 1)
-
-    def test_duplicate_after_empty_search_leaves_a_recovery_turn(self):
-        orchestrator = Orchestrator()
-        orchestrator.state.task_id = "EMPTY_DUPLICATE_RECOVERY_TEST"
-        orchestrator.state.run_metadata = {"max_replan_attempts": 0}
-        orchestrator.planner.plan_next_action = Mock(
-            side_effect=[
-                {"action": "web_search", "args": {"query": "same query"}},
-                {"action": "web_search", "args": {"query": "same query"}},
-                {"action": "finish_task", "args": {}},
-            ]
-        )
-        orchestrator.planner.observe_tool_result = Mock()
-        orchestrator._complete_model_tool_loop = Mock(return_value="done")
-        task_plan = {
-            "atomic_points": [
-                {"id": "P1", "evidence_needed": ["official evidence"]},
-            ]
+def test_runtime_metadata_cannot_receive_gold_or_external_plan():
+    projected = runtime_metadata_only(
+        {
+            "max_tool_steps": 50,
+            "gold": {"answer": "secret"},
+            "reference_answer": "secret",
+            "task_plan": {"goal": "injected"},
         }
-        empty_result = json.dumps(
-            {
-                "status": "no_evidence",
-                "results": [],
-                "evidence_ready": False,
-                "candidate_urls": [{"url": "https://example.com/fact"}],
-            }
-        )
+    )
+    assert projected == {"max_tool_steps": 50}
 
-        with patch("tools.registry.ToolRegistry.execute", return_value=empty_result) as execute:
-            with patch("agent.unified_research.append_task_event") as append_event:
-                result = orchestrator._run_single_loop("goal", {}, task_plan, max_steps=3)
 
-        self.assertEqual(result, "done")
-        self.assertEqual(execute.call_count, 1)
-        self.assertEqual(orchestrator.planner.plan_next_action.call_count, 2)
-        duplicate_events = [
-            call
-            for call in append_event.call_args_list
-            if call.args[1] == "retrieval_duplicate_blocked"
-        ]
-        self.assertEqual(len(duplicate_events), 1)
+def test_rwkv_answer_is_identical_in_return_event_and_report():
+    output = "  Assistant: <think>model-owned text</think>\nRepeated.\nRepeated.  \n"
 
-    def test_duplicate_freezes_path_rebuilds_planner_and_fans_out_replan(self):
-        orchestrator = Orchestrator()
-        orchestrator.state.task_id = "DUPLICATE_MICRO_REPLAN_TEST"
-        orchestrator.planner.plan_next_action = Mock(
-            side_effect=[
-                {"action": "web_search", "args": {"query": "same query"}},
-                {"action": "web_search", "args": {"query": "same query"}},
-                {"action": "web_search", "args": {"query": "alternate focus"}},
-                {"action": "finish_task", "args": {}},
-            ]
-        )
-        orchestrator.planner.begin_replan = Mock()
-        orchestrator.planner.observe_tool_result = Mock()
-        orchestrator._complete_model_tool_loop = Mock(return_value="done")
-        task_plan = {
-            "atomic_points": [
-                {
-                    "id": "P1",
-                    "task": "verify the official fact",
-                    "objective": "verify the official fact",
-                    "evidence_needed": ["direct source evidence"],
-                }
-            ]
-        }
-        result = json.dumps(
-            {
-                "status": "ok",
-                "results": [
-                    {
-                        "title": "Source",
-                        "url": "https://example.com/fact",
-                        "content": "Direct source evidence.",
-                    }
-                ],
-            }
-        )
+    class ExactRWKV:
+        provider = "local_13b"
 
-        with (
-            patch("tools.registry.ToolRegistry.execute", return_value=result) as execute,
-            patch(
-                "agent.unified_research._coverage",
-                side_effect=[
-                    {"status": "insufficient_evidence", "missing": [{"point_id": "P1", "task": "verify the official fact"}]},
-                    {"status": "complete", "missing": []},
-                ],
-            ),
-            patch("agent.unified_research.append_task_event") as append_event,
-        ):
-            answer = orchestrator._run_single_loop("verify the fact", {}, task_plan, max_steps=4)
+        def text_completion(self, _prompt, max_tokens=0):
+            assert max_tokens > 0
+            return SimpleNamespace(content=output)
 
-        self.assertEqual(answer, "done")
-        self.assertEqual(execute.call_count, 4)  # initial search + three replan queries
-        orchestrator.planner.begin_replan.assert_called_once()
-        self.assertEqual(orchestrator.state.retrieval.replan_count, 1)
-        self.assertEqual(len(orchestrator.state.retrieval.frozen_paths), 1)
-        replan_events = [
-            call for call in append_event.call_args_list if call.args[1] == "task_replan_attempt"
-        ]
-        self.assertEqual(len(replan_events), 1)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        with patch.dict("config.DATA_PIPELINE", {"output_directory": str(root)}, clear=False):
+            orchestrator = Orchestrator()
+            orchestrator.llm = ExactRWKV()
+            orchestrator.state.task_id = "EXACT_OUTPUT_CHAIN"
+            orchestrator.state.user_query = "question"
+            orchestrator.state.task_output_dir = str(root / "EXACT_OUTPUT_CHAIN")
+            Path(orchestrator.state.task_output_dir).mkdir(parents=True, exist_ok=True)
 
-    def test_finish_with_missing_evidence_returns_to_same_shared_loop(self):
-        orchestrator = Orchestrator()
-        orchestrator.state.task_id = "SHARED_GAP_FEEDBACK_TEST"
-        orchestrator.state.run_metadata = {"max_network_searches": 2}
-        orchestrator.planner.plan_next_action = Mock(
-            side_effect=[
-                {"action": "web_search", "args": {"query": "first evidence direction"}},
-                {"action": "finish_task", "args": {}},
-                {"action": "web_search", "args": {"query": "second evidence direction"}},
-                {"action": "finish_task", "args": {}},
-            ]
-        )
-        orchestrator.planner.observe_tool_result = Mock()
-        orchestrator._complete_model_tool_loop = Mock(return_value="done")
-        task_plan = {
-            "atomic_points": [
-                {
-                    "id": "P1",
-                    "task": "verify the requested fact",
-                    "objective": "verify the requested fact",
-                    "evidence_needed": ["direct source evidence"],
-                    "acceptance_criteria": ["the source supports the fact"],
-                }
-            ]
-        }
-        first = json.dumps({"status": "no_evidence", "results": []})
-        second = json.dumps(
-            {
-                "status": "ok",
-                "results": [
-                    {
-                        "title": "Fact source",
-                        "url": "https://example.com/fact",
-                        "content": "The requested fact is directly stated here. " * 20,
-                        "page_excerpt": "The requested fact is directly stated here. " * 20,
-                        "evidence_origin": "fetched_page_body",
-                        "body_verified": True,
-                    }
-                ],
-            }
-        )
-
-        with (
-            patch(
-                "tools.registry.ToolRegistry.execute",
-                side_effect=[first, second],
-            ) as execute,
-            patch("agent.unified_research.append_task_event") as append_event,
-        ):
-            result = orchestrator._run_single_loop(
-                "verify the requested fact",
-                {},
-                task_plan,
-                max_steps=4,
+            returned = orchestrator._complete_model_tool_loop(
+                "question",
+                "finish_task",
+                [],
+                1,
             )
+            final = [
+                event
+                for event in get_task_events("EXACT_OUTPUT_CHAIN")
+                if event.get("type") == "final"
+            ][-1]
+            report = read_task_report(root, "EXACT_OUTPUT_CHAIN")
 
-        self.assertEqual(result, "done")
-        self.assertEqual(execute.call_count, 2)
-        self.assertEqual(
-            [item["query"] for item in orchestrator.state.retrieval.query_history],
-            ["first evidence direction", "second evidence direction"],
-        )
-        gap_events = [
-            call for call in append_event.call_args_list if call.args[1] == "research_gap"
-        ]
-        self.assertEqual(len(gap_events), 1)
-
-    def test_discovery_and_evidence_roles_are_phase_gated(self):
-        self.assertTrue(ToolRegistry.can_execute("finish_task", "DISCOVERY"))
-        self.assertIn("finish_task", ToolRegistry.model_visible_names("DISCOVERY"))
-        self.assertTrue(ToolRegistry.can_execute("finish_task", "RECOVERY"))
-        self.assertTrue(ToolRegistry.can_execute("search_web_tavily", "DISCOVERY"))
-        self.assertTrue(ToolRegistry.can_execute("search_web_keyless", "DISCOVERY"))
-        self.assertTrue(ToolRegistry.can_execute("search_crossref", "DISCOVERY"))
-        self.assertTrue(ToolRegistry.can_execute("search_github_rest", "DISCOVERY"))
-        self.assertTrue(ToolRegistry.can_execute("search_mediawiki", "DISCOVERY"))
-        self.assertFalse(ToolRegistry.can_execute("search_web_tavily", "EXTRACTION"))
-        self.assertFalse(ToolRegistry.can_execute("search_github_rest", "EXTRACTION"))
-        self.assertTrue(ToolRegistry.can_execute("fetch_web_url", "EXTRACTION"))
-        self.assertTrue(ToolRegistry.can_execute("fetch_crossref_record", "EXTRACTION"))
-        self.assertTrue(ToolRegistry.can_execute("fetch_github_rest", "EXTRACTION"))
-        self.assertTrue(ToolRegistry.can_execute("fetch_mediawiki_page", "EXTRACTION"))
-        self.assertTrue(ToolRegistry.can_execute("fetch_web_url", "SYNTHESIS"))
-        self.assertNotIn("fetch_web_url", ToolRegistry.names("DISCOVERY"))
-        self.assertIn("fetch_web_url", ToolRegistry.names("EXTRACTION"))
-
-    def test_plugin_registration_merges_tools_for_one_provider_package(self):
-        PluginRegistry.register("test.multi", capabilities=("first",), tools=("search",))
-        PluginRegistry.register("test.multi", capabilities=("second",), tools=("fetch",))
-        row = next(item for item in PluginRegistry.catalog() if item["plugin"] == "test.multi")
-        self.assertEqual(row["capabilities"], ["first", "second"])
-        self.assertEqual(row["tools"], ["search", "fetch"])
-
-
-if __name__ == "__main__":
-    unittest.main()
+    assert returned == output
+    assert final["content"] == output
+    assert "status" not in final
+    assert report[0]["answer"] == output

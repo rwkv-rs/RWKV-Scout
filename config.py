@@ -1,10 +1,189 @@
 # RWKV-ECRA/config.py
 import os
 import json
+import tempfile
+import threading
+from contextlib import contextmanager
 from contextvars import ContextVar
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+LOCAL_ENV_FILE = os.path.join(BASE_DIR, ".env.local")
+_LOCAL_SECRET_LOCK = threading.Lock()
+
+
+def _load_local_env_file(path: str) -> None:
+    """Load ignored, deployment-local secrets without overriding real env vars."""
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except FileNotFoundError:
+        return
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def _parse_env_key_pool(value: object) -> list[str]:
+    """Parse a JSON or comma-separated credential pool without logging it."""
+
+    text = str(value or "").strip()
+    if not text:
+        return []
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1].strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = text.replace("\n", ",").split(",")
+    if not isinstance(parsed, (list, tuple)):
+        parsed = [parsed]
+    values: list[str] = []
+    for item in parsed:
+        candidate = str(item or "").strip().strip("'\"")
+        if candidate and candidate not in values:
+            values.append(candidate)
+    return values
+
+
+def _remove_key_from_local_env(path: str, env_name: str, api_key: str) -> bool:
+    """Atomically remove one credential from the ignored local env file."""
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except FileNotFoundError:
+        return False
+
+    pool_name = f"{env_name}_API_KEYS"
+    primary_name = f"{env_name}_API_KEY"
+    changed = False
+    rewritten: list[str] = []
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            rewritten.append(raw_line)
+            continue
+        key, separator, raw_value = stripped.partition("=")
+        key = key.strip()
+        if not separator or key not in {pool_name, primary_name}:
+            rewritten.append(raw_line)
+            continue
+
+        if key == primary_name:
+            current = str(raw_value or "").strip().strip("'\"")
+            if current != api_key:
+                rewritten.append(raw_line)
+                continue
+            changed = True
+            continue
+
+        current_pool = _parse_env_key_pool(raw_value)
+        filtered_pool = [value for value in current_pool if value != api_key]
+        if len(filtered_pool) == len(current_pool):
+            rewritten.append(raw_line)
+            continue
+        changed = True
+        if filtered_pool:
+            encoded = json.dumps(filtered_pool, ensure_ascii=False, separators=(",", ":"))
+            rewritten.append(f"{pool_name}={encoded}\n")
+
+    if not changed:
+        return False
+
+    directory = os.path.dirname(os.path.abspath(path))
+    file_descriptor, temporary_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.",
+        dir=directory,
+        text=True,
+    )
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.writelines(rewritten)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+    return True
+
+
+def retire_search_api_key(
+    service: str,
+    api_key: str,
+    *,
+    local_env_file: str | None = None,
+) -> bool:
+    """Remove a permanently unusable search key from runtime and local storage.
+
+    Environment variables inherited from a parent process cannot be rewritten in
+    that parent, but the current process is updated immediately. Deployment-local
+    keys loaded from ``.env.local`` are also removed atomically so a restart does
+    not reintroduce a rejected or permanently exhausted credential.
+    """
+
+    name = str(service or "").strip()
+    target = str(api_key or "").strip()
+    if not name or not target:
+        return False
+    env_name = name.upper()
+    pool_name = f"{env_name}_API_KEYS"
+    primary_name = f"{env_name}_API_KEY"
+    changed = False
+
+    with _LOCAL_SECRET_LOCK:
+        pool = _parse_env_key_pool(os.environ.get(pool_name, ""))
+        filtered_pool = [value for value in pool if value != target]
+        if len(filtered_pool) != len(pool):
+            changed = True
+            if filtered_pool:
+                os.environ[pool_name] = json.dumps(
+                    filtered_pool,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            else:
+                os.environ.pop(pool_name, None)
+
+        if str(os.environ.get(primary_name, "")).strip() == target:
+            os.environ.pop(primary_name, None)
+            changed = True
+
+        configured_primary = str(API_KEYS.get(name, "") or "").strip()
+        if configured_primary == target:
+            API_KEYS[name] = ""
+            changed = True
+        configured_pool = API_KEYS.get(f"{name}_pool", [])
+        if isinstance(configured_pool, list):
+            filtered_config = [
+                value for value in configured_pool if str(value or "").strip() != target
+            ]
+            if len(filtered_config) != len(configured_pool):
+                API_KEYS[f"{name}_pool"] = filtered_config
+                changed = True
+
+        path = local_env_file if local_env_file is not None else LOCAL_ENV_FILE
+        if _remove_key_from_local_env(path, env_name, target):
+            changed = True
+    return changed
+
+
+_load_local_env_file(LOCAL_ENV_FILE)
 
 # ==========================================
 # 从 config.json 加载配置
@@ -39,21 +218,18 @@ MODEL_CONTRACTS = {
     "local_7b": {
         "label": "RWKV 7.2B",
         "model": "rwkv7-g1h-7.2b-20260710-ctx10240",
-        "api_key": "rwkv-skills",
         "context_length": 10240,
         "provider": "local_7b",
     },
     "local_13b": {
         "label": "RWKV 13.3B",
         "model": "rwkv7-g1i-13.3b-20260805-ctx16384",
-        "api_key": "rwkv-skills",
         "context_length": 16384,
         "provider": "local_13b",
     },
     "local_direct_1p5b": {
         "label": "RWKV 1.5B (Direct)",
         "model": "rwkv7-g1h-1.5b-20260710-ctx10240",
-        "api_key": "",
         "context_length": 10240,
         "provider": "local_direct_1p5b",
     },
@@ -78,6 +254,14 @@ if TRACKING.get("log_dir", "").startswith("./"):
 override_llm_key: ContextVar[str] = ContextVar("override_llm_key", default=None)
 override_llm_url: ContextVar[str] = ContextVar("override_llm_url", default=None)
 override_llm_provider: ContextVar[str] = ContextVar("override_llm_provider", default=None)
+override_llm_temperature: ContextVar[float | None] = ContextVar(
+    "override_llm_temperature",
+    default=None,
+)
+override_llm_seed: ContextVar[int | None] = ContextVar(
+    "override_llm_seed",
+    default=None,
+)
 override_model_backend: ContextVar[str] = ContextVar("override_model_backend", default=None)
 override_direct_rwkv_config: ContextVar[dict | None] = ContextVar("override_direct_rwkv_config", default=None)
 override_slm_endpoint: ContextVar[str] = ContextVar("override_slm_endpoint", default=None)
@@ -200,14 +384,96 @@ def get_llm_model() -> str:
 def get_llm_temperature() -> float:
     """Return the configured sampling temperature for model requests."""
     provider = get_llm_provider()
-    raw_value = os.environ.get(
-        "RWKV_ECRA_LLM_TEMPERATURE",
-        LLM_ENDPOINTS.get(provider, {}).get("temperature", 0.0),
-    )
+    raw_value = override_llm_temperature.get()
+    if raw_value is None:
+        raw_value = os.environ.get(
+            "RWKV_ECRA_LLM_TEMPERATURE",
+            LLM_ENDPOINTS.get(provider, {}).get("temperature", 0.0),
+        )
     try:
         return max(0.0, min(float(raw_value), 2.0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def get_model_stage_temperature(stage: str) -> float:
+    """Return an explicit role temperature without changing the global model profile."""
+
+    stage_name = str(stage or "").strip().casefold()
+    environment_name = "RWKV_ECRA_" + "".join(
+        character if character.isalnum() else "_" for character in stage_name.upper()
+    ) + "_TEMPERATURE"
+    sampling = MODEL_RUNTIME_CONFIG.get("sampling", {})
+    configured = sampling.get(stage_name) if isinstance(sampling, dict) else None
+    raw_value = os.environ.get(environment_name, configured)
+    if raw_value is None:
+        return get_llm_temperature()
+    try:
+        return max(0.0, min(float(raw_value), 2.0))
+    except (TypeError, ValueError):
+        return get_llm_temperature()
+
+
+def get_model_replan_temperature(generation: int) -> float:
+    """Return the temperature for one planner rebuild generation.
+
+    Only the request-local temperature changes.  Sampling parameters other
+    than ``temperature`` and the explicit replan ``seed`` remain untouched.
+    """
+
+    sampling = MODEL_RUNTIME_CONFIG.get("sampling", {})
+    values = sampling if isinstance(sampling, dict) else {}
+    base = get_model_stage_temperature("planner_replan")
+
+    def configured_float(name: str, fallback: float) -> float:
+        environment_name = "RWKV_ECRA_" + name.upper() + "_TEMPERATURE"
+        raw_value = os.environ.get(environment_name, values.get(name, fallback))
+        try:
+            return max(0.0, min(float(raw_value), 2.0))
+        except (TypeError, ValueError):
+            return fallback
+
+    increment = configured_float("planner_replan_increment", 0.1)
+    maximum = configured_float("planner_replan_max", 0.55)
+    return min(maximum, base + increment * max(0, int(generation or 1) - 1))
+
+
+def get_llm_seed() -> int | None:
+    """Return an optional request-local seed; absence keeps the fast sampler path."""
+
+    raw_value = override_llm_seed.get()
+    if raw_value is None:
+        raw_value = os.environ.get("RWKV_ECRA_LLM_SEED")
+    if raw_value is None or str(raw_value).strip() == "":
+        return None
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    return max(-(2**63), min(value, 2**63 - 1))
+
+
+@contextmanager
+def model_sampling_parameters(temperature: float, *, seed: int | None = None):
+    """Apply task-local temperature/seed without leaking across concurrent tasks."""
+
+    temperature_token = override_llm_temperature.set(
+        max(0.0, min(float(temperature), 2.0))
+    )
+    seed_token = override_llm_seed.set(seed)
+    try:
+        yield
+    finally:
+        override_llm_seed.reset(seed_token)
+        override_llm_temperature.reset(temperature_token)
+
+
+@contextmanager
+def model_sampling_temperature(temperature: float):
+    """Backward-compatible temperature-only request scope."""
+
+    with model_sampling_parameters(temperature):
+        yield
 
 
 def get_llm_context_length() -> int:
@@ -236,7 +502,6 @@ def get_experiment_model_config(profile_key: str | None = None) -> dict:
         "label": profile.get("label", selected),
         "model": profile.get("model", ""),
         "endpoint": profile.get("base_url", ""),
-        "api_key": API_KEYS.get(selected, ""),
         "context_length": profile.get("context_length", 10240),
         "provider": selected,
     }
@@ -307,7 +572,12 @@ def get_slm_protocol() -> str:
     return str(SLM_CONFIG.get("protocol", "rwkv_lightning"))
 
 def get_slm_password() -> str:
-    return override_slm_password.get() or SLM_CONFIG.get("password", "")
+    return (
+        override_slm_password.get()
+        or os.environ.get("RWKV_ECRA_SLM_PASSWORD", "")
+        or get_llm_api_key()
+        or SLM_CONFIG.get("password", "")
+    )
 
 def get_slm_concurrency() -> int:
     return max(1, int(SLM_CONFIG.get("concurrency", 16)))

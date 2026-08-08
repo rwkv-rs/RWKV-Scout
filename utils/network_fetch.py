@@ -26,6 +26,16 @@ class NetworkFetchError(RuntimeError):
 _CHARSET_RE = re.compile(r"charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", re.IGNORECASE)
 _META_CHARSET_RE = re.compile(rb"<meta[^>]+charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", re.IGNORECASE)
 _MOJIBAKE_MARKERS = ("Ã", "Â", "â", "æ", "å", "ç", "è", "é", "ï¿½", "�")
+_SMART_PUNCTUATION_MOJIBAKE = (
+    "\u00e2\u20ac\u2122",
+    "\u00e2\u20ac\u02dc",
+    "\u00e2\u20ac\u0153",
+    "\u00e2\u20ac\u009d",
+    "\u00e2\u20ac\u201c",
+    "\u00e2\u20ac\u201d",
+    "\u00e2\u20ac\u2018",
+    "\u00e2\u20ac\u00a6",
+)
 _DEFAULT_HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -82,7 +92,10 @@ def _encoding_candidates(
 def _text_quality(value: str, order: int) -> tuple[int, int, int, int]:
     """Rank decoded text and penalize classic UTF-8-as-Latin-1 mojibake."""
     replacement_count = value.count("\ufffd") + value.count("�")
-    mojibake_count = sum(value.count(marker) for marker in _MOJIBAKE_MARKERS)
+    mojibake_count = sum(
+        value.count(marker)
+        for marker in (*_MOJIBAKE_MARKERS, *_SMART_PUNCTUATION_MOJIBAKE)
+    )
     control_count = sum(1 for char in value if ord(char) < 32 and char not in "\r\n\t")
     cjk_count = len(re.findall(r"[\u3400-\u9fff]", value))
     return (replacement_count * 1000 + mojibake_count * 20 + control_count * 10, -cjk_count, order, -len(value))

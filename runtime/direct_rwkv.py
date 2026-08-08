@@ -15,10 +15,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Sequence
 
-from config import get_direct_rwkv_config, get_llm_model
+from config import get_direct_rwkv_config, get_llm_model, get_llm_temperature
 from runtime.backend import BackendResponse
 from runtime.transcript import render_rwkv_transcript
-from utils.model_events import visible_model_text
 
 
 class DirectRWKVConfigurationError(RuntimeError):
@@ -54,18 +53,6 @@ class DirectRWKVBackend:
             return ""
         name = Path(model_path).name
         return name[:-4] if name.endswith(".pth") else name
-
-    @staticmethod
-    def _visible_output(text: str) -> str:
-        """Hide a reasoning preamble even when a short run ends mid-block."""
-        raw = str(text or "")
-        lowered = raw.casefold()
-        start = lowered.find("<think>")
-        if start >= 0:
-            end = lowered.find("</think>", start + len("<think>"))
-            if end < 0:
-                return raw[:start].strip()
-        return visible_model_text(raw)
 
     @staticmethod
     def _path_value(value: Any) -> Path | None:
@@ -181,7 +168,7 @@ class DirectRWKVBackend:
         torch = self._torch
         token_ids = self._tokenizer.encode(str(prompt)) or [0]
         max_tokens = max(1, int(max_tokens))
-        temperature = float(self.settings.get("temperature", 0.0) or 0.0)
+        temperature = get_llm_temperature()
         top_p = float(self.settings.get("top_p", 1.0) or 1.0)
         top_k = max(0, int(self.settings.get("top_k", 0) or 0))
         stop_strings = tuple(str(item) for item in (stop or ()) if str(item))
@@ -209,7 +196,7 @@ class DirectRWKVBackend:
                 logits = self._model.forward_batch([[token]], state)[0]
 
         return BackendResponse(
-            content=self._visible_output(output),
+            content=output,
             usage={"prompt_tokens": len(token_ids), "completion_tokens": len(generated)},
             finish_reason=finish_reason,
         )

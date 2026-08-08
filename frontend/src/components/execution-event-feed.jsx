@@ -327,6 +327,8 @@ function EventDetail({ event }) {
           <Field label="Chunk 数" value={pageData?.chunk_count} mono />
           <Field label="Chunk 窗口" value={pageData?.chunk_window_tokens ? `${pageData.chunk_window_tokens} tokens` : undefined} mono />
           <Field label="聚合候选数" value={pageData?.candidate_count} mono />
+          <Field label="原文定位通过" value={pageData?.grounded_candidate_count} mono />
+          <Field label="未定位而拒绝" value={pageData?.rejected_ungrounded_count} mono />
           <Field label="并发 Worker" value={parallel.worker_count} mono />
           <Field label="调用次数" value={parallel.attempted_calls} mono />
           <Field label="重试次数" value={parallel.retry_calls} mono />
@@ -338,6 +340,7 @@ function EventDetail({ event }) {
         </div>
         {jsonBlock("并行候选元数据", parallel)}
         {jsonBlock("聚合后的候选 JSON", event.candidates)}
+        {jsonBlock("原文门禁后的全部 Chunk 候选", event.chunk_candidates)}
       </div>
     );
   }
@@ -575,7 +578,7 @@ export default function ExecutionEventFeed({ events = [], finalAnswer = "", show
     .reverse()
     .find((event) => ["final", "synthesis"].includes(event.type) && String(event.content || "").trim())
     ?.content || "";
-  const visibleFinalAnswer = String(finalAnswer || eventAnswer || "").trim();
+  const visibleFinalAnswer = String(finalAnswer || eventAnswer || "");
 
   function toggle(seq) {
     setExpanded((current) => {

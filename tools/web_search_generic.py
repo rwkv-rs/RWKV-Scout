@@ -13,21 +13,66 @@ import concurrent.futures
 import hashlib
 import json
 import re
+import threading
+import time
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
-from agent.page_evidence import extract_single_page_evidence
+from agent.page_evidence import build_page_chunks, extract_single_page_evidence, select_grounded_source_chunks
 from clients.llm_client import LLMClient
 from config import DATA_PIPELINE, get_llm_context_length
 from tools.registry import ToolRegistry
 from tools.web_search_keyless import _is_search_result_url, search_web_keyless
+from tools.official_site_discovery import discover_official_urls
 from tools.web_search_tavily import search_web_tavily
 from utils.task_events import append_task_event
-from utils.evidence_quality import MIN_PAGE_BODY_CHARS, has_substantive_evidence
+from utils.evidence_quality import (
+    MAX_SHORT_BODY_FALLBACK_CHARS,
+    body_query_signal,
+    clean_page_body,
+    has_substantive_evidence,
+)
 from utils.concurrency import shutdown_pool, submit_with_context, task_wait_timeout
-from utils.source_authority import annotate_source, resolve_source_policy
+from utils.source_authority import (
+    annotate_source,
+    infer_candidate_authority_domains,
+    required_domains_for_task_point,
+    resolve_source_policy,
+)
 from utils.web_retrieval import candidate_score, normalize_url
 from utils.freshness import annotate_freshness, build_freshness_policy
+from utils.query_constraints import candidate_relevance, meaningful_query_terms
+
+
+_HOST_FETCH_GATE_LOCK = threading.Lock()
+_HOST_FETCH_GATES: dict[tuple[str, int], threading.BoundedSemaphore] = {}
+
+
+def _host_fetch_gate(url: Any) -> threading.BoundedSemaphore:
+    """Limit same-origin pressure without reducing cross-origin concurrency."""
+
+    host = _host(str(url or "")) or "unknown"
+    per_host = _pipeline_concurrency("web_page_fetch_per_host_concurrency", 2, maximum=8)
+    key = (host, per_host)
+    with _HOST_FETCH_GATE_LOCK:
+        gate = _HOST_FETCH_GATES.get(key)
+        if gate is None:
+            gate = threading.BoundedSemaphore(per_host)
+            _HOST_FETCH_GATES[key] = gate
+        return gate
+
+
+def _transient_fetch_error(result: dict[str, Any]) -> bool:
+    if str(result.get("status") or "").casefold() != "error":
+        return False
+    message = str(result.get("message") or " ".join(result.get("provider_errors") or [])).casefold()
+    return bool(
+        re.search(
+            r"ssl|eof|timed?\s*out|timeout|connection|temporar|reset|remote end|"
+            r"too many requests|\b429\b|\b502\b|\b503\b|\b504\b",
+            message,
+        )
+    )
 
 
 def _parse_result(value: Any) -> dict[str, Any]:
@@ -52,13 +97,27 @@ def _pipeline_concurrency(name: str, default: int, *, maximum: int = 64) -> int:
 def _shared_source_urls(agent_state: Any) -> set[str]:
     retrieval = getattr(agent_state, "retrieval", None)
     sources = getattr(retrieval, "sources", {}) if retrieval is not None else {}
-    if not isinstance(sources, dict):
-        return set()
-    return {
+    attempted = getattr(retrieval, "attempted_urls", set()) if retrieval is not None else set()
+    attempt_counts = getattr(retrieval, "url_attempt_counts", {}) if retrieval is not None else {}
+    accepted = {
         normalize_url(str(item.get("url") or ""))
-        for item in sources.values()
+        for item in (sources.values() if isinstance(sources, dict) else [])
         if isinstance(item, dict) and str(item.get("url") or "").strip()
     }
+    try:
+        failed_retry_limit = max(
+            1,
+            min(int(DATA_PIPELINE.get("web_failed_url_retry_limit", 2) or 2), 3),
+        )
+    except (TypeError, ValueError):
+        failed_retry_limit = 2
+    frozen_failures = {
+        normalize_url(str(url or ""))
+        for url in (attempted if isinstance(attempted, (set, list, tuple)) else [])
+        if str(url or "").strip()
+        and int((attempt_counts or {}).get(url, 0) or 0) >= failed_retry_limit
+    }
+    return accepted | frozen_failures
 
 
 def _host(url: str) -> str:
@@ -134,12 +193,96 @@ def _direct_candidate(url: str) -> dict[str, Any]:
     }
 
 
+def _dated_url_rank(value: Any) -> tuple[int, int, int]:
+    """Extract a publication date encoded in a conventional URL path."""
+
+    path = urlparse(str(value or "")).path
+    match = re.search(r"/(20\d{2})/(\d{1,2})/(\d{1,2})(?:/|$)", path)
+    if not match:
+        return (0, 0, 0)
+    year, month, day = (int(part) for part in match.groups())
+    try:
+        datetime(year, month, day)
+    except ValueError:
+        return (0, 0, 0)
+    return (year, month, day)
+
+
+def _is_community_detail_url(value: Any) -> bool:
+    parsed = urlparse(str(value or ""))
+    host = (parsed.hostname or "").casefold().removeprefix("www.")
+    path = parsed.path.casefold()
+    if host == "v2ex.com" or host.endswith(".v2ex.com"):
+        return bool(re.fullmatch(r"/t/\d+/?", path))
+    if host == "reddit.com" or host.endswith(".reddit.com"):
+        return "/comments/" in path
+    if host == "stackoverflow.com" or host.endswith(".stackoverflow.com"):
+        return bool(re.match(r"/questions/\d+", path))
+    return False
+
+
+def _official_cross_script_relevance(
+    row: dict[str, Any],
+    relevance: dict[str, Any],
+    *,
+    query: str,
+    constraint_query: str,
+    source_policy: dict[str, Any],
+) -> dict[str, Any]:
+    """Admit one strong sitemap topic across a script boundary for fetching.
+
+    An English official URL cannot lexically contain the Chinese procedural
+    half of a mixed-language query. A verified sitemap route with one exact
+    Latin topic token is therefore enough to fetch the page, but never enough
+    by itself to support a Claim. The fetched body must still pass RWKV span
+    extraction, source authority, Claim binding, and relation validation.
+    """
+
+    result = dict(relevance or {})
+    if result.get("related") is True or not source_policy.get("required"):
+        return result
+    if str(row.get("source") or "").casefold() != "official sitemap adapter":
+        return result
+    if not bool((row.get("authority") or {}).get("satisfied")):
+        return result
+    hard_query = str(constraint_query or query or "")
+    locator = " ".join(str(row.get(key) or "") for key in ("title", "url"))
+    if not re.search(r"[\u3400-\u9fff]{2,}", hard_query):
+        return result
+    if not re.search(r"[A-Za-z]{3,}", locator):
+        return result
+    strong_hits = [
+        str(value).casefold()
+        for value in result.get("term_hits") or []
+        if re.fullmatch(r"[a-z][a-z0-9+_.-]{2,}", str(value).casefold())
+    ]
+    if not strong_hits:
+        return result
+    if result.get("version_conflict") or result.get("literal_satisfied") is False:
+        return result
+    if result.get("anchors") and result.get("anchor_satisfied") is not True:
+        return result
+    result.update(
+        {
+            "related": True,
+            "raw_threshold_satisfied": True,
+            "original_required_term_hits": result.get("required_term_hits"),
+            "required_term_hits": 1,
+            "effective_required_term_hits": 1,
+            "admission_basis": "official_sitemap_cross_script_topic",
+            "cross_script_topic_hits": strong_hits,
+        }
+    )
+    return result
+
+
 def _merge_candidates(
     query: str,
     provider_results: list[dict[str, Any]],
     limit: int = 8,
     *,
     task_plan: dict[str, Any] | None = None,
+    constraint_query: str = "",
 ) -> list[dict[str, Any]]:
     """Deduplicate and rank candidates without classifying the task domain."""
 
@@ -168,8 +311,39 @@ def _merge_candidates(
                 }
             )
             row = annotate_source(row, query, {"task_plan": task_plan or {}})
+            relevance = candidate_relevance(
+                row,
+                query,
+                domain=str((source_policy.get("required_domains") or [""])[0]),
+                constraint_query=constraint_query or query,
+            )
+            relevance = _official_cross_script_relevance(
+                row,
+                relevance,
+                query=query,
+                constraint_query=constraint_query,
+                source_policy=source_policy,
+            )
+            # Provider ranking is not evidence.  Reject candidates that do not
+            # retain enough of the RWKV-generated query to be plausibly about
+            # the task; the later page extractor remains the semantic judge.
+            if not relevance.get("related"):
+                continue
+            row["query_relevance"] = relevance
             row["candidate_score"] = candidate_score(query, row)
-            row["discovery_providers"] = [row["source"]]
+            row["discovery_score"] = float(item.get("discovery_score") or 0.0)
+            row["discovery_providers"] = list(
+                dict.fromkeys(
+                    [
+                        *[
+                            str(value)
+                            for value in item.get("discovery_providers") or []
+                            if str(value).strip()
+                        ],
+                        row["source"],
+                    ]
+                )
+            )
             existing = merged.get(url)
             if existing is None:
                 merged[url] = row
@@ -177,6 +351,10 @@ def _merge_candidates(
             existing["candidate_score"] = max(
                 float(existing.get("candidate_score") or 0),
                 float(row.get("candidate_score") or 0),
+            )
+            existing["discovery_score"] = max(
+                float(existing.get("discovery_score") or 0),
+                float(row.get("discovery_score") or 0),
             )
             sources = list(existing.get("discovery_providers") or [])
             source = str(row.get("source") or "")
@@ -186,13 +364,165 @@ def _merge_candidates(
             if len(row.get("snippet") or "") > len(existing.get("snippet") or ""):
                 existing["snippet"] = row["snippet"]
 
+    # A URL can be discovered first through a sparse official sitemap row and
+    # later through a search provider with a much richer snippet.  Relevance
+    # belongs to the final merged candidate, not whichever provider happened
+    # to arrive first.  Recompute it after deduplication so provider order
+    # cannot leave a canonical page carrying stale term hits.
+    required_domain = str((source_policy.get("required_domains") or [""])[0])
+    for item in merged.values():
+        relevance = candidate_relevance(
+            item,
+            query,
+            domain=required_domain,
+            constraint_query=constraint_query or query,
+        )
+        item["query_relevance"] = _official_cross_script_relevance(
+            item,
+            relevance,
+            query=query,
+            constraint_query=constraint_query,
+            source_policy=source_policy,
+        )
+        item["candidate_score"] = candidate_score(query, item)
+
+    generic_ranking_terms = {
+        "document", "documentation", "docs", "example", "examples", "guide",
+        "information", "official", "page", "reference", "result", "source",
+    }
+    constraint_topic_terms = {
+        term
+        for term in meaningful_query_terms(
+            constraint_query or query,
+            domain=required_domain,
+        )
+        if re.fullmatch(r"[a-z][a-z0-9+_.-]*", term)
+        and term not in generic_ranking_terms
+    }
+    topic_document_frequency: dict[str, int] = {
+        term: sum(
+            term
+            in " ".join(
+                str(item.get(key) or "")
+                for key in ("title", "snippet", "url")
+            ).casefold()
+            for item in merged.values()
+        )
+        for term in constraint_topic_terms
+    }
+
+    route_query = str(constraint_query or query or "").casefold()
+    documentation_requested = bool(
+        re.search(
+            r"\b(?:api\s+)?(?:docs?|documentation|reference)\b|"
+            r"(?:api|接口)\s*文档|官方文档|文档",
+            route_query,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    def canonical_path_rank(value: Any) -> int:
+        parsed = urlparse(str(value or ""))
+        host = parsed.netloc.casefold().removeprefix("www.")
+        path = parsed.path.casefold()
+        if documentation_requested:
+            if (
+                host.startswith(("docs.", "documentation.", "developer."))
+                or re.search(r"/(?:api|docs?|documentation|reference)(?:/|$)", path)
+            ):
+                return 3
+            if re.search(
+                r"/(?:blog|news|announcements?|migrations?|releases?)(?:/|$)",
+                path,
+            ):
+                return 0
+        if re.search(r"/(?:current|latest|stable)(?:/|$)", path):
+            return 2
+        if re.search(r"/(?:docs?|documentation)/v?\d+(?:\.\d+){0,2}(?:/|$)", path):
+            return 0
+        return 1
+
+    for item in merged.values():
+        locator = " ".join(
+            str(item.get(key) or "")
+            for key in ("title", "snippet", "url")
+        ).casefold()
+        topic_hits = sorted(term for term in constraint_topic_terms if term in locator)
+        topic_score = sum(
+            1.0 / max(1, topic_document_frequency.get(term, 1))
+            for term in topic_hits
+        )
+        relevance = dict(item.get("query_relevance") or {})
+        relevance.update(
+            {
+                "constraint_topic_terms": sorted(constraint_topic_terms),
+                "constraint_topic_hits": topic_hits,
+                "constraint_topic_score": round(topic_score, 6),
+                "canonical_path_rank": canonical_path_rank(item.get("url")),
+            }
+        )
+        item["query_relevance"] = relevance
+
+    latest_list = str((task_plan or {}).get("task_mode") or "").casefold() == "latest_list"
+    community_required = str(source_policy.get("mode") or "").casefold() == "community_required"
+    def common_relevance_rank(item: dict[str, Any]) -> tuple[int, int, float]:
+        """Compare providers on one query-derived scale.
+
+        Provider-private scores are not calibrated against each other.  The
+        official sitemap adapter's discovery score, for example, must not beat
+        a search result that actually contains the requested subtopic.  Keep
+        discovery permissive, but rank first by the raw topic threshold that
+        every provider candidate receives from ``candidate_relevance``.
+        """
+
+        relevance = item.get("query_relevance") or {}
+        hits = {
+            str(value or "").casefold().strip()
+            for value in relevance.get("term_hits") or []
+            if str(value or "").strip()
+        }
+        try:
+            required = max(0, int(relevance.get("required_term_hits") or 0))
+        except (TypeError, ValueError):
+            required = 0
+        raw_satisfied = bool(
+            relevance.get("raw_threshold_satisfied")
+            if "raw_threshold_satisfied" in relevance
+            else len(hits) >= required
+        )
+        try:
+            relevance_score = float(relevance.get("score") or 0.0)
+        except (TypeError, ValueError):
+            relevance_score = 0.0
+        return int(raw_satisfied), len(hits), relevance_score
+
     ranked = sorted(
         merged.values(),
         key=lambda item: (
             int(bool((item.get("authority") or {}).get("satisfied"))),
             int((item.get("authority") or {}).get("rank") or 0),
+            int(_is_community_detail_url(item.get("url"))) if community_required else 0,
+            common_relevance_rank(item)[0],
+            int(bool((item.get("query_relevance") or {}).get("anchor_satisfied"))),
+            int(bool((item.get("query_relevance") or {}).get("constraint_topic_hits"))),
+            int(bool(_dated_url_rank(item.get("url")))) if latest_list else 0,
+            _dated_url_rank(item.get("url")) if latest_list else (0, 0, 0),
+            int((item.get("query_relevance") or {}).get("canonical_path_rank") or 0),
+            float((item.get("query_relevance") or {}).get("constraint_topic_score") or 0.0),
+            len((item.get("query_relevance") or {}).get("constraint_topic_hits") or []),
+            common_relevance_rank(item)[1],
+            common_relevance_rank(item)[2],
+            # If no common topical threshold was met, retain the adapter's
+            # own ordering as a bounded fallback (for example release notes
+            # ahead of a generic guide in the same official sitemap).
+            float(item.get("discovery_score") or 0)
+            if source_policy.get("required") and not common_relevance_rank(item)[0]
+            else 0.0,
             float(item.get("candidate_score") or 0),
             len(item.get("discovery_providers") or []),
+            # Provider-specific scores have no common calibration and are
+            # therefore only a final tie-break within otherwise equal rows.
+            float(item.get("discovery_score") or 0) if source_policy.get("required") else 0.0,
         ),
         reverse=True,
     )
@@ -206,14 +536,19 @@ def _merge_candidates(
         ranked = required_candidates + [
             item for item in ranked if item not in required_candidates
         ]
+    if community_required:
+        detail_candidates = [item for item in ranked if _is_community_detail_url(item.get("url"))]
+        if detail_candidates:
+            ranked = detail_candidates
 
     # Keep a bounded amount of domain diversity.  This is a fetch-budget
     # boundary, not a source/domain policy for the user's question.
     selected: list[dict[str, Any]] = []
     domain_counts: dict[str, int] = {}
+    per_domain_cap = max(1, int(limit)) if source_policy.get("required") else 3
     for item in ranked:
         domain = _host(item.get("url", ""))
-        if domain_counts.get(domain, 0) >= 3:
+        if domain_counts.get(domain, 0) >= per_domain_cap:
             continue
         item["candidate_rank"] = len(selected) + 1
         selected.append(item)
@@ -226,13 +561,150 @@ def _merge_candidates(
 def _fetch_candidate(candidate: dict[str, Any], task_id: str) -> dict[str, Any]:
     from tools.web_search_keyless import fetch_web_url
 
-    raw = fetch_web_url(
-        candidate["url"],
-        max_chars=20000,
-        task_id=task_id,
-        agentic_tool_loop=True,
+    try:
+        page_max_chars = max(
+            20_000,
+            min(int(DATA_PIPELINE.get("web_page_max_chars", 120_000) or 120_000), 500_000),
+        )
+    except (TypeError, ValueError):
+        page_max_chars = 120_000
+    try:
+        attempts = max(
+            1,
+            min(int(DATA_PIPELINE.get("web_page_fetch_attempts", 2) or 2), 3),
+        )
+    except (TypeError, ValueError):
+        attempts = 2
+    retry_errors: list[str] = []
+    result: dict[str, Any] = {"status": "error", "message": "page fetch did not run", "results": []}
+    with _host_fetch_gate(candidate["url"]):
+        for attempt in range(1, attempts + 1):
+            raw = fetch_web_url(
+                candidate["url"],
+                max_chars=page_max_chars,
+                task_id=task_id,
+                agentic_tool_loop=True,
+            )
+            result = _parse_result(raw)
+            result["fetch_attempt_count"] = attempt
+            if not _transient_fetch_error(result) or attempt >= attempts:
+                break
+            retry_errors.append(str(result.get("message") or "transient page fetch error")[:500])
+            time.sleep(0.2 * attempt)
+    if retry_errors:
+        result["fetch_retry_errors"] = retry_errors
+    return result
+
+
+def _claim_evidence_focus(
+    query: str,
+    task_plan: dict[str, Any] | None,
+    task_point_id: str,
+) -> str:
+    """Bind the unchanged extractor prompt to the active atomic claim."""
+
+    point_id = str(task_point_id or "").strip()
+    if not point_id:
+        return str(query or "").strip()
+    plan = task_plan if isinstance(task_plan, dict) else {}
+    point = next(
+        (
+            item
+            for item in plan.get("atomic_points") or []
+            if isinstance(item, dict) and str(item.get("id") or "").strip() == point_id
+        ),
+        None,
     )
-    return _parse_result(raw)
+    if not isinstance(point, dict):
+        return str(query or "").strip()
+    # Search queries, objectives and evidence hints may contain hypotheses
+    # proposed by RWKV. They help discovery but must not be repeated to the
+    # extractor as if they were requested facts. Bind extraction to the
+    # normalized atomic task only; fall back to the search query when no task
+    # point exists (legacy/single-page callers).
+    task = str(point.get("task") or point.get("question") or "").strip()
+    return (task or str(query or "").strip())[:1600]
+
+
+def _claim_answer_requirements(
+    task_plan: dict[str, Any] | None,
+    task_point_id: str,
+) -> list[dict[str, Any]]:
+    """Return answer-shape requirements for only the active atomic point."""
+
+    plan = task_plan if isinstance(task_plan, dict) else {}
+    point_id = str(task_point_id or "").strip()
+    if point_id:
+        point = next(
+            (
+                item
+                for item in plan.get("atomic_points") or []
+                if isinstance(item, dict) and str(item.get("id") or "").strip() == point_id
+            ),
+            None,
+        )
+        if isinstance(point, dict):
+            return [
+                dict(value)
+                for value in point.get("answer_requirements") or []
+                if isinstance(value, dict)
+            ]
+    return [
+        dict(value)
+        for value in plan.get("answer_requirements") or []
+        if isinstance(value, dict)
+    ]
+
+
+def _cached_page_result(record: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct one cleaned page from the task-scoped chunk cache."""
+
+    chunks = [
+        item
+        for item in record.get("source_chunks") or []
+        if isinstance(item, dict) and str(item.get("text") or "").strip()
+    ]
+    chunks.sort(key=lambda item: int(item.get("index") or 0))
+    seen_chunk_ids: set[str] = set()
+    text_parts: list[str] = []
+    for index, chunk in enumerate(chunks):
+        chunk_id = str(chunk.get("chunk_id") or f"chunk-{index + 1}")
+        if chunk_id in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(chunk_id)
+        text_parts.append(str(chunk.get("text") or "").strip())
+    page_text = "\n\n".join(text_parts).strip()
+    if not page_text:
+        page_text = str(
+            record.get("page_excerpt")
+            or record.get("source_excerpt")
+            or record.get("content")
+            or ""
+        ).strip()
+    quality = dict(record.get("body_quality") or {})
+    quality.update(
+        {
+            "text": page_text,
+            "clean_chars": len(page_text),
+            "raw_chars": max(len(page_text), int(quality.get("raw_chars") or 0)),
+            "body_eligible": bool(page_text),
+        }
+    )
+    return {
+        "status": "ok" if page_text else "no_evidence",
+        "results": [
+            {
+                "url": str(record.get("url") or ""),
+                "title": str(record.get("title") or record.get("url") or ""),
+                "content": page_text,
+                "page_excerpt": page_text,
+                "body_cleaned": True,
+                "body_verified": bool(page_text),
+                "body_quality": quality,
+                "raw_page_chars": int(quality.get("raw_chars") or len(page_text)),
+            }
+        ] if page_text else [],
+    }
 
 
 def _compact_page(
@@ -242,6 +714,7 @@ def _compact_page(
     llm: LLMClient,
     task_id: str,
     task_plan: dict[str, Any] | None = None,
+    task_point_id: str = "",
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     pages = [item for item in fetched.get("results") or [] if isinstance(item, dict)]
     if len(pages) != 1:
@@ -254,13 +727,27 @@ def _compact_page(
 
     page = pages[0]
     url = str(page.get("url") or candidate["url"])
-    page_text = str(page.get("page_excerpt") or page.get("content") or "").strip()
-    if len(page_text) < MIN_PAGE_BODY_CHARS:
+    evidence_focus = _claim_evidence_focus(query, task_plan, task_point_id)
+    raw_page_text = str(page.get("page_excerpt") or page.get("content") or "").strip()
+    if page.get("body_cleaned") is True:
+        page_text = raw_page_text
+        page_quality = dict(page.get("body_quality") or {})
+        page_quality.setdefault("text", page_text)
+        page_quality.setdefault("clean_chars", len(page_text))
+        page_quality.setdefault("raw_chars", int(page.get("raw_page_chars") or len(page_text)))
+        page_quality.setdefault("body_eligible", bool(page.get("body_verified")))
+    else:
+        page_quality = clean_page_body(raw_page_text)
+        page_text = str(page_quality.get("text") or "").strip()
+    query_signal = body_query_signal(page_text, evidence_focus)
+    if not page_quality.get("body_eligible"):
         return None, {
             "url": url,
             "title": str(page.get("title") or candidate.get("title") or url),
             "status": "no_evidence",
             "page_chars": len(page_text),
+            "raw_page_chars": len(raw_page_text),
+            "body_quality": {**page_quality, **query_signal},
             "chunk_count": 0,
             "candidate_count": 0,
             "errors": ["cleaned page body is below the substantive evidence threshold"],
@@ -280,7 +767,7 @@ def _compact_page(
 
     try:
         evidence = extract_single_page_evidence(
-            query=query,
+            query=evidence_focus,
             page=page,
             llm=llm,
             task_id=task_id,
@@ -294,14 +781,102 @@ def _compact_page(
             "url": url,
             "title": page.get("title") or url,
             "page_chars": len(page_text),
+            "raw_page_chars": len(raw_page_text),
+            "body_quality": {**page_quality, **query_signal},
             "chunk_count": 0,
             "candidates": [],
             "compact_facts": "",
+            "extraction_degraded": True,
+            "invalid_response_count": 1,
+            "unresolved_chunk_indexes": [0],
+            "transport_error_count": 1,
             "errors": [f"{type(exc).__name__}: {exc}"],
         }
 
+    post_gate_candidates = [
+        dict(item)
+        for item in evidence.get("chunk_candidates") or []
+        if isinstance(item, dict)
+    ]
+    merged_candidates = [
+        dict(item)
+        for item in evidence.get("candidates") or []
+        if isinstance(item, dict)
+    ]
+    append_task_event(
+        task_id,
+        "page_candidate_merge",
+        phase="EXTRACTION",
+        action="web_search",
+        url=url,
+        data={
+            "url": url,
+            "page_chars": int(evidence.get("page_chars") or len(page_text)),
+            "chunk_count": int(evidence.get("chunk_count") or 0),
+            "inspected_chunk_count": int(evidence.get("inspected_chunk_count") or 0),
+            "chunk_window_tokens": int(evidence.get("chunk_window_tokens") or 0),
+            "chunk_candidate_count": len(post_gate_candidates),
+            "candidate_count": len(merged_candidates),
+            "grounded_candidate_count": sum(
+                item.get("supported") is True and item.get("source_grounded") is True
+                for item in post_gate_candidates
+            ),
+            "rejected_ungrounded_count": sum(
+                str(item.get("rejection_reason") or "")
+                in {"model_quote_not_grounded", "deterministic_quote_not_grounded"}
+                for item in post_gate_candidates
+            ),
+            "parallel_candidate": evidence.get("parallel_candidate") or {},
+        },
+        compact_facts=str(evidence.get("compact_facts") or ""),
+        candidates=merged_candidates,
+        chunk_candidates=post_gate_candidates,
+    )
+
     compact_facts = str(evidence.get("compact_facts") or "").strip()
-    source_excerpt = str(evidence.get("source_excerpt") or page_text[:14000]).strip()
+    selected_source_chunks = [
+        item for item in evidence.get("selected_source_chunks") or []
+        if isinstance(item, dict) and str(item.get("text") or "").strip()
+    ]
+    source_chunks = [
+        item for item in evidence.get("source_chunks") or []
+        if isinstance(item, dict) and str(item.get("text") or "").strip()
+    ]
+    if not source_chunks:
+        # The model call itself may have raised before returning its chunk
+        # metadata.  Recreate the same deterministic source chunks locally so
+        # a model outage cannot erase an already fetched body.
+        source_chunks = build_page_chunks(page_text)
+    if not selected_source_chunks:
+        selected_source_chunks = select_grounded_source_chunks(
+            evidence_focus,
+            source_chunks,
+            [
+                item
+                for item in (evidence.get("chunk_candidates") or evidence.get("candidates") or [])
+                if isinstance(item, dict)
+            ],
+            max_chunks=int(DATA_PIPELINE.get("web_fallback_chunks_per_source", 3) or 3),
+        )
+    source_excerpt = "\n\n".join(
+        str(item.get("text") or "").strip()
+        for item in selected_source_chunks
+        if str(item.get("text") or "").strip()
+    ).strip()
+    if not source_excerpt:
+        source_excerpt = str(evidence.get("source_excerpt") or "").strip()
+    if not source_excerpt:
+        source_excerpt = str(evidence.get("first_chunk_text") or "").strip()
+    if not source_excerpt:
+        source_excerpt = "\n".join(
+            str(item.get("text") or "").strip()
+            for item in evidence.get("source_chunks") or []
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ).strip()
+    if not source_excerpt and len(page_text) <= MAX_SHORT_BODY_FALLBACK_CHARS:
+        # This is the only permitted direct page-body fallback: a compact,
+        # already-cleaned entry whose locator produced no usable output.
+        source_excerpt = page_text
     page_evidence = {
         "url": url,
         "title": str(page.get("title") or candidate.get("title") or url),
@@ -309,25 +884,57 @@ def _compact_page(
         "error_class": str(evidence.get("error_class") or ""),
         "source_body_available": bool(source_excerpt),
         "page_chars": int(evidence.get("page_chars") or 0),
+        "raw_page_chars": int(evidence.get("raw_page_chars") or len(raw_page_text)),
+        "body_quality": {**page_quality, **query_signal, **(evidence.get("body_quality") or {})},
         "chunk_count": int(evidence.get("chunk_count") or 0),
+        "inspected_chunk_count": int(evidence.get("inspected_chunk_count") or 0),
         "chunk_window_tokens": int(evidence.get("chunk_window_tokens") or 0),
         "candidate_count": len(evidence.get("candidates") or []),
+        "valid_json_count": int(evidence.get("valid_json_count") or 0),
+        "valid_contract_count": int(evidence.get("valid_contract_count") or 0),
+        "invalid_response_count": int(evidence.get("invalid_response_count") or 0),
+        "negative_response_count": int(evidence.get("negative_response_count") or 0),
+        "all_chunks_valid_negative": bool(evidence.get("all_chunks_valid_negative")),
+        "all_selected_chunks_valid_negative": bool(evidence.get("all_selected_chunks_valid_negative")),
+        "extraction_degraded": bool(evidence.get("extraction_degraded")),
+        "unresolved_chunk_indexes": [
+            int(value)
+            for value in evidence.get("unresolved_chunk_indexes") or []
+            if isinstance(value, int)
+        ],
+        "recovered_chunk_indexes": [
+            int(value)
+            for value in evidence.get("recovered_chunk_indexes") or []
+            if isinstance(value, int)
+        ],
+        "transport_error_count": int(evidence.get("transport_error_count") or 0),
         "parallel_candidate": evidence.get("parallel_candidate") or {},
+        "model_chunks": evidence.get("model_chunks") or [],
         "errors": evidence.get("errors") or [],
     }
+    if page_evidence["all_chunks_valid_negative"]:
+        # The locator has made a valid semantic decision that every inspected
+        # chunk lacks the requested fact.  Retaining a lexical fallback here
+        # lets the final writer infer an answer from adjacent notices, which is
+        # exactly how unrelated CISA entries were previously conflated.
+        page_evidence["source_body_available"] = bool(source_excerpt)
+        page_evidence["model_extraction_status"] = "negative"
+        page_evidence["deterministic_chunk_fallback"] = False
+        page_evidence["evidence_origin"] = "rejected_fetched_page_body"
+        return None, page_evidence
     if not source_excerpt:
         return None, page_evidence
 
     extraction_status = str(page_evidence.get("status") or "no_evidence").casefold()
-    # A fetched and cleaned source is canonical evidence even when the
-    # optional RWKV locator is empty, malformed or timed out.  The locator is
-    # metadata used to improve ranking; it is not an evidence admission gate.
-    # This is essential for high-concurrency RWKV runs: one slow chunk must
-    # not discard an otherwise valid page.
+    # The locator improves chunk selection; it is never the admission gate for
+    # a successfully fetched source.  When it fails, keep only the bounded
+    # deterministic original spans selected above, never the complete page.
+    deterministic_fallback = extraction_status in {"error", "no_evidence"} and not compact_facts
     page_evidence["evidence_origin"] = "fetched_page_body"
     page_evidence["model_extraction_status"] = (
         "ok" if compact_facts else ("empty" if extraction_status == "no_evidence" else "error")
     )
+    page_evidence["deterministic_chunk_fallback"] = deterministic_fallback
 
     record = {
         "title": page_evidence["title"],
@@ -335,6 +942,8 @@ def _compact_page(
         "snippet": str(candidate.get("snippet") or "")[:800],
         "source": str(candidate.get("source") or "web"),
         "candidate_score": candidate.get("candidate_score", 0.0),
+        "discovery_score": candidate.get("discovery_score", 0.0),
+        "query_relevance": candidate.get("query_relevance") or {},
         "content": source_excerpt[:14000],
         "page_excerpt": source_excerpt[:14000],
         "source_excerpt": source_excerpt[:14000],
@@ -344,6 +953,7 @@ def _compact_page(
         "evidence_kind": "page_body",
         "evidence_boundary": "page_body_only",
         "body_verified": True,
+        "body_quality": page_evidence["body_quality"],
         "content_sha256": hashlib.sha256(source_excerpt[:14000].encode("utf-8")).hexdigest(),
         "source_locator": {
             "type": "page_excerpt",
@@ -352,11 +962,21 @@ def _compact_page(
         },
         "evidence_status": page_evidence["status"],
         "chunk_count": page_evidence["chunk_count"],
-        "chunk_candidates": evidence.get("candidates") or [],
-        "source_chunks": evidence.get("source_chunks") or [],
+        "inspected_chunk_count": page_evidence["inspected_chunk_count"],
+        "model_chunks": page_evidence["model_chunks"],
+        "chunk_candidates": evidence.get("chunk_candidates") or evidence.get("candidates") or [],
+        "source_chunks": source_chunks,
+        "selected_source_chunks": selected_source_chunks,
+        "claim_ids": [task_point_id] if task_point_id else [],
+        "locator_claim_id": task_point_id,
+        "locator_query": evidence_focus,
         "candidate_rank": candidate.get("candidate_rank"),
         "discovery_providers": candidate.get("discovery_providers") or [],
         "authority": candidate.get("authority") or {},
+        "model_extraction_status": page_evidence["model_extraction_status"],
+        "model_extraction_degraded": page_evidence["extraction_degraded"],
+        "model_extraction_unresolved_chunks": page_evidence["invalid_response_count"],
+        "model_extraction_transport_errors": page_evidence["transport_error_count"],
     }
     if compact_facts:
         record["model_locator_facts"] = compact_facts[:14000]
@@ -364,8 +984,76 @@ def _compact_page(
         page_evidence["status"] = "no_evidence"
         page_evidence.setdefault("errors", []).append("extracted body did not meet the substantive evidence threshold")
         return None, page_evidence
-    page_evidence["status"] = "ok"
+    # A fetched body may still be retained for deterministic routing after
+    # some chunk calls failed.  Keep that source available, but do not rewrite
+    # the extraction outcome to ``ok``: callers need to know that part of the
+    # page was never inspected by RWKV.
+    page_evidence["status"] = (
+        "partial" if page_evidence["extraction_degraded"] else "ok"
+    )
+    record["evidence_status"] = (
+        "body_fallback"
+        if deterministic_fallback
+        else "partial_extraction"
+        if page_evidence["extraction_degraded"]
+        else "ok"
+    )
     return record, page_evidence
+
+
+def _model_extraction_diagnostics(pages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize unresolved RWKV chunk work without hiding usable sources."""
+
+    rows: list[dict[str, Any]] = []
+    recovered_chunks = 0
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        parallel = page.get("parallel_candidate") or {}
+        error_class = str(page.get("error_class") or "")
+        is_extraction_page = bool(
+            parallel
+            or "valid_json_count" in page
+            or "invalid_response_count" in page
+            or error_class in {"chunk_extraction_failed", "page_evidence_failed", "cached_page_evidence_failed"}
+        )
+        if not is_extraction_page:
+            continue
+        unresolved = int(
+            page.get("invalid_response_count")
+            or parallel.get("unresolved_calls")
+            or 0
+        )
+        recovered = len(page.get("recovered_chunk_indexes") or []) or int(
+            parallel.get("recovered_calls") or 0
+        )
+        transport_errors = int(
+            page.get("transport_error_count")
+            or parallel.get("transport_error_count")
+            or 0
+        )
+        recovered_chunks += recovered
+        if not (page.get("extraction_degraded") or unresolved):
+            continue
+        rows.append(
+            {
+                "url": str(page.get("url") or ""),
+                "status": str(page.get("status") or ""),
+                "error_class": error_class or "chunk_extraction_incomplete",
+                "unresolved_chunk_count": unresolved,
+                "transport_error_count": transport_errors,
+                "errors": [str(value)[:500] for value in (page.get("errors") or [])[:4]],
+            }
+        )
+    return {
+        "schema_version": "model-extraction-diagnostics.v1",
+        "complete": not rows,
+        "degraded_page_count": len(rows),
+        "unresolved_chunk_count": sum(int(row["unresolved_chunk_count"]) for row in rows),
+        "transport_error_count": sum(int(row["transport_error_count"]) for row in rows),
+        "recovered_chunk_count": recovered_chunks,
+        "pages": rows[:16],
+    }
 
 
 @ToolRegistry.register(
@@ -389,10 +1077,40 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     task_id = str(kwargs.get("task_id") or "")
     agent_state = kwargs.get("agent_state")
     task_plan = kwargs.get("task_plan") if isinstance(kwargs.get("task_plan"), dict) else {}
+    effective_task_plan = dict(task_plan)
+    task_point_id = str(kwargs.get("task_point_id") or "").strip()
+    original_goal = str(kwargs.get("original_goal") or query).strip()
+    point_count = len(
+        [value for value in task_plan.get("atomic_points") or [] if isinstance(value, dict)]
+    )
+    constraint_query = (
+        _claim_evidence_focus(query, task_plan, task_point_id)
+        if task_point_id and point_count > 1
+        else original_goal
+    )
+    scoped_domains = required_domains_for_task_point(
+        effective_task_plan,
+        task_point_id,
+        fallback_query=query,
+    )
+    if scoped_domains:
+        effective_task_plan["required_domains"] = scoped_domains
+    active_answer_requirements = _claim_answer_requirements(task_plan, task_point_id)
+    if task_point_id:
+        effective_task_plan["answer_requirements"] = active_answer_requirements
     freshness_policy = build_freshness_policy(kwargs.get("original_goal") or query, task_plan)
-    source_policy = resolve_source_policy(query, {"task_plan": task_plan})
+    source_policy = resolve_source_policy(query, {"task_plan": effective_task_plan})
     if not query:
         return json.dumps({"status": "error", "message": "query is empty", "results": []}, ensure_ascii=False)
+
+    def source_resolution_payload() -> dict[str, Any]:
+        value = effective_task_plan.get("source_resolution") or {}
+        if isinstance(value, dict) and value:
+            return dict(value)
+        return {
+            "domain_source": source_policy.get("domain_source") or "unresolved",
+            "required_domains": list(source_policy.get("required_domains") or []),
+        }
 
     try:
         max_candidates = max(1, min(int(max_results or 8), 8))
@@ -426,6 +1144,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                 fetch_pages=0,
                 task_id=task_id,
                 agentic_tool_loop=True,
+                constraint_query=constraint_query,
             )
         )
 
@@ -440,6 +1159,16 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             )
         )
 
+    def run_official_site() -> dict[str, Any]:
+        return discover_official_urls(
+            query,
+            source_policy.get("required_domains") or [],
+            answer_requirements=active_answer_requirements,
+            max_results=max_candidates,
+            prefer_recent=str(effective_task_plan.get("task_mode") or "").casefold() == "latest_list",
+            constraint_query=constraint_query,
+        )
+
     direct_url = _extract_direct_url(query) or _extract_single_goal_url(kwargs.get("original_goal"))
     if direct_url:
         provider_results: list[dict[str, Any]] = []
@@ -452,13 +1181,23 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             else [annotate_source(_direct_candidate(direct_url), query, {"task_plan": task_plan})]
         )
     else:
-        provider_jobs = [run_keyless, run_tavily]
+        provider_jobs = (
+            [run_official_site, run_keyless, run_tavily]
+            if source_policy.get("required") and source_policy.get("required_domains")
+            else [run_keyless, run_tavily]
+        )
         provider_results: list[dict[str, Any]] = [
             {"status": "error", "provider_errors": ["provider did not complete"], "results": []}
             for _ in provider_jobs
         ]
         pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(_pipeline_concurrency("web_provider_concurrency", 2), len(provider_jobs))
+            max_workers=min(
+                max(
+                    _pipeline_concurrency("web_provider_concurrency", 2),
+                    3 if len(provider_jobs) == 3 else 2,
+                ),
+                len(provider_jobs),
+            )
         )
         futures = {
             submit_with_context(pool, job): index
@@ -478,16 +1217,103 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                     }
         except concurrent.futures.TimeoutError:
             cancelled = True
-            for future in futures:
-                if not future.done():
-                    index = futures[future]
-                    provider_results[index] = {
-                        "status": "error",
-                        "provider_errors": ["provider wait exceeded task budget"],
-                        "results": [],
-                    }
+            # This exception can be the acceptance runner's SIGALRM case
+            # boundary as well as an executor deadline.  Do not turn a hard
+            # case timeout into a successful-looking partial search; cancel
+            # pending work in ``finally`` and let the outer runner emit the
+            # answer-shaped timeout result.
+            raise
         finally:
             shutdown_pool(pool, list(futures), cancelled=cancelled)
+
+        # For an unseen project the plan may correctly require an official
+        # source without knowing its hostname.  Bootstrap the hostname from
+        # strong first-party signals in ordinary provider results, publish it
+        # to the request-scoped plan, then run the same generic official-site
+        # adapter.  This occurs after provider discovery; doing it in the
+        # direct-URL branch would always inspect an empty result set.
+        authority_candidates: list[dict[str, Any]] = []
+        if (
+            str(source_policy.get("mode") or "").casefold() == "official_required"
+            and not source_policy.get("required_domains")
+        ):
+            authority_candidates = infer_candidate_authority_domains(
+                constraint_query or query,
+                provider_results,
+            )
+            inferred_domains = [
+                str(item.get("domain") or "")
+                for item in authority_candidates
+                if item.get("domain")
+            ]
+            if inferred_domains:
+                effective_task_plan["required_domains"] = inferred_domains
+                effective_task_plan["source_resolution"] = {
+                    "domain_source": "provider_bootstrap",
+                    "required_domains": inferred_domains,
+                    "candidates": authority_candidates,
+                }
+                source_policy = resolve_source_policy(
+                    constraint_query or query,
+                    {"task_plan": effective_task_plan},
+                )
+                provider_results.insert(0, run_official_site())
+                append_task_event(
+                    task_id,
+                    "web_search_stage",
+                    phase="DISCOVERY",
+                    action="web_search",
+                    stage="authority_resolution",
+                    query=query,
+                    source="provider_bootstrap",
+                    candidates=authority_candidates,
+                    required_domains=inferred_domains,
+                )
+
+        # A first-party sitemap fetched through the planned official domain
+        # may prove that the project has redirected to a canonical hostname.
+        # Publish that alias to every downstream layer before candidate
+        # annotation; otherwise discovery succeeds but the authority gate
+        # rejects the very page that the official host redirected us to.
+        planned_domains = list(source_policy.get("required_domains") or [])
+        resolved_domains = list(planned_domains)
+        verified_aliases: list[dict[str, Any]] = []
+        for provider_result in provider_results:
+            if str(provider_result.get("provider") or "") != "official site adapter":
+                continue
+            aliases = [
+                dict(value)
+                for value in provider_result.get("domain_aliases") or []
+                if isinstance(value, dict)
+                and value.get("verification") == "dominant_https_sitemap_host"
+            ]
+            verified_aliases.extend(aliases)
+            for value in provider_result.get("resolved_domains") or []:
+                domain = str(value or "").casefold().removeprefix("www.").rstrip(".")
+                if domain and domain not in resolved_domains:
+                    resolved_domains.append(domain)
+        if verified_aliases and resolved_domains != planned_domains:
+            effective_task_plan["required_domains"] = resolved_domains
+            effective_task_plan["source_resolution"] = {
+                "domain_source": "official_sitemap_canonicalization",
+                "required_domains": resolved_domains,
+                "aliases": verified_aliases,
+            }
+            source_policy = resolve_source_policy(
+                constraint_query or query,
+                {"task_plan": effective_task_plan},
+            )
+            append_task_event(
+                task_id,
+                "web_search_stage",
+                phase="DISCOVERY",
+                action="web_search",
+                stage="authority_resolution",
+                query=query,
+                source="official_sitemap_canonicalization",
+                aliases=verified_aliases,
+                required_domains=resolved_domains,
+            )
 
         provider_statuses = [
             {
@@ -502,8 +1328,70 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             query,
             provider_results,
             limit=max_candidates,
-            task_plan=task_plan,
+            task_plan=effective_task_plan,
+            constraint_query=constraint_query,
         )
+
+    if not direct_url and source_policy.get("required"):
+        discovered_candidates = list(candidates)
+        candidates = [
+            item for item in candidates
+            if bool((item.get("authority") or {}).get("satisfied"))
+        ]
+        if not candidates:
+            candidate_urls = [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "candidate_rank",
+                        "title",
+                        "url",
+                        "source",
+                        "candidate_score",
+                        "discovery_score",
+                        "query_relevance",
+                        "authority",
+                    )
+                }
+                for item in discovered_candidates
+            ]
+            append_task_event(
+                task_id,
+                "web_search_stage",
+                phase="DISCOVERY",
+                action="web_search",
+                stage="authority_gate",
+                query=query,
+                required_domains=source_policy.get("required_domains") or [],
+                candidate_count=len(discovered_candidates),
+                message="no candidate satisfies the required official-domain policy; page fetch skipped",
+            )
+            return json.dumps(
+                {
+                    "status": "no_evidence",
+                    "real_network": True,
+                    "provider": "web.generic",
+                    "retrieval_role": "discovery",
+                    "query": query,
+                    "count": 0,
+                    "candidate_count": len(discovered_candidates),
+                    "results": [],
+                    "sources": [],
+                    "citation_refs": [],
+                    "provider_statuses": provider_statuses,
+                    "provider_errors": [],
+                    "candidate_urls": candidate_urls,
+                    "page_evidence": [],
+                    "evidence_ready": False,
+                    "authority_missing": True,
+                    "required_domains": source_policy.get("required_domains") or [],
+                    "source_resolution": source_resolution_payload(),
+                    "freshness_policy": freshness_policy,
+                    "evidence_policy": "official-domain gate blocked page fetch; refine the query or use a matching official URL",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
 
     # A follow-up research round must add novelty to the shared evidence
     # store. Reuse is handled from the store; do not refetch the same page as
@@ -516,19 +1404,31 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     reused_records = []
     retrieval = getattr(agent_state, "retrieval", None)
     stored_sources = getattr(retrieval, "sources", {}) if retrieval is not None else {}
+    claim_sources = (
+        getattr(retrieval, "sources_by_claim", {}).get(task_point_id, {})
+        if retrieval is not None and task_point_id
+        else {}
+    )
     if not novel_candidates and stored_sources:
-        query_terms = {term.casefold() for term in re.findall(r"[A-Za-z0-9_\-]{3,}", query)}
-        reused_records = [
-            dict(item)
-            for item in stored_sources.values()
-            if isinstance(item, dict)
-            and (
-                not query_terms
-                or query_terms.intersection(
-                    {term.casefold() for term in re.findall(r"[A-Za-z0-9_\-]{3,}", str(item.get("title") or ""))}
-                )
-            )
-        ][:max_pages]
+        discovered_urls = {
+            normalize_url(str(item.get("url") or ""))
+            for item in candidates
+            if isinstance(item, dict) and str(item.get("url") or "").strip()
+        }
+        claim_by_url = {
+            normalize_url(str(item.get("url") or "")): item
+            for item in claim_sources.values()
+            if isinstance(item, dict) and str(item.get("url") or "").strip()
+        }
+        for item in stored_sources.values():
+            if not isinstance(item, dict):
+                continue
+            normalized = normalize_url(str(item.get("url") or ""))
+            if normalized not in discovered_urls:
+                continue
+            reused_records.append(dict(claim_by_url.get(normalized) or item))
+            if len(reused_records) >= max_pages:
+                break
     if novel_candidates:
         candidates = novel_candidates
     elif not reused_records and seen_urls:
@@ -548,6 +1448,8 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             "evidence_ready": False,
             "reused_sources": False,
             "novel_source_count": 0,
+            "model_extraction": _model_extraction_diagnostics([]),
+            "source_resolution": source_resolution_payload(),
             "evidence_policy": "all discovered URLs are already in the shared evidence store; refine the query",
         }
         return json.dumps(result, ensure_ascii=False, indent=2)
@@ -569,6 +1471,8 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                     "snippet",
                     "source",
                     "candidate_score",
+                    "discovery_score",
+                    "query_relevance",
                     "discovery_providers",
                     "authority",
                 )
@@ -600,6 +1504,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                 "candidate_count": 0,
                 "page_evidence": [],
                 "evidence_ready": False,
+                "source_resolution": source_resolution_payload(),
                 "freshness_policy": freshness_policy,
                 "evidence_policy": "no candidate URL was admitted; the model must decide whether to refine the query",
             },
@@ -607,73 +1512,126 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             indent=2,
         )
 
-    if source_policy.get("required") and not any(
-        bool((item.get("authority") or {}).get("satisfied")) for item in candidates
-    ):
-        candidate_urls = [
-            {
-                key: item.get(key)
-                for key in ("candidate_rank", "title", "url", "source", "candidate_score", "authority")
-            }
-            for item in candidates
-        ]
-        append_task_event(
-            task_id,
-            "web_search_stage",
-            phase="DISCOVERY",
-            action="web_search",
-            stage="authority_gate",
-            query=query,
-            required_domains=source_policy.get("required_domains") or [],
-            candidate_count=len(candidates),
-            message="no candidate satisfies the required official-domain policy; page fetch skipped",
-        )
-        return json.dumps(
-            {
-                "status": "no_evidence",
-                "real_network": True,
-                "provider": "web.generic",
-                "retrieval_role": "discovery",
-                "query": query,
-                "count": 0,
-                "candidate_count": len(candidates),
-                "results": [],
-                "sources": [],
-                "citation_refs": [],
-                "provider_statuses": provider_statuses,
-                "provider_errors": [],
-                "candidate_urls": candidate_urls,
-                "page_evidence": [],
-                "evidence_ready": False,
-                "authority_missing": True,
-                "required_domains": source_policy.get("required_domains") or [],
-                "freshness_policy": freshness_policy,
-                "evidence_policy": "official-domain gate blocked page fetch; refine the query or use a matching official URL",
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-
     if reused_records:
+        bound_records = [
+            dict(item)
+            for item in reused_records
+            if not task_point_id
+            or str(item.get("locator_claim_id") or "").strip() == task_point_id
+        ]
+        foreign_records = [
+            dict(item)
+            for item in reused_records
+            if task_point_id
+            and str(item.get("locator_claim_id") or "").strip() != task_point_id
+        ]
+        page_evidence: list[dict[str, Any]] = []
+        if foreign_records:
+            llm = LLMClient()
+
+            def reextract_cached(record: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+                candidate = annotate_source(
+                    dict(record),
+                    query,
+                    {"task_plan": effective_task_plan},
+                )
+                return _compact_page(
+                    query,
+                    candidate,
+                    _cached_page_result(record),
+                    llm,
+                    task_id,
+                    task_plan=effective_task_plan,
+                    task_point_id=task_point_id,
+                )
+
+            workers = min(
+                _pipeline_concurrency("web_page_evidence_concurrency", 8, maximum=32),
+                len(foreign_records),
+            )
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers))
+            futures = {
+                submit_with_context(pool, reextract_cached, item): index
+                for index, item in enumerate(foreign_records)
+            }
+            processed_cached: list[tuple[int, dict[str, Any] | None, dict[str, Any]]] = []
+            cancelled = False
+            try:
+                for future in concurrent.futures.as_completed(
+                    futures,
+                    timeout=task_wait_timeout(),
+                ):
+                    index = futures[future]
+                    try:
+                        record, evidence = future.result()
+                    except Exception as exc:
+                        record, evidence = None, {
+                            "status": "error",
+                            "error_class": "cached_page_evidence_failed",
+                            "errors": [f"{type(exc).__name__}: {exc}"],
+                        }
+                    processed_cached.append((index, record, evidence))
+            except concurrent.futures.TimeoutError:
+                cancelled = True
+                raise
+            finally:
+                shutdown_pool(pool, list(futures), cancelled=cancelled)
+            for _, record, evidence in sorted(processed_cached, key=lambda value: value[0]):
+                page_evidence.append(evidence)
+                if record:
+                    bound_records.append(annotate_freshness(record, freshness_policy))
+
+        usable_records = [item for item in bound_records if has_substantive_evidence(item)]
+        refs = [
+            {
+                "ref_id": f"WEB_CACHE_{index}",
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "source": item.get("source", ""),
+                "evidence_text": item.get("content", "")[:14000],
+                "evidence_origin": item.get("evidence_origin", "fetched_page_body"),
+                "evidence_boundary": item.get("evidence_boundary", "page_body_only"),
+                "source_locator": item.get("source_locator") or {},
+            }
+            for index, item in enumerate(usable_records, start=1)
+        ]
+        extraction_diagnostics = _model_extraction_diagnostics(page_evidence)
         result = {
-            "status": "ok",
+            "status": "ok" if usable_records else "no_evidence",
             "real_network": False,
             "provider": "evidence_store",
             "retrieval_role": "discovery",
             "query": query,
-            "count": len(reused_records),
+            "count": len(bound_records),
             "candidate_count": len(candidates),
             "fetched_count": 0,
-            "results": reused_records,
-            "sources": [item.get("url", "") for item in reused_records],
-            "citation_refs": [],
-            "page_evidence": [],
-            "evidence_ready": bool(reused_records),
+            "results": bound_records,
+            "sources": [item.get("url", "") for item in bound_records],
+            "citation_refs": refs,
+            "page_evidence": page_evidence,
+            "evidence_ready": bool(usable_records),
             "reused_sources": True,
+            "reextracted_cached_sources": bool(foreign_records),
             "novel_source_count": 0,
-            "evidence_policy": "existing evidence store projection; no duplicate network fetch",
+            "model_extraction": extraction_diagnostics,
+            "source_resolution": source_resolution_payload(),
+            "freshness_policy": freshness_policy,
+            "evidence_policy": (
+                "claim-scoped chunk re-extraction from the shared page cache; no duplicate network fetch"
+                if foreign_records
+                else "existing claim-scoped evidence projection; no duplicate network fetch"
+            ),
         }
-        append_task_event(task_id, "web_search_stage", phase="RESEARCH", action="web_search", stage="reuse", query=query, count=len(reused_records))
+        append_task_event(
+            task_id,
+            "web_search_stage",
+            phase="EXTRACTION" if foreign_records else "RESEARCH",
+            action="web_search",
+            stage="cache_reextract" if foreign_records else "reuse",
+            query=query,
+            count=len(bound_records),
+            task_point_id=task_point_id,
+        )
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     llm = LLMClient()
@@ -696,9 +1654,10 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                 fetched.append((candidate, {"status": "error", "message": f"{type(exc).__name__}: {exc}", "results": []}))
     except concurrent.futures.TimeoutError:
         cancelled = True
-        for future, candidate in future_map.items():
-            if not future.done():
-                fetched.append((candidate, {"status": "error", "message": "page fetch wait exceeded task budget", "results": []}))
+        # Preserve the hard case boundary instead of continuing with a
+        # partially fetched page set while the original workers still hold
+        # task/model leases.
+        raise
     finally:
         shutdown_pool(pool, list(future_map), cancelled=cancelled)
 
@@ -719,7 +1678,8 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             fetched_result,
             llm,
             task_id,
-            task_plan=task_plan,
+            task_plan=effective_task_plan,
+            task_point_id=task_point_id,
         )
 
     processed: list[tuple[int, dict[str, Any] | None, dict[str, Any]]] = []
@@ -743,9 +1703,10 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             processed.append((index, record, page_evidence))
     except concurrent.futures.TimeoutError:
         cancelled = True
-        for future, index in future_map.items():
-            if not future.done():
-                processed.append((index, None, {"status": "error", "error_class": "page_evidence_timeout", "errors": ["page evidence wait exceeded task budget"]}))
+        # The outer case runner owns the answer-shaped timeout fallback.  A
+        # search layer must not swallow the signal and keep the analysis slot
+        # occupied beyond the case boundary.
+        raise
     finally:
         shutdown_pool(pool, list(future_map), cancelled=cancelled)
 
@@ -784,6 +1745,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         for page in evidence_pages
         if str(page.get("status") or "").casefold() != "ok"
     )
+    extraction_diagnostics = _model_extraction_diagnostics(evidence_pages)
     result = {
         "status": "ok" if usable_records else "no_evidence",
         "real_network": True,
@@ -814,8 +1776,10 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         "evidence_ready": bool(usable_records),
         "usable_evidence_count": len(usable_records),
         "evidence_missing_count": missing_page_count + (len(records) - len(usable_records)),
+        "model_extraction": extraction_diagnostics,
         "retrieved_at": datetime.now().isoformat(timespec="seconds"),
         "freshness_policy": freshness_policy,
+        "source_resolution": source_resolution_payload(),
         "evidence_policy": "candidate URLs and Markdown chunk facts are untrusted evidence; the model decides whether to search again or summarize",
     }
     append_task_event(

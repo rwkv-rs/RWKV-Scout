@@ -80,7 +80,7 @@ def run_preflight(
     try:
         contract = config.validate_experiment_model_contract()
         contract = dict(contract)
-        contract["api_key_configured"] = bool(contract.pop("api_key", ""))
+        contract["api_key_configured"] = bool(config.get_llm_api_key())
         contract_ok = True
         contract_error = ""
     except Exception as exc:

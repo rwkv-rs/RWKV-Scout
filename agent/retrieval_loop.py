@@ -81,6 +81,7 @@ def merge_retrieval_results(
     real_network_values: list[bool] = []
     candidate_queries: list[str] = []
     evidence_missing_count = 0
+    extraction_events: list[dict[str, Any]] = []
     for candidate_query, data in rounds:
         candidate_queries.append(candidate_query)
         real_network_values.append(bool(data.get("real_network", True)))
@@ -88,6 +89,22 @@ def merge_retrieval_results(
         raw_items = [item for item in data.get("results") or [] if isinstance(item, dict)]
         valid_items = substantive_evidence_items(raw_items)
         evidence_missing_count += len(raw_items) - len(valid_items)
+        extraction = data.get("model_extraction") or {}
+        if isinstance(extraction, Mapping) and not extraction.get("complete", True):
+            extraction_events.append(
+                {
+                    "query": candidate_query,
+                    "degraded_page_count": int(extraction.get("degraded_page_count") or 0),
+                    "unresolved_chunk_count": int(extraction.get("unresolved_chunk_count") or 0),
+                    "transport_error_count": int(extraction.get("transport_error_count") or 0),
+                    "recovered_chunk_count": int(extraction.get("recovered_chunk_count") or 0),
+                    "pages": [
+                        dict(value)
+                        for value in (extraction.get("pages") or [])[:16]
+                        if isinstance(value, Mapping)
+                    ],
+                }
+            )
         valid_keys = {_record_key(item) for item in valid_items if _record_key(item)}
         for source in data.get("sources") or []:
             if source and source not in discovery_sources:
@@ -173,6 +190,16 @@ def merge_retrieval_results(
         "discovery_sources": discovery_sources,
         "citation_refs": citation_refs,
         "evidence_missing_count": evidence_missing_count,
+        "model_extraction": {
+            "schema_version": "model-extraction-diagnostics.v1",
+            "complete": not extraction_events,
+            "event_count": len(extraction_events),
+            "degraded_page_count": sum(int(item["degraded_page_count"]) for item in extraction_events),
+            "unresolved_chunk_count": sum(int(item["unresolved_chunk_count"]) for item in extraction_events),
+            "transport_error_count": sum(int(item["transport_error_count"]) for item in extraction_events),
+            "recovered_chunk_count": sum(int(item["recovered_chunk_count"]) for item in extraction_events),
+            "events": extraction_events[:24],
+        },
         "provider_errors": errors,
         "evidence_policy": next((data.get("evidence_policy") for _, data in rounds if data.get("evidence_policy")), ""),
         "ranking_strategy": strategy,

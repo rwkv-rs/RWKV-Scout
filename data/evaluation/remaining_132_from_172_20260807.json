@@ -1,0 +1,537 @@
+{
+  "schema_version": "rwkv_ecra_remaining_benchmark.v1",
+  "source_count": 172,
+  "sample_source": "data/evaluation/random_40_from_172_20260806.json",
+  "excluded_sample_count": 40,
+  "remaining_count": 132,
+  "cases": [
+    {
+      "case_id": "case_1",
+      "query": "python 3.14 free threading到底怎么开，查官方文档"
+    },
+    {
+      "case_id": "case_2",
+      "query": "PyTorch装CUDA版本该选哪个命令"
+    },
+    {
+      "case_id": "case_4",
+      "query": "PostgreSQL jsonb索引怎么写，官网例子"
+    },
+    {
+      "case_id": "case_5",
+      "query": "nginx websocket 反代配置官方写法"
+    },
+    {
+      "case_id": "case_6",
+      "query": "docker compose怎么给容器用GPU"
+    },
+    {
+      "case_id": "case_8",
+      "query": "Rust异步编程官方book在哪"
+    },
+    {
+      "case_id": "case_9",
+      "query": "Go memory model 原文"
+    },
+    {
+      "case_id": "case_14",
+      "query": "CISA已知被利用漏洞目录最近加了什么"
+    },
+    {
+      "case_id": "case_15",
+      "query": "NVD上最新的OpenSSH CVE详情"
+    },
+    {
+      "case_id": "case_16",
+      "query": "Firefox最近安全更新公告"
+    },
+    {
+      "case_id": "case_17",
+      "query": "GitHub advisory数据库里近期的PyPI高危漏洞"
+    },
+    {
+      "case_id": "case_18",
+      "query": "openssl最近公布了啥漏洞"
+    },
+    {
+      "case_id": "case_19",
+      "query": "Kubernetes官方CVE列表最新更新"
+    },
+    {
+      "case_id": "case_20",
+      "query": "curl安全漏洞公告原文"
+    },
+    {
+      "case_id": "case_21",
+      "query": "现在最新的C++标准是哪一版 ISO页面"
+    },
+    {
+      "case_id": "case_22",
+      "query": "ECMAScript当前规范原文"
+    },
+    {
+      "case_id": "case_23",
+      "query": "HTML Living Standard 最新原文"
+    },
+    {
+      "case_id": "case_24",
+      "query": "HTTP Semantics RFC 9110原文和勘误"
+    },
+    {
+      "case_id": "case_25",
+      "query": "WebGPU规范现在到哪了"
+    },
+    {
+      "case_id": "case_26",
+      "query": "国家统计局最新人口数据公报"
+    },
+    {
+      "case_id": "case_27",
+      "query": "央行最新货币政策执行报告"
+    },
+    {
+      "case_id": "case_28",
+      "query": "工信部最新通信业统计数据"
+    },
+    {
+      "case_id": "case_29",
+      "query": "最近有哪些消费品召回 市监总局原文"
+    },
+    {
+      "case_id": "case_31",
+      "query": "全国现在有哪些气象预警"
+    },
+    {
+      "case_id": "case_32",
+      "query": "刚刚地震了吗 查中国地震台网"
+    },
+    {
+      "case_id": "case_33",
+      "query": "美国最新生产者价格指数PPI"
+    },
+    {
+      "case_id": "case_34",
+      "query": "美国能源署每周石油状况报告"
+    },
+    {
+      "case_id": "case_35",
+      "query": "现在有没有太空天气预警"
+    },
+    {
+      "case_id": "case_36",
+      "query": "CDC现在有哪些旅行健康提醒"
+    },
+    {
+      "case_id": "case_37",
+      "query": "伯克希尔最新13F去SEC哪里看"
+    },
+    {
+      "case_id": "case_38",
+      "query": "小米最新港交所公告"
+    },
+    {
+      "case_id": "case_39",
+      "query": "AMD最新季度财报原文"
+    },
+    {
+      "case_id": "case_40",
+      "query": "Cloudflare最近的宕机复盘"
+    },
+    {
+      "case_id": "case_41",
+      "query": "iPhone有没有新的官方维修计划"
+    },
+    {
+      "case_id": "case_42",
+      "query": "WHO最新临床指南从哪里下载"
+    },
+    {
+      "case_id": "case_45",
+      "query": "llama.cpp最近大家都在报什么问题"
+    },
+    {
+      "case_id": "case_46",
+      "query": "vLLM最近有哪些CUDA报错issue"
+    },
+    {
+      "case_id": "case_47",
+      "query": "v2ex上大家升级macOS后的真实体验"
+    },
+    {
+      "case_id": "case_49",
+      "query": "stackoverflow docker compose gpu 常见报错"
+    },
+    {
+      "case_id": "case_50",
+      "query": "Hacker News上怎么评价最新PostgreSQL版本"
+    },
+    {
+      "case_id": "case_51",
+      "query": "How do I enable free threading in Python 3.14? Use the official guide."
+    },
+    {
+      "case_id": "case_52",
+      "query": "Which official install command should I use for the CUDA build of PyTorch?"
+    },
+    {
+      "case_id": "case_54",
+      "query": "Find the official PostgreSQL JSONB indexing examples."
+    },
+    {
+      "case_id": "case_56",
+      "query": "How can Docker Compose give a container GPU access?"
+    },
+    {
+      "case_id": "case_59",
+      "query": "Go memory model original specification"
+    },
+    {
+      "case_id": "case_61",
+      "query": "Which vulnerabilities were fixed in this month's Android security bulletin?"
+    },
+    {
+      "case_id": "case_62",
+      "query": "Latest Ubuntu USN security notices"
+    },
+    {
+      "case_id": "case_63",
+      "query": "Find recent high-severity issues in the Debian Security Tracker."
+    },
+    {
+      "case_id": "case_64",
+      "query": "What was recently added to the CISA Known Exploited Vulnerabilities catalog?"
+    },
+    {
+      "case_id": "case_65",
+      "query": "Details of the newest OpenSSH CVE in NVD"
+    },
+    {
+      "case_id": "case_66",
+      "query": "Recent Firefox security update advisories"
+    },
+    {
+      "case_id": "case_67",
+      "query": "Recent high-severity PyPI vulnerabilities in the GitHub Advisory Database"
+    },
+    {
+      "case_id": "case_68",
+      "query": "What vulnerabilities has OpenSSL disclosed recently?"
+    },
+    {
+      "case_id": "case_74",
+      "query": "HTTP Semantics RFC 9110 original text and errata"
+    },
+    {
+      "case_id": "case_75",
+      "query": "What is the current WebGPU specification?"
+    },
+    {
+      "case_id": "case_76",
+      "query": "Latest official China population statistics release"
+    },
+    {
+      "case_id": "case_77",
+      "query": "Latest PBOC monetary policy implementation report"
+    },
+    {
+      "case_id": "case_78",
+      "query": "Latest MIIT telecommunications industry statistics"
+    },
+    {
+      "case_id": "case_79",
+      "query": "Recent consumer product recalls from China's market regulator"
+    },
+    {
+      "case_id": "case_80",
+      "query": "Latest drug recall announcement from China's medical products regulator"
+    },
+    {
+      "case_id": "case_82",
+      "query": "Was there an earthquake just now? Check China Earthquake Networks."
+    },
+    {
+      "case_id": "case_83",
+      "query": "Latest US Producer Price Index release"
+    },
+    {
+      "case_id": "case_84",
+      "query": "Latest EIA Weekly Petroleum Status Report"
+    },
+    {
+      "case_id": "case_86",
+      "query": "Current CDC travel health notices"
+    },
+    {
+      "case_id": "case_87",
+      "query": "Where can I find Berkshire Hathaway's newest 13F on SEC EDGAR?"
+    },
+    {
+      "case_id": "case_88",
+      "query": "Latest Xiaomi announcement on HKEX"
+    },
+    {
+      "case_id": "case_89",
+      "query": "AMD latest quarterly earnings release"
+    },
+    {
+      "case_id": "case_90",
+      "query": "Cloudflare's latest official outage postmortem"
+    },
+    {
+      "case_id": "case_92",
+      "query": "Where can I download the newest WHO clinical guidelines?"
+    },
+    {
+      "case_id": "case_93",
+      "query": "Latest official progress on NASA's Artemis missions"
+    },
+    {
+      "case_id": "case_95",
+      "query": "What problems are llama.cpp users reporting recently?"
+    },
+    {
+      "case_id": "case_96",
+      "query": "Recent vLLM CUDA error reports from users"
+    },
+    {
+      "case_id": "case_98",
+      "query": "reddit LocalLLaMA real world RWKV experience"
+    },
+    {
+      "case_id": "case_100",
+      "query": "Hacker News discussion about the latest PostgreSQL release"
+    },
+    {
+      "case_id": "rwkv_search_001",
+      "query": "2022 年新一届理事任期开始时，VLDB Endowment 的主席是谁？"
+    },
+    {
+      "case_id": "rwkv_search_002",
+      "query": "VLDB 2022 大会的两位 General Conference Chair 分别是谁，他们当时都来自哪所大学？"
+    },
+    {
+      "case_id": "rwkv_search_003",
+      "query": "2016 年图灵奖公布时，获奖者 Tim Berners-Lee 同时在哪两所大学担任教授？"
+    },
+    {
+      "case_id": "rwkv_search_004",
+      "query": "2022 年 ACM SIGMOD Systems Award 表彰的是哪一个数据处理系统的开发团队？"
+    },
+    {
+      "case_id": "rwkv_search_005",
+      "query": "世界卫生组织宣布 COVID-19 不再构成“国际关注的突发公共卫生事件”时，WHO 总干事是谁，宣布日期是哪一天？"
+    },
+    {
+      "case_id": "rwkv_search_006",
+      "query": "良渚古城遗址被列入《世界遗产名录》时，世界遗产委员会会议在哪座城市举行？"
+    },
+    {
+      "case_id": "rwkv_search_008",
+      "query": "2024 年诺贝尔物理学奖授予了哪两位科学家，诺贝尔委员会所述的核心贡献是什么？"
+    },
+    {
+      "case_id": "rwkv_search_010",
+      "query": "2022 年菲尔兹奖唯一的女性得主是谁，她获奖时任职于哪所高校？"
+    },
+    {
+      "case_id": "rwkv_search_011",
+      "query": "事件视界望远镜首次发布 M87 星系中心黑洞图像时，相关论文发表在哪一期学术期刊中？"
+    },
+    {
+      "case_id": "rwkv_search_012",
+      "query": "阿耳忒弥斯 1 号任务实际发射于哪一天，从发射到返回地球总共持续了多少天？"
+    },
+    {
+      "case_id": "rwkv_search_013",
+      "query": "Linux 基金会宣布成立 OpenWallet Foundation 时，首任执行董事是谁？"
+    },
+    {
+      "case_id": "rwkv_search_014",
+      "query": "Apache Software Foundation 成立时的首任主席是谁，Apache 项目的名称最初来源于什么？"
+    },
+    {
+      "case_id": "rwkv_search_015",
+      "query": "2020 年 ACM 宣布将其数字图书馆中的研究成果向公众开放时，提出的开放访问模式叫什么？"
+    },
+    {
+      "case_id": "rwkv_search_016",
+      "query": "《美少女战士》作者的丈夫是谁，他凭借哪部漫画获得过小学馆漫画奖？"
+    },
+    {
+      "case_id": "rwkv_search_018",
+      "query": "《千与千寻》的导演与他人共同创办了哪家动画工作室，其中哪位联合创始人执导了《萤火虫之墓》？"
+    },
+    {
+      "case_id": "rwkv_search_020",
+      "query": "《冰与火之歌》作者曾在哪一部 20 世纪 80 年代的美国电视剧中担任故事编辑和编剧？"
+    },
+    {
+      "case_id": "rwkv_search_021",
+      "query": "《银河系漫游指南》的作者曾为哪一部英国科幻电视剧担任剧本编辑？"
+    },
+    {
+      "case_id": "rwkv_search_022",
+      "query": "《寄生虫》导演执导的第一部英语对白长片是哪一部？"
+    },
+    {
+      "case_id": "rwkv_search_023",
+      "query": "《霸王别姬》原著作者的另一部小说被关锦鹏改编成了哪部电影？"
+    },
+    {
+      "case_id": "rwkv_search_024",
+      "query": "《灌篮高手》作者创办的、资助日本高中篮球运动员赴美留学的项目叫什么，第一批学员是哪一年出发的？"
+    },
+    {
+      "case_id": "rwkv_search_025",
+      "query": "《百年孤独》的作者在哪一年获得诺贝尔文学奖，诺贝尔委员会授奖理由中同时提到了哪两类创作形式？"
+    },
+    {
+      "case_id": "rwkv_search_026",
+      "query": "万维网发明者 Tim Berners-Lee 的父母都参与过哪一台早期商业计算机的研发？"
+    },
+    {
+      "case_id": "rwkv_search_027",
+      "query": "居里夫人的长女及其丈夫共同获得了哪一年的诺贝尔奖，获奖学科是什么？"
+    },
+    {
+      "case_id": "rwkv_search_028",
+      "query": "《教父》导演的女儿执导的哪部电影获得了威尼斯电影节金狮奖？"
+    },
+    {
+      "case_id": "rwkv_search_029",
+      "query": "《沙丘》原作者的儿子后来与哪位科幻作家合作续写了多部《沙丘》系列小说？"
+    },
+    {
+      "case_id": "rwkv_search_030",
+      "query": "《指环王》电影导演的长期合作伙伴兼编剧，凭借该系列中的哪部电影获得了三项奥斯卡奖？"
+    },
+    {
+      "case_id": "rwkv_search_031",
+      "query": "诺贝尔文学奖得主石黑一雄为哪部改编自黑泽明电影《生之欲》的英语电影编写了剧本？"
+    },
+    {
+      "case_id": "rwkv_search_032",
+      "query": "《德古拉》作者曾长期担任哪位英国演员的剧院经理？"
+    },
+    {
+      "case_id": "rwkv_search_034",
+      "query": "《了不起的盖茨比》作者的妻子也出版过一部长篇小说，这部小说叫什么？"
+    },
+    {
+      "case_id": "rwkv_search_035",
+      "query": "《纳尼亚传奇》作者与《指环王》作者共同参加的文学讨论团体叫什么？"
+    },
+    {
+      "case_id": "rwkv_search_037",
+      "query": "截至 2026 年 7 月 29 日，Vue.js 创始人的 GitHub 用户名是什么，他个人账号中最热门的公开项目是哪一个？"
+    },
+    {
+      "case_id": "rwkv_search_039",
+      "query": "Redis 的最初作者是谁，Redis 社区分叉出的 Valkey 项目目前由哪个基金会托管？"
+    },
+    {
+      "case_id": "rwkv_search_040",
+      "query": "介绍 DuckDB 架构的早期论文叫什么，发表在哪一年的哪场学术会议上？"
+    },
+    {
+      "case_id": "rwkv_search_041",
+      "query": "SQLite 官方主要使用哪一种版本控制系统管理源代码，GitHub 上的 SQLite 仓库是主仓库还是镜像？"
+    },
+    {
+      "case_id": "rwkv_search_043",
+      "query": "Google 将 Kubernetes 捐赠给了哪个基金会，它在哪一年成为该基金会首个“毕业”项目？"
+    },
+    {
+      "case_id": "rwkv_search_044",
+      "query": "《Attention Is All You Need》的作者中，后来与 Daniel De Freitas 共同创办 Character.AI 的是哪一位？"
+    },
+    {
+      "case_id": "rwkv_search_045",
+      "query": "BERT 原始论文的第一作者是谁，论文发表时他所在的研究团队叫什么？"
+    },
+    {
+      "case_id": "rwkv_search_046",
+      "query": "AlphaFold2 的 Nature 论文完整标题是什么，官方开源代码仓库归属于哪个 GitHub 组织？"
+    },
+    {
+      "case_id": "rwkv_search_047",
+      "query": "Git 版本控制系统的创建者是谁，他最初开发 Git 是为了解决哪个大型开源项目的代码管理问题？"
+    },
+    {
+      "case_id": "rwkv_search_048",
+      "query": "Python 的创建者最初在哪家研究机构开发 Python，首个公开版本发布于哪一年？"
+    },
+    {
+      "case_id": "rwkv_search_049",
+      "query": "Blender 的主要创始人是谁，Blender 最初是在荷兰哪家动画工作室内部开发的？"
+    },
+    {
+      "case_id": "date_001",
+      "query": "世界卫生组织宣布 COVID-19 不再构成国际关注的突发公共卫生事件时，宣布日期是哪一天，WHO 总干事是谁？"
+    },
+    {
+      "case_id": "date_002",
+      "query": "阿耳忒弥斯 1 号任务实际发射于哪一天，从发射到返回地球总共持续了多少天？"
+    },
+    {
+      "case_id": "date_003",
+      "query": "2016 年图灵奖是什么时候公布的，获奖者是谁，官方授奖理由是什么？"
+    },
+    {
+      "case_id": "date_004",
+      "query": "2024 年诺贝尔物理学奖在哪一天公布，获奖者是谁，诺贝尔委员会所述的核心贡献是什么？"
+    },
+    {
+      "case_id": "date_007",
+      "query": "Kubernetes 1.30 正式发布是哪一天？请使用官方 Kubernetes 发布公告核对日期。"
+    },
+    {
+      "case_id": "date_008",
+      "query": "良渚古城遗址被列入世界遗产名录是哪一年哪一天，世界遗产委员会当时在哪座城市举行会议？"
+    },
+    {
+      "case_id": "date_009",
+      "query": "事件视界望远镜首次发布 M87 星系中心黑洞图像是哪一天，相关论文发表在哪一期学术期刊？"
+    },
+    {
+      "case_id": "date_010",
+      "query": "Git 版本控制系统首次公开发布是哪一年哪一天？请同时给出 Linus Torvalds 开始开发 Git 的直接背景。"
+    },
+    {
+      "case_id": "date_011",
+      "query": "截至 2026 年 7 月 29 日，FastAPI 的最新稳定版本是什么、发布日期是哪一天？如果官方来源没有明确标注，请明确说明证据不足。"
+    },
+    {
+      "case_id": "date_012",
+      "query": "截至 2026 年 7 月 29 日，RWKV Agent 或 rwkv-search GitHub 仓库最新公开提交的日期、提交标题和链接是什么？"
+    },
+    {
+      "case_id": "url_001",
+      "query": "Open and summarize this web page. List its topic, key points, and important links explicitly provided by the page. Use only page-body evidence and do not guess. URL: https://docs.python.org/3/whatsnew/3.13.html"
+    },
+    {
+      "case_id": "url_004",
+      "query": "Read and summarize this web page, including the problem it addresses, its main characteristics, and related resources explicitly named by the page. Every factual statement must come from the page body. URL: https://git-scm.com/about"
+    },
+    {
+      "case_id": "url_005",
+      "query": "Summarize this web page's purpose, interface behavior, parameters, and cautions. Include only claims directly supported by the page body. URL: https://developer.mozilla.org/en-US/docs/Web/API/Window/fetch"
+    },
+    {
+      "case_id": "url_006",
+      "query": "Open and summarize this web page. Explain the database feature it describes, the supported data forms, and important limitations or cautions stated on the page. Do not answer unsupported parts. URL: https://www.postgresql.org/docs/current/datatype-json.html"
+    },
+    {
+      "case_id": "url_007",
+      "query": "Summarize this standards document page, including its scope, core terminology, and main requirements. Distinguish statements established by the page body from facts that cannot be confirmed there. URL: https://www.rfc-editor.org/rfc/rfc9110"
+    },
+    {
+      "case_id": "url_009",
+      "query": "Open and summarize this web page's description of the SQLite project, its main characteristics, and explicit facts stated by the page. Do not treat search snippets or memory as page-body evidence. URL: https://www.sqlite.org/about.html"
+    },
+    {
+      "case_id": "url_010",
+      "query": "Summarize this web page's project purpose, main content, and explicit links or resources in the page body. If the page body cannot be retrieved, state that the web-page summary could not be completed. URL: https://github.com/BlinkDL/RWKV-LM"
+    }
+  ]
+}

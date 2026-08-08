@@ -15,6 +15,8 @@ from config import (
     get_llm_base_url,
     get_llm_model,
     get_llm_provider,
+    get_llm_seed,
+    get_llm_temperature,
     get_model_retry_attempts,
     get_model_retry_delay_seconds,
     get_model_retry_timeout_errors,
@@ -24,7 +26,7 @@ from runtime import get_model_backend
 from runtime.transcript import render_rwkv_transcript
 from utils.model_events import record_model_event, visible_model_text
 from utils.retry import retry_with_fallback
-from utils.token_tracker import current_task_id, global_token_tracker
+from utils.token_tracker import current_model_lane, current_task_id, global_token_tracker
 
 
 def _event_messages(messages: list | None) -> list[dict]:
@@ -96,21 +98,33 @@ class LLMClient:
         started: float,
         messages: list | None = None,
         prompt: str | None = None,
+        request_max_tokens: int | None = None,
+        stop: list[str] | tuple[str, ...] | None = None,
     ):
         prompt_tokens, completion_tokens, reasoning_tokens = _usage_values(response)
         global_token_tracker.add_llm(prompt_tokens, completion_tokens, reasoning_tokens)
         payload = {
             "task_id": current_task_id.get(),
-            "status": "completed",
+            "status": "returned",
             "operation": operation,
             "provider": self.provider,
             "backend": getattr(get_model_backend(), "backend_name", "unknown"),
             "model": self.model,
+            "model_lane": current_model_lane.get(),
+            "temperature": get_llm_temperature(),
             "duration_ms": round((time.perf_counter() - started) * 1000, 1),
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
+            "finish_reason": str(getattr(response, "finish_reason", "") or ""),
             "output": visible_model_text(getattr(response, "content", "")),
         }
+        seed = get_llm_seed()
+        if seed is not None:
+            payload["seed"] = seed
+        if request_max_tokens is not None:
+            payload["request_max_tokens"] = int(request_max_tokens)
+        if stop:
+            payload["stop"] = list(stop)
         if messages is not None:
             payload["input_messages"] = _event_messages(messages)
         if prompt is not None:
@@ -136,10 +150,17 @@ class LLMClient:
         if is_local_provider(self.provider):
             try:
                 backend = get_model_backend()
+                local_request_max_tokens = (
+                    max_tokens
+                    if max_tokens is not None
+                    else 768
+                    if not tools and not enable_native_search
+                    else None
+                )
                 if not tools and not enable_native_search:
                     response = backend.text_completion(
                         render_rwkv_transcript(messages),
-                        max_tokens=max_tokens or 768,
+                        max_tokens=local_request_max_tokens,
                     )
                 else:
                     response = backend.chat_completion(
@@ -153,15 +174,18 @@ class LLMClient:
                     operation="chat_completion",
                     started=started,
                     messages=messages,
+                    request_max_tokens=local_request_max_tokens,
                 )
             except Exception as exc:
                 record_model_event(
                     task_id,
-                    status="failed",
+                    status="network_error",
                     operation="chat_completion",
                     provider=self.provider,
                     model=self.model,
+                    model_lane=current_model_lane.get(),
                     duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                    request_max_tokens=max_tokens,
                     input_messages=_event_messages(messages),
                     error=f"{type(exc).__name__}: {exc}"[:1000],
                 )
@@ -192,11 +216,13 @@ class LLMClient:
         except Exception as exc:
             record_model_event(
                 task_id,
-                status="failed",
+                status="network_error",
                 operation="chat_completion",
                 provider=self.provider,
                 model=self.model,
+                model_lane=current_model_lane.get(),
                 duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                request_max_tokens=max_tokens,
                 input_messages=_event_messages(messages),
                 error=f"{type(exc).__name__}: {exc}"[:1000],
             )
@@ -210,11 +236,13 @@ class LLMClient:
         usage_dict = raw_dict.get("usage") or {}
         record_model_event(
             task_id,
-            status="completed",
+            status="returned",
             operation="chat_completion",
             provider=self.provider,
             model=self.model,
+            model_lane=current_model_lane.get(),
             duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            request_max_tokens=max_tokens,
             input_messages=_event_messages(messages),
             prompt_tokens=usage_dict.get("prompt_tokens", 0) or usage_dict.get("input_tokens", 0) or 0,
             completion_tokens=usage_dict.get("completion_tokens", 0) or usage_dict.get("output_tokens", 0) or 0,
@@ -249,15 +277,20 @@ class LLMClient:
                 operation="text_completion",
                 started=started,
                 prompt=prompt,
+                request_max_tokens=max_tokens,
+                stop=stop,
             )
         except Exception as exc:
             record_model_event(
                 task_id,
-                status="failed",
+                status="network_error",
                 operation="text_completion",
                 provider=self.provider,
                 model=self.model,
+                model_lane=current_model_lane.get(),
                 duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                request_max_tokens=max_tokens,
+                stop=list(stop or []),
                 prompt=prompt,
                 error=f"{type(exc).__name__}: {exc}"[:1000],
             )
