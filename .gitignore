@@ -65,3 +65,10 @@ data/evaluation/**
 # Local frontend/build artefacts
 frontend/node_modules/
 frontend/dist/
+
+# Editor and assistant metadata are not runtime dependencies.
+.agents/
+.claude/
+.cursor/
+.idea/
+.vscode/
