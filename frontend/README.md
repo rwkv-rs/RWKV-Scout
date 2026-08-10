@@ -1,4 +1,4 @@
-# RWKV Retrieval Agent React Frontend
+# RWKV-ECRA React Frontend
 
 React + Vite 独立前端，生产环境由 `frontend/server.py` 提供构建文件并代理后端 API。
 
@@ -7,7 +7,7 @@ React + Vite 独立前端，生产环境由 `frontend/server.py` 提供构建文
 先安装依赖：
 
 ```bash
-cd rwkv-retrieval-agent
+cd RWKV-ECRA
 npm install --prefix frontend
 ```
 

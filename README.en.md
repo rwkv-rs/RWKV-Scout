@@ -1,4 +1,4 @@
-# RWKV Retrieval Agent
+# RWKV-ECRA
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the module boundaries and dependency rules.
 See [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) for reproducible runs and [docs/external_projects/wigolo.md](docs/external_projects/wigolo.md) for the wigolo evaluation record.
@@ -82,7 +82,7 @@ For other pre-configured modifiable parameters, please check the Appendix.
 ### 4. CLI Startup
 
 ```bash
-cd rwkv-retrieval-agent
+cd RWKV-ECRA
 python main.py
 ```
 
@@ -101,7 +101,7 @@ python api.py
 
 Once started, the backend service runs at `http://0.0.0.0:8787` by default, and the frontend is already adapted to this port.
 
-Then, open another terminal and enter `rwkv-retrieval-agent/frontend`:
+Then, open another terminal and enter `RWKV-ECRA/frontend`:
 
 ```bash
 npm install

@@ -358,13 +358,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Serve RWKV Retrieval Agent frontend")
+    parser = argparse.ArgumentParser(description="Serve RWKV-ECRA frontend")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=5177, type=int)
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"RWKV Retrieval Agent frontend: http://{args.host}:{args.port}")
+    print(f"RWKV-ECRA frontend: http://{args.host}:{args.port}")
     print(f"Static files: {STATIC_DIR}")
     print(f"Public mode: {PUBLIC_MODE}")
     print(f"Project data output: {OUTPUT_DIR}")

@@ -1,4 +1,4 @@
-# RWKV Retrieval Agent 架构约定
+# RWKV-ECRA 架构约定
 
 完整的当前架构、量化问题、目标架构和迁移计划见 [`docs/ARCHITECTURE_HANDOFF.zh-CN.md`](docs/ARCHITECTURE_HANDOFF.zh-CN.md)。
 
