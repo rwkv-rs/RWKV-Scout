@@ -107,6 +107,7 @@ export function AppSidebar({
   onOpenChat,
   onStop,
   onDelete,
+  publicMode = false,
   ...props
 }) {
   const deferredKeyword = useDeferredValue(keyword);
@@ -169,7 +170,7 @@ export function AppSidebar({
             检索对话
           </Button>
           </div>
-          <div className="relative">
+          {!publicMode ? <div className="relative">
             <Search className="pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2 text-sidebar-foreground/30" />
             <Input
               value={keyword}
@@ -179,7 +180,11 @@ export function AppSidebar({
               className="h-7 rounded border-transparent bg-sidebar-foreground/[0.04] pl-7 text-[11px] shadow-none placeholder:text-sidebar-foreground/30 focus:border-sidebar-border"
               type="search"
             />
-          </div>
+          </div> : (
+            <div className="px-1 text-[11px] text-sidebar-foreground/45">
+              公网模式 · 仅显示本浏览器提交的任务
+            </div>
+          )}
         </div>
       </SidebarHeader>
 
@@ -200,6 +205,7 @@ export function AppSidebar({
                     onSelect={onSelect}
                     onStop={onStop}
                     onDelete={onDelete}
+                    allowDelete={!publicMode}
                   />
                 ))}
               </div>
@@ -218,6 +224,7 @@ export function AppSidebar({
                       onSelect={onSelect}
                       onStop={onStop}
                       onDelete={onDelete}
+                      allowDelete={!publicMode}
                     />
                   ))}
                 </div>
@@ -226,7 +233,7 @@ export function AppSidebar({
           ) : (
             <div className="px-4 py-10 text-center">
               <div className="text-sm text-sidebar-foreground/55">
-                {keyword.trim() ? "没有匹配的任务" : "还没有历史任务"}
+                {keyword.trim() ? "没有匹配的任务" : publicMode ? "本浏览器还没有任务" : "还没有历史任务"}
               </div>
               <div className="mt-1.5 text-[11px] text-sidebar-foreground/35">
                 {keyword.trim() ? "尝试修改搜索词" : "点击右上角新建"}
@@ -241,7 +248,7 @@ export function AppSidebar({
   );
 }
 
-function TaskItem({ item, isActive, now, onSelect, onStop, onDelete }) {
+function TaskItem({ item, isActive, now, onSelect, onStop, onDelete, allowDelete = true }) {
   const label = getTaskLabel(item);
   const relativeTime = formatRelativeTime(item.updated_at, now);
 
@@ -292,7 +299,7 @@ function TaskItem({ item, isActive, now, onSelect, onStop, onDelete }) {
             <StopCircle className="size-3.5" />
           </Button>
         ) : null}
-        <Button
+        {allowDelete ? <Button
           variant="ghost"
           size="icon-xs"
           title="删除任务"
@@ -303,7 +310,7 @@ function TaskItem({ item, isActive, now, onSelect, onStop, onDelete }) {
           }}
         >
           <Trash2 className="size-3.5" />
-        </Button>
+        </Button> : null}
       </div>
     </div>
   );

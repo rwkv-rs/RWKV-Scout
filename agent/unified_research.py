@@ -49,6 +49,24 @@ def _is_retrieval_tool(action: str) -> bool:
     } or action in {"web_search", "connector_lookup"}
 
 
+def _review_missing_point_ids(
+    review: dict[str, Any] | None,
+    task_plan: dict[str, Any],
+) -> set[str]:
+    """Return exact model-plan IDs named missing by the RWKV reviewer."""
+
+    planned_ids = {
+        str(point.get("id") or "").strip()
+        for point in task_plan.get("atomic_points") or []
+        if isinstance(point, dict) and str(point.get("id") or "").strip()
+    }
+    return {
+        str(value).strip()
+        for value in (review or {}).get("missing_points") or []
+        if str(value).strip() in planned_ids
+    }
+
+
 def _record_deterministic_result(
     owner: Any,
     action: str,
@@ -98,9 +116,18 @@ def run_unified_research_loop(
     rounds = state.retrieval.rounds
     phase = "DISCOVERY"
     # A reviewer-requested replan stays valid until the task obtains new
-    # material.  Repeating another frozen request must rebuild the planner,
-    # not invoke the same reviewer on an unchanged evidence snapshot.
+    # material. Repeating another frozen request is fed back to that rebuilt
+    # planner; it must not rebuild the same session again and again.
     pending_replan_review: dict[str, Any] | None = None
+    stalled_actions_after_replan = 0
+    # One repeated frozen path is enough to prove that the active strategy
+    # batch stalled.  Waiting for the same model choice three times only
+    # amplifies RWKV repetition and delays the already-requested replan.
+    max_stalled_actions_after_replan = 1
+    replan_rebuilds_without_progress = 0
+    max_replan_rebuilds_without_progress = 2
+    cross_validation_protocol_failures_after_duplicate = 0
+    max_cross_validation_protocol_failures_after_duplicate = 2
 
     append_task_event(
         state.task_id,
@@ -144,6 +171,14 @@ def run_unified_research_loop(
             call_id=plan.get("call_id", ""),
             raw_model_output=plan.get("raw_model_output", ""),
             planner_error=plan.get("planner_error", ""),
+            task_point_binding_method=plan.get("task_point_binding_method", ""),
+            task_point_binding_raw_model_output=plan.get(
+                "task_point_binding_raw_model_output", ""
+            ),
+            task_point_binding_error=plan.get("task_point_binding_error", ""),
+            task_point_binding_temperature=plan.get(
+                "task_point_binding_temperature"
+            ),
             sampling_temperature=plan.get("sampling_temperature"),
             sampling_seed=plan.get("sampling_seed"),
             decision_owner="rwkv",
@@ -184,6 +219,7 @@ def run_unified_research_loop(
             }
             if review_decision == "replan":
                 pending_replan_review = dict(review)
+                replan_rebuilds_without_progress = 1
                 replan_count = state.retrieval.record_replan()
                 feedback = {
                     "status": "cross_validation_replan",
@@ -195,7 +231,7 @@ def run_unified_research_loop(
                     ),
                 }
                 state.last_feedback = json.dumps(feedback, ensure_ascii=False)
-                owner.planner.rebuild_session_after_review(
+                replan_action = owner.planner.rebuild_session_after_review(
                     user_query,
                     state.to_retrieval_context(),
                     review,
@@ -209,6 +245,7 @@ def run_unified_research_loop(
                     review=compact_review,
                     replan_count=replan_count,
                     shared_state=state.retrieval.routing_snapshot(),
+                    replan_action=replan_action,
                     decision_owner="rwkv",
                     controller_query_generated=False,
                 )
@@ -224,6 +261,23 @@ def run_unified_research_loop(
             }
             state.last_feedback = json.dumps(feedback, ensure_ascii=False)
             owner.planner.observe_tool_result(feedback)
+            replan_action = owner.planner.rebuild_session_after_review(
+                user_query,
+                state.to_retrieval_context(),
+                review,
+                "REPLAN",
+                routing_observation=feedback,
+            )
+            append_task_event(
+                state.task_id,
+                "planner_session_rebuilt",
+                step=step,
+                phase="REPLAN",
+                reason="rwkv_cross_validation_protocol_replan",
+                replan_action=replan_action,
+                decision_owner="rwkv",
+                controller_query_generated=False,
+            )
             continue
 
         if not ToolRegistry.has(action):
@@ -249,13 +303,35 @@ def run_unified_research_loop(
             )
             continue
 
-        # Exact duplicates freeze only the already-executed path.  RWKV then
-        # reviews the shared evidence and decides whether research is complete
-        # or a new planner session is needed.  The controller never authors an
-        # alternate query or source route.
-        duplicate = owner._retrieval_ledger.request_status(action, args)
+        # An exact retrieval transaction is global to the run because its
+        # observed result can be shared across claims. Conservative equivalent
+        # queries remain point-scoped so a related but distinct claim is not
+        # suppressed. The controller never authors an alternate query or route.
+        exact_duplicate = owner._retrieval_ledger.request_status(
+            action,
+            args,
+        )
+        equivalent_duplicate: dict[str, Any] | None = None
+        if (
+            action == "web_search"
+            and task_point_id
+            and str(args.get("query") or "").strip()
+        ):
+            query_status = owner._retrieval_ledger.query_status(
+                args.get("query"),
+                task_point_id=task_point_id,
+                threshold=0.88,
+            )
+            if query_status.get("attempted"):
+                equivalent_duplicate = query_status
+        duplicate = exact_duplicate or equivalent_duplicate
         if _is_retrieval_tool(action) and duplicate:
             duplicate_query = str(args.get("query") or args.get("url") or user_query)
+            duplicate_kind = (
+                "exact_duplicate_request"
+                if exact_duplicate
+                else "equivalent_duplicate_query"
+            )
             duplicate_record = owner._retrieval_ledger.record_duplicate_block(
                 duplicate_query,
                 step=step,
@@ -265,20 +341,25 @@ def run_unified_research_loop(
                 duplicate_query,
                 action=action,
                 arguments=args,
+                task_point_id=task_point_id,
                 step=step,
-                reason="exact_duplicate_request",
+                reason=duplicate_kind,
             )
+            frozen_paths = list(
+                state.retrieval.routing_snapshot().get("frozen_paths") or []
+            )[-8:]
             feedback = {
                 "status": "no_new_evidence",
-                "error_class": "exact_duplicate_request",
+                "error_class": duplicate_kind,
                 "message": (
-                    "This exact retrieval request already ran and its path is frozen. "
-                    "RWKV cross-validation will decide whether to finish or rebuild planning."
+                    "This retrieval path already ran for the same task point and is frozen. "
+                    "Choose a materially different path or finish from the available evidence."
                 ),
                 "request": {"action": action, "arguments": args},
                 "previous_request_status": duplicate,
                 "repeat_count": duplicate_record.get("blocked_count", 1),
                 "frozen_path": frozen_path,
+                "frozen_paths": frozen_paths,
                 "retrieval_ledger": owner._retrieval_ledger.observation(limit=16),
                 "results": [],
             }
@@ -290,19 +371,144 @@ def run_unified_research_loop(
                 phase=phase,
                 action=action,
                 result=feedback,
-                execution_status="exact_duplicate",
+                execution_status=duplicate_kind,
                 decision_owner="rwkv",
             )
 
-            review_reused = pending_replan_review is not None
-            review = (
-                dict(pending_replan_review)
-                if pending_replan_review is not None
-                else owner._cross_validate_research(
-                    user_query,
-                    task_plan,
+            if pending_replan_review is not None:
+                stalled_actions_after_replan += 1
+                pending_feedback = {
+                    **feedback,
+                    "pending_replan": {
+                        key: value
+                        for key, value in pending_replan_review.items()
+                        if key not in {"prompt", "raw_model_output"}
+                    },
+                    "stalled_actions_after_replan": stalled_actions_after_replan,
+                    "max_stalled_actions_after_replan": max_stalled_actions_after_replan,
+                }
+                state.last_feedback = json.dumps(pending_feedback, ensure_ascii=False)
+                owner.planner.observe_tool_result(pending_feedback)
+                append_task_event(
+                    state.task_id,
+                    "replan_path_stalled",
                     step=step,
+                    phase="REPLAN",
+                    action=action,
+                    duplicate_kind=duplicate_kind,
+                    stalled_actions_after_replan=stalled_actions_after_replan,
+                    replan_count=state.retrieval.replan_count,
+                    decision_owner="rwkv",
                 )
+                if stalled_actions_after_replan >= max_stalled_actions_after_replan:
+                    if (
+                        replan_rebuilds_without_progress
+                        < max_replan_rebuilds_without_progress
+                    ):
+                        replan_rebuilds_without_progress += 1
+                        replan_count = state.retrieval.record_replan()
+                        escalation_feedback = {
+                            **pending_feedback,
+                            "status": "replan_stall_escalation",
+                            "replan_count": replan_count,
+                            "replan_rebuilds_without_progress": replan_rebuilds_without_progress,
+                            "message": (
+                                "The prior RWKV replan repeated frozen paths without new evidence. "
+                                "Rebuild once at the next request-level replan temperature; RWKV must "
+                                "choose the next task point, tool, query, and source itself."
+                            ),
+                        }
+                        state.last_feedback = json.dumps(
+                            escalation_feedback,
+                            ensure_ascii=False,
+                        )
+                        replan_action = owner.planner.rebuild_session_after_review(
+                            user_query,
+                            state.to_retrieval_context(),
+                            pending_replan_review,
+                            "REPLAN",
+                            routing_observation=escalation_feedback,
+                        )
+                        append_task_event(
+                            state.task_id,
+                            "planner_session_rebuilt",
+                            step=step,
+                            phase="REPLAN",
+                            reason="rwkv_replan_stall_escalation",
+                            replan_count=replan_count,
+                            replan_rebuilds_without_progress=replan_rebuilds_without_progress,
+                            frozen_path=frozen_path,
+                            shared_state=state.retrieval.routing_snapshot(),
+                            replan_action=replan_action,
+                            decision_owner="rwkv",
+                            controller_query_generated=False,
+                        )
+                        stalled_actions_after_replan = 0
+                        continue
+                    review_latest = getattr(
+                        owner,
+                        "_cross_validate_if_evidence_changed",
+                        None,
+                    )
+                    latest_review = (
+                        review_latest(user_query, task_plan, step=step)
+                        if callable(review_latest)
+                        else None
+                    )
+                    if latest_review is not None:
+                        latest_decision = str(
+                            latest_review.get("decision") or ""
+                        ).casefold()
+                        if latest_decision == "finish":
+                            return owner._complete_model_tool_loop(
+                                user_query,
+                                action,
+                                rounds,
+                                step,
+                                termination_reason="rwkv_cross_validation_finish_after_stall",
+                            )
+                        if latest_decision == "replan" and step < max_steps:
+                            pending_replan_review = dict(latest_review)
+                            replan_rebuilds_without_progress = 1
+                            stalled_actions_after_replan = 0
+                            replan_count = state.retrieval.record_replan()
+                            replan_action = owner.planner.rebuild_session_after_review(
+                                user_query,
+                                state.to_retrieval_context(),
+                                latest_review,
+                                "REPLAN",
+                            )
+                            append_task_event(
+                                state.task_id,
+                                "planner_session_rebuilt",
+                                step=step,
+                                phase="REPLAN",
+                                reason="new_evidence_cross_validation_replan_after_stall",
+                                review={
+                                    key: value
+                                    for key, value in latest_review.items()
+                                    if key not in {"prompt", "raw_model_output"}
+                                },
+                                replan_count=replan_count,
+                                replan_action=replan_action,
+                                shared_state=state.retrieval.routing_snapshot(),
+                                decision_owner="rwkv",
+                                controller_query_generated=False,
+                            )
+                            continue
+                    return owner._complete_model_tool_loop(
+                        user_query,
+                        action,
+                        rounds,
+                        step,
+                        termination_reason="rwkv_replan_stalled",
+                    )
+                continue
+
+            review = owner._cross_validate_research(
+                user_query,
+                task_plan,
+                step=step,
             )
             review_decision = str(review.get("decision") or "").casefold()
             compact_review = {
@@ -322,6 +528,7 @@ def run_unified_research_loop(
 
             if review_decision == "replan":
                 pending_replan_review = dict(review)
+                replan_rebuilds_without_progress = 1
                 replan_count = state.retrieval.record_replan()
                 replan_feedback = {
                     **feedback,
@@ -335,71 +542,104 @@ def run_unified_research_loop(
                     ),
                 }
                 state.last_feedback = json.dumps(replan_feedback, ensure_ascii=False)
-                owner.planner.rebuild_session_after_review(
+                replan_action = owner.planner.rebuild_session_after_review(
                     user_query,
                     state.to_retrieval_context(),
                     review,
                     "REPLAN",
+                    routing_observation=replan_feedback,
                 )
                 append_task_event(
                     state.task_id,
                     "planner_session_rebuilt",
                     step=step,
                     phase="REPLAN",
-                    reason=(
-                        "rwkv_pending_replan_after_duplicate"
-                        if review_reused
-                        else "rwkv_cross_validation_replan_after_duplicate"
-                    ),
+                    reason="rwkv_cross_validation_replan_after_duplicate",
                     review=compact_review,
-                    cross_validation_reused=review_reused,
+                    cross_validation_reused=False,
                     frozen_path=frozen_path,
                     repeat_count=duplicate_record.get("blocked_count", 1),
                     replan_count=replan_count,
+                    replan_action=replan_action,
                     shared_state=state.retrieval.routing_snapshot(),
                     decision_owner="rwkv",
                     controller_query_generated=False,
                 )
                 continue
 
-            replan_count = state.retrieval.record_replan()
             protocol_feedback = {
                 **feedback,
                 "status": "cross_validation_protocol_error",
                 "evidence_review": compact_review,
-                "replan_count": replan_count,
                 "message": (
                     "The RWKV cross-validation response was not an executable finish/replan "
-                    "decision. Rebuild planning while retaining the shared evidence and frozen path."
+                    "decision. Decide the next action from the retained evidence and frozen path."
                 ),
             }
-            state.last_feedback = json.dumps(protocol_feedback, ensure_ascii=False)
-            owner.planner.rebuild_session(
-                user_query,
-                state.to_retrieval_context(),
-                protocol_feedback,
-                "REPLAN",
+            cross_validation_protocol_failures_after_duplicate += 1
+            protocol_feedback["protocol_failure_count"] = (
+                cross_validation_protocol_failures_after_duplicate
             )
+            protocol_feedback["max_protocol_failures"] = (
+                max_cross_validation_protocol_failures_after_duplicate
+            )
+            state.last_feedback = json.dumps(protocol_feedback, ensure_ascii=False)
+            owner.planner.observe_tool_result(protocol_feedback)
             append_task_event(
                 state.task_id,
-                "planner_session_rebuilt",
+                "cross_validation_protocol_error",
                 step=step,
                 phase="REPLAN",
                 reason="cross_validation_protocol_error_after_duplicate",
                 review=compact_review,
                 frozen_path=frozen_path,
                 repeat_count=duplicate_record.get("blocked_count", 1),
-                replan_count=replan_count,
+                replan_count=state.retrieval.replan_count,
                 shared_state=state.retrieval.routing_snapshot(),
+                decision_owner="rwkv",
+                controller_query_generated=False,
+            )
+            if (
+                cross_validation_protocol_failures_after_duplicate
+                >= max_cross_validation_protocol_failures_after_duplicate
+            ):
+                return owner._complete_model_tool_loop(
+                    user_query,
+                    action,
+                    rounds,
+                    step,
+                    termination_reason="rwkv_cross_validation_protocol_stalled",
+                )
+            replan_action = owner.planner.rebuild_session_after_review(
+                user_query,
+                state.to_retrieval_context(),
+                review,
+                "REPLAN",
+                routing_observation=protocol_feedback,
+            )
+            append_task_event(
+                state.task_id,
+                "planner_session_rebuilt",
+                step=step,
+                phase="REPLAN",
+                reason="rwkv_cross_validation_protocol_replan_after_duplicate",
+                replan_action=replan_action,
                 decision_owner="rwkv",
                 controller_query_generated=False,
             )
             continue
 
+        tool_context = owner._agentic_tool_context()
+        if _is_retrieval_tool(action) and task_point_id:
+            # ``task_point_id`` is the exact point selected by RWKV.  Passing
+            # it as system-owned context lets chunk selection and evidence
+            # binding focus on that point without exposing a new model
+            # argument or changing the model's tool/query choice.
+            tool_context = {**tool_context, "task_point_id": task_point_id}
         raw_result = ToolRegistry.execute(
             action,
             args,
-            owner._agentic_tool_context(),
+            tool_context,
             phase=None,
         )
         result = _as_dict(raw_result)
@@ -411,9 +651,10 @@ def run_unified_research_loop(
             task_point_id=task_point_id,
         )
 
+        replan_material_changed = False
         if _is_retrieval_tool(action):
             query = str(args.get("query") or args.get("url") or user_query)
-            state.retrieval.record_query(
+            retrieval_delta = state.retrieval.record_query(
                 query,
                 result,
                 step=step,
@@ -429,12 +670,18 @@ def run_unified_research_loop(
                 task_point_id=task_point_id,
             )
             state.run_metadata["claim_ledger"] = state.retrieval.claims.snapshot()
-            if (
+            replan_material_changed = bool(
                 pending_replan_review is not None
-                and str(result.get("status") or "").casefold() == "ok"
-                and bool(result.get("results"))
-            ):
-                pending_replan_review = None
+                and (
+                    not _review_missing_point_ids(pending_replan_review, task_plan)
+                    or task_point_id
+                    in _review_missing_point_ids(pending_replan_review, task_plan)
+                )
+                and bool(retrieval_delta.get("material_changed"))
+            )
+            if replan_material_changed:
+                stalled_actions_after_replan = 0
+            cross_validation_protocol_failures_after_duplicate = 0
         else:
             _record_deterministic_result(
                 owner,
@@ -443,12 +690,18 @@ def run_unified_research_loop(
                 step=step,
                 task_point_id=task_point_id,
             )
-            if (
+            replan_material_changed = bool(
                 pending_replan_review is not None
                 and action in {"calculator", "current_time", "date_diff"}
                 and str(result.get("status") or "").casefold() == "ok"
-            ):
-                pending_replan_review = None
+                and (
+                    not _review_missing_point_ids(pending_replan_review, task_plan)
+                    or task_point_id
+                    in _review_missing_point_ids(pending_replan_review, task_plan)
+                )
+            )
+            if replan_material_changed:
+                stalled_actions_after_replan = 0
 
         if is_error(result):
             owner._model_protocol_failure = owner._model_protocol_failure or str(
@@ -482,6 +735,81 @@ def run_unified_research_loop(
             shared_state=state.retrieval.routing_snapshot(),
         )
 
+        if replan_material_changed:
+            # A new URL or tool result is only observable progress; it is not
+            # proof that the missing fact was resolved.  Return the revised
+            # evidence to RWKV immediately.  Only its cross-validation may
+            # finish the task or define the next missing obligation.
+            review_latest = getattr(
+                owner,
+                "_cross_validate_if_evidence_changed",
+                None,
+            )
+            latest_review = (
+                review_latest(user_query, task_plan, step=step)
+                if callable(review_latest)
+                else owner._cross_validate_research(
+                    user_query,
+                    task_plan,
+                    step=step,
+                )
+            )
+            if latest_review is not None:
+                latest_decision = str(
+                    latest_review.get("decision") or ""
+                ).casefold()
+                if latest_decision == "finish":
+                    mark_replan_progress = getattr(
+                        owner.planner,
+                        "mark_replan_progress",
+                        None,
+                    )
+                    if callable(mark_replan_progress):
+                        mark_replan_progress(task_point_id)
+                    return owner._complete_model_tool_loop(
+                        user_query,
+                        action,
+                        rounds,
+                        step,
+                        termination_reason="rwkv_cross_validation_finish_after_replan_progress",
+                    )
+                if latest_decision == "replan":
+                    pending_replan_review = dict(latest_review)
+                    stalled_actions_after_replan = 0
+                    replan_rebuilds_without_progress = 1
+                    replan_count = state.retrieval.record_replan()
+                    replan_action = owner.planner.rebuild_session_after_review(
+                        user_query,
+                        state.to_retrieval_context(),
+                        latest_review,
+                        "REPLAN",
+                    )
+                    append_task_event(
+                        state.task_id,
+                        "planner_session_rebuilt",
+                        step=step,
+                        phase="REPLAN",
+                        reason="new_evidence_cross_validation_replan",
+                        review={
+                            key: value
+                            for key, value in latest_review.items()
+                            if key not in {"prompt", "raw_model_output"}
+                        },
+                        replan_count=replan_count,
+                        replan_action=replan_action,
+                        shared_state=state.retrieval.routing_snapshot(),
+                        decision_owner="rwkv",
+                        controller_query_generated=False,
+                    )
+                    continue
+
+    review_latest = getattr(owner, "_cross_validate_if_evidence_changed", None)
+    if callable(review_latest):
+        review_latest(
+            user_query,
+            task_plan,
+            step=max_steps,
+        )
     return owner._complete_model_tool_loop(
         user_query,
         last_action,

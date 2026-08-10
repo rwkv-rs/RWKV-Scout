@@ -1,0 +1,101 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "atomic_points": [
+          {
+            "id": "P1",
+            "objective": "Source the launch date and derive the requested calendar anniversary."
+          }
+        ],
+        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "direct_page",
+      "args": {
+        "url": "https://records.cinder-mail.invalid/launch"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "direct_page",
+      "content": {
+        "source_id": "S1",
+        "url": "https://records.cinder-mail.invalid/launch",
+        "title": "Cinder Mail launch record",
+        "authority": "official",
+        "published_at": "2032-08-26",
+        "retrieved_at": "2045-01-15T12:00:00Z",
+        "content": "Cinder Mail public service launched on 2032-08-26. No anniversary campaign is documented here."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "date_diff",
+      "args": {
+        "operation": "add_years",
+        "date": "2032-08-26",
+        "years": 1
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "date_diff",
+      "content": {
+        "result": "2033-08-26"
+      }
+    },
+    {
+      "type": "cross_validation",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ],
+            "supported_facts": [
+              {
+                "field": "calendar_anniversary_date",
+                "value": "2033-08-26",
+                "evidence_ref": "S1",
+                "quote": "public service launched on 2032-08-26"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "Cinder Mail launched on **2032-08-26** [S1]. Adding **1 calendar year** gives **2033-08-26**, its first calendar anniversary. This is a deterministic derivation; the source does not announce an anniversary event."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "final",
+      "failure_class": "derived_fact_presented_as_sourced_event",
+      "prompt": {
+        "source_date": "2032-08-26",
+        "operation": "add 1 years"
+      },
+      "rejected": {
+        "content": "The official source announces an anniversary event on 2033-08-26."
+      },
+      "chosen": {
+        "content": "Cinder Mail launched on **2032-08-26** [S1]. Adding **1 calendar year** gives **2033-08-26**, its first calendar anniversary. This is a deterministic derivation; the source does not announce an anniversary event."
+      }
+    }
+  ]
+}

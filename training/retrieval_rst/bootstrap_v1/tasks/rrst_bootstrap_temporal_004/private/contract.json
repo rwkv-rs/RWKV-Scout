@@ -1,0 +1,103 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "first_reveal_date",
+      "expected": "2037-09-19",
+      "evidence_refs": [
+        "S1"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S1",
+          "text": "first publicly revealed on 2037-09-19"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C2",
+      "point_id": "P1",
+      "field": "launch_date",
+      "expected": "2038-12-07",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "entered public live service on 2038-12-07"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C3",
+      "point_id": "P2",
+      "field": "first_anniversary_event_date",
+      "expected": "2039-12-07",
+      "evidence_refs": [
+        "S3"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S3",
+          "text": "first anniversary event for Willow Transit begins on 2039-12-07"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C4",
+      "point_id": "P3",
+      "field": "current_version",
+      "expected": "9.2",
+      "evidence_refs": [
+        "S4"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S4",
+          "text": "current live release is Willow Transit version 9.2"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C5",
+      "point_id": "P3",
+      "field": "current_theme",
+      "expected": "Last Train to Dawn",
+      "evidence_refs": [
+        "S4"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S4",
+          "text": "with theme Last Train to Dawn"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    }
+  ],
+  "forbidden_values": [
+    "first anniversary event was 2038-12-07",
+    "first reveal was 2038-12-07"
+  ],
+  "behavior": {
+    "max_tool_calls": 3
+  },
+  "reward_dimensions": [
+    "temporal_roles",
+    "field_coverage",
+    "internal_consistency",
+    "fact_binding"
+  ]
+}

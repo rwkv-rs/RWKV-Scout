@@ -1,0 +1,68 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "current_version",
+      "expected": "2.4",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "version 2.4 launched on 2035-09-18"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C2",
+      "point_id": "P1",
+      "field": "current_release_date",
+      "expected": "2035-09-18",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "version 2.4 launched on 2035-09-18"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C3",
+      "point_id": "P1",
+      "field": "current_theme",
+      "expected": "Orbit After Rain",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "The update title and theme are Orbit After Rain"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    }
+  ],
+  "forbidden_values": [
+    "1.8 is the current release"
+  ],
+  "behavior": {
+    "max_tool_calls": 2
+  },
+  "reward_dimensions": [
+    "field_coverage",
+    "freshness",
+    "fact_binding",
+    "citation_grounding"
+  ]
+}

@@ -16,8 +16,17 @@ from typing import Any
 
 FRONTEND_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = FRONTEND_DIR.parent
+BUILD_DIR = FRONTEND_DIR / "dist"
+STATIC_DIR = BUILD_DIR if BUILD_DIR.exists() else FRONTEND_DIR
 OUTPUT_DIR = PROJECT_DIR / "data" / "output"
 API_BASE_URL = os.environ.get("RWKV_ECRA_API_BASE", "http://127.0.0.1:8787")
+
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
+from app.public_access import public_frontend_request_allowed, public_mode_enabled
+
+PUBLIC_MODE = public_mode_enabled()
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
@@ -221,9 +230,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def allow_frontend_api(self, method: str, path: str) -> bool:
+        if (
+            PUBLIC_MODE
+            and path.startswith("/frontend-api/")
+            and not public_frontend_request_allowed(method, path)
+        ):
+            self.send_json(
+                {"code": 403, "message": "This endpoint is disabled in public mode."},
+                status=403,
+            )
+            return False
+        return True
+
+    def send_proxy_response(self, status: int, payload: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type or "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
+        if not self.allow_frontend_api("GET", path):
+            return
 
         if path == "/frontend-api/history":
             self.send_json({"code": 200, "data": collect_history()})
@@ -251,17 +283,25 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/frontend-api/"):
             status, payload, content_type = proxy_api(parsed.path, parsed.query, "GET", None)
-            self.send_response(status)
-            self.send_header("Content-Type", content_type or "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            if path == "/frontend-api/config" and status == 200:
+                try:
+                    config_payload = json.loads(payload.decode("utf-8"))
+                    config_payload.setdefault("data", {})["public_mode"] = bool(
+                        PUBLIC_MODE or config_payload.get("data", {}).get("public_mode")
+                    )
+                    payload = json.dumps(config_payload, ensure_ascii=False).encode("utf-8")
+                    content_type = "application/json"
+                except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                    pass
+            self.send_proxy_response(status, payload, content_type)
             return
 
         self.serve_static(path)
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if not self.allow_frontend_api("POST", parsed.path):
+            return
         if parsed.path.startswith("/frontend-api/"):
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b"{}"
@@ -280,23 +320,17 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.dumps({"code": 502, "message": f"API proxy failed: {exc}"}, ensure_ascii=False).encode("utf-8")
                 status, ctype = 502, "application/json"
 
-            self.send_response(status)
-            self.send_header("Content-Type", ctype or "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self.send_proxy_response(status, payload, ctype)
             return
         self.send_json({"code": 404, "message": "not found"}, status=404)
 
     def do_DELETE(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if not self.allow_frontend_api("DELETE", parsed.path):
+            return
         if parsed.path.startswith("/frontend-api/"):
             status, payload, content_type = proxy_api(parsed.path, parsed.query, "DELETE", None)
-            self.send_response(status)
-            self.send_header("Content-Type", content_type or "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self.send_proxy_response(status, payload, content_type)
             return
         self.send_json({"code": 404, "message": "not found"}, status=404)
 
@@ -304,13 +338,17 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("", "/"):
             path = "/index.html"
         relative = Path(urllib.parse.unquote(path.lstrip("/")))
-        target = (FRONTEND_DIR / relative).resolve()
-        if FRONTEND_DIR not in target.parents and target != FRONTEND_DIR:
+        target = (STATIC_DIR / relative).resolve()
+        if STATIC_DIR not in target.parents and target != STATIC_DIR:
             self.send_error(403)
             return
         if not target.exists() or not target.is_file():
-            self.send_error(404)
-            return
+            spa_index = BUILD_DIR / "index.html"
+            if STATIC_DIR == BUILD_DIR and spa_index.is_file():
+                target = spa_index
+            else:
+                self.send_error(404)
+                return
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         raw = target.read_bytes()
         self.send_response(200)
@@ -320,13 +358,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Serve RWKV-ECRA frontend")
+    parser = argparse.ArgumentParser(description="Serve RWKV Retrieval Agent frontend")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=5177, type=int)
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"RWKV-ECRA frontend: http://{args.host}:{args.port}")
+    print(f"RWKV Retrieval Agent frontend: http://{args.host}:{args.port}")
+    print(f"Static files: {STATIC_DIR}")
+    print(f"Public mode: {PUBLIC_MODE}")
     print(f"Project data output: {OUTPUT_DIR}")
     print(f"API proxy target: {API_BASE_URL}")
     server.serve_forever()

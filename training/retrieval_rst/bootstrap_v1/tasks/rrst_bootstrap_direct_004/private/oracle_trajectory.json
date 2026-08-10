@@ -1,0 +1,96 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "atomic_points": [
+          {
+            "id": "P1",
+            "objective": "Read the explicit page and bind both requested settings."
+          }
+        ],
+        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "direct_page",
+      "args": {
+        "url": "https://reference.pine-relay.invalid/routes/fallback"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "direct_page",
+      "content": {
+        "source_id": "S1",
+        "url": "https://reference.pine-relay.invalid/routes/fallback",
+        "title": "Pine Relay reference",
+        "authority": "official",
+        "published_at": "2044-01-14",
+        "retrieved_at": "2045-01-15T12:00:00Z",
+        "content": "Skip to content | Log in | Images | Products. match: any means requests not claimed by an earlier route. retry: 0 means failed deliveries are not retried. Related tutorials | Account | Footer navigation."
+      }
+    },
+    {
+      "type": "cross_validation",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_setting_meaning",
+                "value": "requests not claimed by an earlier route",
+                "evidence_ref": "S1",
+                "quote": "match: any means requests not claimed by an earlier route"
+              },
+              {
+                "field": "second_setting_meaning",
+                "value": "failed deliveries are not retried",
+                "evidence_ref": "S1",
+                "quote": "retry: 0 means failed deliveries are not retried"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "On the specified page, `match: any` means **requests not claimed by an earlier route**, while `retry: 0` means **failed deliveries are not retried** [S1]."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "tool_call",
+      "failure_class": "direct_url_scope_expansion",
+      "prompt": {
+        "explicit_url": "https://reference.pine-relay.invalid/routes/fallback"
+      },
+      "rejected": {
+        "tool": "web_search",
+        "args": {
+          "query": "Pine Relay setting explanation"
+        }
+      },
+      "chosen": {
+        "tool": "direct_page",
+        "args": {
+          "url": "https://reference.pine-relay.invalid/routes/fallback"
+        }
+      }
+    }
+  ]
+}

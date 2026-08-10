@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from agent.page_evidence import extract_single_page_evidence
 from agent.retrieval_loop import merge_retrieval_results
 from agent.retrieval_synthesis import _clean_answer, build_evidence_context, synthesize_retrieval_answer
+from agent.state import AgentState
 from utils.evidence_quality import clean_page_body, evidence_kind, evidence_text, has_substantive_evidence
 
 
@@ -75,6 +76,78 @@ def test_merge_discards_title_only_results_before_ranking():
     )
     assert [item["url"] for item in merged["results"]] == ["https://example.com/body"]
     assert merged["evidence_missing_count"] == 1
+
+
+def test_merge_retains_new_and_prior_selected_chunks_for_same_source():
+    source_chunks = [
+        {"chunk_id": "old", "index": 0, "text": _body("old fact")},
+        {"chunk_id": "new", "index": 1, "text": _body("new fact")},
+    ]
+    merged = merge_retrieval_results(
+        "two-part question",
+        "web_search",
+        [
+            (
+                "first point",
+                {
+                    "results": [
+                        {
+                            "url": "https://example.com/shared",
+                            "content": _body("shared page"),
+                            "source_chunks": source_chunks,
+                            "selected_source_chunks": [source_chunks[0]],
+                        }
+                    ]
+                },
+            ),
+            (
+                "missing second point",
+                {
+                    "results": [
+                        {
+                            "url": "https://example.com/shared",
+                            "content": _body("shared page"),
+                            "source_chunks": source_chunks,
+                            "selected_source_chunks": [source_chunks[1]],
+                        }
+                    ]
+                },
+            ),
+        ],
+    )
+
+    selected = merged["results"][0]["selected_source_chunks"]
+    assert [row["chunk_id"] for row in selected] == ["new", "old"]
+
+
+def test_shared_state_retains_replan_selected_chunks_for_same_source():
+    state = AgentState()
+    source_chunks = [
+        {"chunk_id": "old", "index": 0, "text": _body("old fact")},
+        {"chunk_id": "new", "index": 1, "text": _body("new fact")},
+    ]
+    for query, selected in (
+        ("first point", source_chunks[0]),
+        ("missing second point", source_chunks[1]),
+    ):
+        state.retrieval.record_query(
+            query,
+            {
+                "status": "ok",
+                "results": [
+                    {
+                        "url": "https://example.com/shared",
+                        "content": _body("shared page"),
+                        "source_chunks": source_chunks,
+                        "selected_source_chunks": [selected],
+                    }
+                ],
+            },
+            task_point_id="",
+        )
+
+    selected = state.retrieval.source_records()[0]["selected_source_chunks"]
+    assert [row["chunk_id"] for row in selected] == ["new", "old"]
 
 
 def test_model_extraction_is_not_the_final_evidence_body():

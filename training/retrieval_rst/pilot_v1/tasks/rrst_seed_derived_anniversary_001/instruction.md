@@ -1,0 +1,1 @@
+Using the frozen launch record and the date tool, calculate the first calendar anniversary of Orbit Notes. Clearly label the result as a deterministic derivation, not as an announced anniversary event.

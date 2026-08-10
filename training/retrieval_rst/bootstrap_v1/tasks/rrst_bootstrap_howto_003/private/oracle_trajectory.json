@@ -1,0 +1,125 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "atomic_points": [
+          {
+            "id": "P1",
+            "objective": "Find official launcher requirements."
+          },
+          {
+            "id": "P2",
+            "objective": "Find and correctly label LaunchPack-specific guidance."
+          }
+        ],
+        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "Birch Workspace LaunchPack start menu launcher"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S1",
+            "url": "https://docs.birch-workspace.invalid/menu-entry-spec",
+            "title": "Birch Workspace menu entry specification",
+            "authority": "official",
+            "published_at": "2043-02-10",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Birch Workspace discovers per-user launchers in ~/.local/share/applications. A launcher requires a [Desktop Entry] section containing Type, Name, and Exec."
+          },
+          {
+            "source_id": "S2",
+            "url": "https://community.birch-workspace.invalid/launchpack-menu",
+            "title": "Community guide: add LaunchPack to the menu",
+            "authority": "community",
+            "published_at": "2043-03-12",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Community procedure: make the .LaunchPack file executable, keep it at a stable absolute path, and create ~/.local/share/applications/launchpack-example.desktop. Set Exec to that absolute file path. The author did not publish a tested Birch version."
+          }
+        ]
+      }
+    },
+    {
+      "type": "cross_validation",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ],
+            "supported_facts": [
+              {
+                "field": "launcher_directory",
+                "value": "~/.local/share/applications",
+                "evidence_ref": "S1",
+                "quote": "per-user launchers in ~/.local/share/applications"
+              },
+              {
+                "field": "required_fields",
+                "value": "Type, Name, and Exec",
+                "evidence_ref": "S1",
+                "quote": "containing Type, Name, and Exec"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P2": {
+            "status": "supported",
+            "evidence_refs": [
+              "S2"
+            ],
+            "supported_facts": [
+              {
+                "field": "bundle_procedure",
+                "value": "make the .LaunchPack file executable, keep it at a stable absolute path, and create ~/.local/share/applications/launchpack-example.desktop",
+                "evidence_ref": "S2",
+                "quote": "make the .LaunchPack file executable, keep it at a stable absolute path, and create ~/.local/share/applications/launchpack-example.desktop"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "Community procedure: **make the `.LaunchPack` file executable, keep it at a stable absolute path, and create `~/.local/share/applications/launchpack-example.desktop`** [S2]. The launcher belongs under `~/.local/share/applications` and needs `Type`, `Name`, and `Exec` [S1]. The launcher requirements are official; the LaunchPack-specific procedure is community guidance and is not documented as tested on a particular Birch version [S2]."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "final",
+      "failure_class": "fabricated_source_role_and_testing",
+      "prompt": {
+        "source_roles": {
+          "S1": "official",
+          "S2": "community"
+        }
+      },
+      "rejected": {
+        "content": "The official LaunchPack guide confirms this was tested on Birch 7.2."
+      },
+      "chosen": {
+        "content": "Community procedure: **make the `.LaunchPack` file executable, keep it at a stable absolute path, and create `~/.local/share/applications/launchpack-example.desktop`** [S2]. The launcher belongs under `~/.local/share/applications` and needs `Type`, `Name`, and `Exec` [S1]. The launcher requirements are official; the LaunchPack-specific procedure is community guidance and is not documented as tested on a particular Birch version [S2]."
+      }
+    }
+  ]
+}

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import json
+import concurrent.futures
+import threading
 import unittest
 from contextlib import nullcontext
 from unittest.mock import Mock, patch
@@ -87,6 +89,74 @@ class ModelRuntimeTests(unittest.TestCase):
             self.assertNotIn(name, payload)
         self.assertIsNone(config.get_llm_seed())
 
+    def test_compat_request_carries_complete_stage_profile_without_leaking(self):
+        backend = OpenAICompatBackend()
+        backend._post = Mock(
+            return_value={"choices": [{"text": "ok", "finish_reason": "stop"}]}
+        )
+
+        profile = config.get_model_stage_sampling("final_writer")
+        with config.model_sampling_parameters(
+            profile["temperature"],
+            stage="final_writer",
+            policy_reason="anti_repetition_nocot",
+        ):
+            backend.text_completion("prompt", max_tokens=12)
+
+        payload = backend._post.call_args.args[1]
+        self.assertEqual(payload["temperature"], 0.1)
+        self.assertEqual(payload["top_k"], 50)
+        self.assertEqual(payload["top_p"], 0.3)
+        self.assertEqual(payload["presence_penalty"], 0.5)
+        self.assertEqual(payload["frequency_penalty"], 0.5)
+        self.assertEqual(payload["penalty_decay"], 0.99)
+        self.assertEqual(payload["repetition_penalty"], 1.0)
+        self.assertEqual(
+            payload["no_penalty_token_ids"],
+            [33, 10, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58],
+        )
+        self.assertEqual(config.get_llm_sampling_parameters(), {"temperature": 0.00001})
+
+    def test_concurrent_stage_profiles_are_request_isolated(self):
+        backend = OpenAICompatBackend()
+        payloads = {}
+        lock = threading.Lock()
+        barrier = threading.Barrier(2)
+
+        def post(_path, payload):
+            barrier.wait(timeout=2)
+            with lock:
+                payloads[payload["prompt"]] = dict(payload)
+            return {"choices": [{"text": "ok", "finish_reason": "stop"}]}
+
+        backend._post = post
+
+        def generate(stage):
+            profile = config.get_model_stage_sampling(stage)
+            with config.model_sampling_parameters(
+                profile["temperature"],
+                stage=stage,
+                policy_reason=f"test_{stage}",
+            ):
+                return backend.text_completion(stage, max_tokens=8).content
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(generate, ["page_evidence", "planner"]))
+
+        self.assertEqual(results, ["ok", "ok"])
+        evidence = payloads["page_evidence"]
+        planner = payloads["planner"]
+        self.assertEqual(evidence["temperature"], 0.3)
+        self.assertEqual(evidence["top_k"], 40)
+        self.assertEqual(evidence["top_p"], 0.35)
+        self.assertEqual(evidence["presence_penalty"], 0.65)
+        self.assertIn("no_penalty_token_ids", evidence)
+        self.assertEqual(config.get_model_stage_sampling("page_evidence_repair")["temperature"], 0.3)
+        self.assertEqual(planner["temperature"], 0.1)
+        self.assertEqual(planner["top_p"], 0.3)
+        self.assertEqual(planner["presence_penalty"], 0.00001)
+        self.assertNotIn("no_penalty_token_ids", planner)
+
     def test_direct_backend_preserves_every_decoded_model_character(self):
         output = "  Assistant: <think>model text</think>\nanswer  \n"
         backend = DirectRWKVBackend(
@@ -169,6 +239,11 @@ class ModelRuntimeTests(unittest.TestCase):
                 model_lane("writer"),
                 patch("clients.llm_client.get_model_backend", return_value=backend),
                 patch("clients.llm_client.record_model_event") as record,
+                config.model_sampling_parameters(
+                    0.1,
+                    stage="final_writer",
+                    policy_reason="grounded_public_answer_generation",
+                ),
             ):
                 LLMClient().text_completion(
                     "exact prompt",
@@ -186,6 +261,14 @@ class ModelRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["finish_reason"], "length")
         self.assertEqual(payload["prompt"], "exact prompt")
         self.assertEqual(payload["output"], "bounded answer")
+        self.assertEqual(payload["temperature"], 0.1)
+        self.assertEqual(payload["request_stage"], "final_writer")
+        self.assertEqual(
+            payload["sampling_policy_reason"],
+            "grounded_public_answer_generation",
+        )
+        self.assertEqual(config.get_model_request_stage(), "")
+        self.assertEqual(config.get_sampling_policy_reason(), "")
 
     def test_slm_client_routes_batch_generation_to_direct_backend(self):
         backend = Mock()

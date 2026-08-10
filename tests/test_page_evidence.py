@@ -8,12 +8,78 @@ from unittest.mock import patch
 
 from agent.page_evidence import (
     _apply_deterministic_candidate_gates,
+    _build_candidate_retry_prompt,
     _entity_status_record_candidates,
     _procedure_command_candidates,
     build_page_chunks,
     extract_single_page_evidence,
     parse_chunk_candidate,
+    select_grounded_source_chunks,
 )
+
+
+def test_candidate_retry_instruction_stays_in_user_turn():
+    prompt = "### User\nExtract one fact.\n\n### Assistant\n```json\n"
+    repaired = _build_candidate_retry_prompt(prompt)
+
+    user_turn, assistant_turn = repaired.rsplit("\n\n### Assistant\n", 1)
+    assert "supported=false" in user_turn
+    assert "no more than 6 facts" in user_turn
+    assert assistant_turn == "```json\n"
+
+
+def test_exact_query_focused_source_span_outranks_model_candidate_order():
+    chunks = [
+        {
+            "chunk_id": "intro",
+            "index": 0,
+            "text": "NetworkPolicy is a Kubernetes resource for controlling traffic.",
+        },
+        {
+            "chunk_id": "unrelated-example",
+            "index": 1,
+            "text": "This example selects frontend pods and allows traffic from monitoring.",
+        },
+        {
+            "chunk_id": "default-deny",
+            "index": 2,
+            "text": (
+                "Default deny ingress and egress policy:\n"
+                "spec:\n  podSelector: {}\n  policyTypes:\n"
+                "  - Ingress\n  - Egress"
+            ),
+        },
+    ]
+    candidates = [
+        {
+            "supported": True,
+            "chunk_id": "unrelated-example",
+            "quote": "allows traffic from monitoring",
+        },
+        {
+            "supported": True,
+            "chunk_id": "intro",
+            "quote": "controlling traffic",
+        },
+    ]
+
+    selected = select_grounded_source_chunks(
+        "Kubernetes default deny ingress and egress NetworkPolicy YAML podSelector",
+        chunks,
+        candidates,
+        max_chunks=3,
+        task_plan={
+            "answer_requirements": [
+                {"type": "procedure", "requested_fields": ["exact YAML"]}
+            ]
+        },
+        preferred_chunks=[chunks[2]],
+    )
+
+    assert selected[0]["chunk_id"] == "default-deny"
+    assert "podSelector: {}" in selected[0]["text"]
+    assert selected[0]["attention_rank"] == 1
+    assert "query_focused_source_span" in selected[0]["attention_reasons"]
 from tools.web_search_keyless import (
     _YahooResultParser,
     _looks_related,
@@ -288,6 +354,31 @@ class PageEvidenceTests(unittest.TestCase):
         self.assertEqual(candidate["grounding_basis"], "normalized_whitespace")
         self.assertIn("fetch API as experimental", evidence["compact_facts"])
         self.assertNotIn("invented adjacent fact", evidence["compact_facts"])
+
+    def test_post_gate_rejection_is_distinct_from_raw_model_negative(self):
+        evidence = extract_single_page_evidence(
+            query="Target product current release theme",
+            page={
+                "title": "Different product release notes",
+                "url": "https://example.com/different-product",
+                "page_excerpt": (
+                    "Different Product version 4.4 introduces an unrelated festival. " * 24
+                ),
+                "body_cleaned": True,
+            },
+            llm=_FixedCandidateLLM(
+                facts=["Target product version 4.4 has the unrelated festival theme."],
+                quote="Target product version 4.4 has the unrelated festival theme.",
+            ),
+            task_plan={"answer_requirements": [{"type": "latest_version"}]},
+        )
+
+        self.assertEqual(evidence["valid_contract_count"], 1)
+        self.assertEqual(evidence["negative_response_count"], 0)
+        self.assertFalse(evidence["all_selected_chunks_valid_negative"])
+        self.assertTrue(evidence["all_selected_chunks_semantically_rejected"])
+        self.assertFalse(evidence["chunk_candidates"][0]["supported"])
+        self.assertEqual(evidence["candidates"], [])
 
     def test_entity_status_history_is_located_when_model_translates_the_quote(self):
         body = (
@@ -661,6 +752,37 @@ class PageEvidenceTests(unittest.TestCase):
         self.assertEqual(selected[0]["record"], {"version": "0.141.1", "date": "2026-07-29"})
         self.assertIn("0.141.1 (2026-07-29)", evidence["compact_facts"])
         self.assertNotIn("0.142.0 (2026-08-01)", evidence["compact_facts"])
+
+    def test_latest_release_record_accepts_ordered_product_rows_and_rejects_prerelease(self):
+        page = {
+            "title": "Widget downloads",
+            "url": "https://example.org/downloads/",
+            "page_excerpt": (
+                "# Widget downloads\n"
+                "1. Widget 4.7.2 Aug. 5, 2026 Download\n"
+                "2. Widget 5.0 pre-release Oct. 1, 2026 Download\n"
+                + "Supported release details. " * 30
+            ),
+        }
+        evidence = extract_single_page_evidence(
+            query="Widget latest stable version and release date",
+            page=page,
+            llm=_NegativeLLM(),
+            task_plan={
+                "answer_requirements": [{"type": "version"}, {"type": "date"}],
+                "freshness_policy": {
+                    "as_of": None,
+                    "now": "2026-08-09T12:00:00+00:00",
+                },
+            },
+        )
+        selected = [
+            row for row in evidence["chunk_candidates"]
+            if row.get("deterministic_locator") == "latest_release_record"
+        ]
+        self.assertEqual(selected[0]["record"], {"version": "4.7.2", "date": "2026-08-05"})
+        self.assertIn("Widget 4.7.2 Aug. 5, 2026", evidence["compact_facts"])
+        self.assertNotIn("Widget 5.0 pre-release", evidence["compact_facts"])
 
     def test_explicit_version_anchor_rejects_adjacent_release_page(self):
         page = {

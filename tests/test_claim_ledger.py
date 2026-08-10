@@ -93,3 +93,91 @@ def test_quote_locator_maps_markdown_normalized_lines_to_original_span():
     assert span["grounded_segment_count"] == 4
     assert span["text"].startswith("Cargo: the Rust build tool")
     assert span["text"].endswith("`cargo --version`")
+
+
+def test_multi_claim_source_without_a_valid_point_stays_unassigned():
+    ledger = ClaimLedger()
+    ledger.initialize(_plan(), "mixed historical and current question")
+
+    delta = ledger.ingest(
+        "ambiguous result",
+        _result(),
+        task_point_id="UNKNOWN",
+    )
+
+    snapshot = ledger.snapshot()
+    assert delta["added_source_bindings"] == 0
+    assert delta["added_unassigned_sources"] == 1
+    assert [row["retrieval_state"] for row in snapshot["claims"]] == [
+        "not_retrieved",
+        "not_retrieved",
+    ]
+    assert snapshot["unassigned_source_count"] == 1
+    assert snapshot["unassigned_sources"][0]["url"] == "https://example.com/a"
+
+
+def test_single_claim_source_can_be_bound_without_an_explicit_point():
+    ledger = ClaimLedger()
+    ledger.initialize(
+        {"atomic_points": [{"id": "P1", "task": "one fact"}]},
+        "one fact",
+    )
+
+    delta = ledger.ingest("one fact", _result())
+
+    assert delta["added_source_bindings"] == 1
+    assert delta["added_unassigned_sources"] == 0
+    assert ledger.snapshot()["claims"][0]["retrieval_state"] == "retrieved"
+
+
+def test_claim_source_preserves_observable_freshness_metadata():
+    ledger = ClaimLedger()
+    ledger.initialize(
+        {"atomic_points": [{"id": "P1", "task": "current version"}]},
+        "current version",
+    )
+    result = _result("https://example.com/current")
+    result["results"][0].update(
+        {
+            "published": "2026-07-01",
+            "updated": "2026-07-20",
+            "provider": "example-provider",
+            "freshness": {"state": "within_cutoff"},
+        }
+    )
+
+    ledger.ingest("current version", result, task_point_id="P1")
+
+    source = ledger.snapshot()["claims"][0]["sources"][0]
+    assert source["published"] == "2026-07-01"
+    assert source["updated"] == "2026-07-20"
+    assert source["provider"] == "example-provider"
+    assert source["freshness"] == {"state": "within_cutoff"}
+
+
+def test_duplicate_source_merges_later_exact_grounded_span():
+    ledger = ClaimLedger()
+    ledger.initialize(
+        {"atomic_points": [{"id": "P1", "task": "current release"}]},
+        "current release",
+    )
+    ledger.ingest("discovery", _result(), task_point_id="P1", step=1)
+
+    improved = _result()
+    improved["results"][0]["chunk_candidates"] = [
+        {
+            "chunk_id": "chunk-1",
+            "chunk_index": 0,
+            "supported": True,
+            "source_grounded": True,
+            "quote": "Original fetched source text.",
+            "source_locator": {"char_start": 0, "char_end": 29},
+            "grounding_basis": "exact",
+        }
+    ]
+    ledger.ingest("focused follow-up", improved, task_point_id="P1", step=2)
+
+    source = ledger.snapshot()["claims"][0]["sources"][0]
+    assert len(source["grounded_spans"]) == 1
+    assert source["grounded_spans"][0]["text"] == "Original fetched source text."
+    assert source["grounded_spans"][0]["grounding_basis"] == "exact"

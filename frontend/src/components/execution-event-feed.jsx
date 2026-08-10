@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -32,6 +32,8 @@ const EVENT_DEFS = {
   run_started: { label: "任务启动", group: "输入", icon: Activity, tone: "neutral" },
   task_plan: { label: "任务计划", group: "规划", icon: Route, tone: "plan" },
   task_replan: { label: "重新拆分计划", group: "规划", icon: GitBranch, tone: "plan" },
+  planner_session_rebuilt: { label: "RWKV Replan 会话重建", group: "规划", icon: GitBranch, tone: "plan" },
+  model_call: { label: "RWKV 模型调用", group: "模型决策", icon: Bot, tone: "model" },
   model_tool_decision: { label: "RWKV 工具决策", group: "模型决策", icon: Bot, tone: "model" },
   query_candidates: { label: "检索查询候选", group: "检索", icon: Search, tone: "search" },
   tool_call: { label: "工具调用", group: "检索", icon: Wrench, tone: "search" },
@@ -49,16 +51,25 @@ const EVENT_DEFS = {
   synthesis: { label: "RWKV 总结输出", group: "总结", icon: Bot, tone: "model" },
   completion_judgement: { label: "完成性判断", group: "判断", icon: CheckCircle2, tone: "judge" },
   completion_pending: { label: "证据仍不完整", group: "判断", icon: CircleDot, tone: "warning" },
+  cross_validation: { label: "RWKV 交叉验证", group: "判断", icon: ScanSearch, tone: "judge" },
   citation_validation: { label: "引用校验", group: "判断", icon: FileSearch, tone: "judge" },
   risk_validation: { label: "风险校验", group: "判断", icon: CheckCircle2, tone: "judge" },
   provider_error: { label: "提供方错误", group: "错误", icon: AlertTriangle, tone: "error" },
+  network_error: { label: "网络/模型服务错误", group: "错误", icon: AlertTriangle, tone: "error" },
   error: { label: "执行错误", group: "错误", icon: AlertTriangle, tone: "error" },
   final: { label: "最终结果", group: "结束", icon: CheckCircle2, tone: "final" },
 };
 
 const GROUPS = ["全部", "输入", "规划", "模型决策", "检索", "网页", "聚合", "总结", "判断", "错误", "结束"];
 
+function isNetworkErrorEvent(event) {
+  return event?.type === "network_error"
+    || event?.status === "network_error"
+    || event?.error_class === "network_error";
+}
+
 function definitionFor(event) {
+  if (isNetworkErrorEvent(event)) return EVENT_DEFS.network_error;
   return EVENT_DEFS[event?.type] || { label: event?.type || "未知事件", group: "其他", icon: Activity, tone: "neutral" };
 }
 
@@ -156,6 +167,163 @@ function PlanView({ plan }) {
   );
 }
 
+function TaskPointStatusView({ taskPointStatus }) {
+  if (!taskPointStatus || typeof taskPointStatus !== "object") return null;
+  const entries = Object.entries(taskPointStatus).filter(([, value]) => value && typeof value === "object");
+  if (!entries.length) return null;
+
+  return (
+    <div className="trace-points">
+      {entries.map(([pointId, point]) => {
+        const facts = Array.isArray(point.supported_facts) ? point.supported_facts : [];
+        const evidenceUrls = Array.isArray(point.evidence_urls) ? point.evidence_urls : [];
+        const missingFields = Array.isArray(point.missing_fields) ? point.missing_fields : [];
+        return (
+          <div className="trace-point" key={pointId}>
+            <div className="trace-point-head">
+              <span className="trace-point-id">{pointId}</span>
+              <StatusPill value={point.status || "unknown"} />
+            </div>
+            {facts.length ? (
+              <div className="trace-result-list">
+                {facts.map((fact, index) => (
+                  <div className="trace-result-row" key={`${pointId}-fact-${index}`}>
+                    <span className="trace-result-index">{index + 1}</span>
+                    <div className="min-w-0">
+                      <strong>{fact.field ? `${fact.field}: ` : ""}{fact.value || "已支持"}</strong>
+                      {fact.evidence_url ? (
+                        <a href={fact.evidence_url} target="_blank" rel="noreferrer">{fact.evidence_url}</a>
+                      ) : null}
+                      {fact.quote ? <p>引用：{fact.quote}</p> : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {evidenceUrls.length ? (
+              <div className="trace-chip-row">
+                {evidenceUrls.map((url, index) => (
+                  <a className="trace-chip" href={url} target="_blank" rel="noreferrer" key={`${url}-${index}`}>
+                    证据 {index + 1}
+                  </a>
+                ))}
+              </div>
+            ) : null}
+            {missingFields.length ? (
+              <div className="trace-alert">缺失字段：{missingFields.join("；")}</div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ModelCallView({ event }) {
+  const networkError = isNetworkErrorEvent(event);
+  const input = event.prompt || event.input_messages;
+  const totalTokens = Number(event.prompt_tokens || 0) + Number(event.completion_tokens || 0);
+  return (
+    <div className="trace-detail-stack">
+      {networkError ? (
+        <div className="trace-alert">
+          网络或模型服务没有正常返回；这是服务连接/调用错误，不是答案质量判定。
+          {event.error ? `\n${event.error}` : ""}
+        </div>
+      ) : null}
+      <div className="trace-fields">
+        <Field label="请求阶段" value={event.request_stage || event.operation} />
+        <Field label="调用类型" value={event.operation} mono />
+        <Field label="状态" value={<StatusPill value={event.status} />} />
+        <Field label="模型通道" value={event.model_lane} mono />
+        <Field label="Provider" value={event.provider} mono />
+        <Field label="模型" value={event.model} mono />
+        <Field label="Temperature" value={event.temperature} mono />
+        <Field label="Seed" value={event.seed ?? "未设置"} mono />
+        <Field label="输入 Token" value={event.prompt_tokens} mono />
+        <Field label="输出 Token" value={event.completion_tokens} mono />
+        <Field label="总 Token" value={totalTokens || undefined} mono />
+        <Field label="最大输出 Token" value={event.request_max_tokens} mono />
+        <Field label="Finish reason" value={event.finish_reason} mono />
+        <Field label="耗时" value={event.duration_ms ? `${event.duration_ms} ms` : undefined} mono />
+      </div>
+      {jsonBlock("Sampling 参数", event.sampling_parameters, { open: true })}
+      {jsonBlock("停止序列", event.stop)}
+      {jsonBlock("RWKV 输入", input, { open: true, className: "trace-long-text" })}
+      {jsonBlock("RWKV 可见输出", event.output, { open: true, className: "trace-long-text" })}
+      {jsonBlock("模型调用完整 JSON", event)}
+    </div>
+  );
+}
+
+function CrossValidationView({ event }) {
+  return (
+    <div className="trace-detail-stack">
+      <div className="trace-fields">
+        <Field label="Decision" value={<StatusPill value={event.decision} />} />
+        <Field label="Missing points" value={event.missing_points} mono />
+        <Field label="Conflicts" value={event.conflicts} wide />
+        <Field label="下一轮关注" value={event.next_focus} wide />
+        <Field label="判断原因" value={event.reason} wide />
+        <Field label="Cross-validation temperature" value={event.sampling_temperature} mono />
+        <Field label="Seed" value={event.sampling_seed ?? "未设置"} mono />
+        <Field label="证据版本" value={event.evidence_revision} mono />
+      </div>
+      <TaskPointStatusView taskPointStatus={event.task_point_status} />
+      {jsonBlock("交叉验证引用的证据与 Claim Ledger", event.claim_ledger)}
+      {jsonBlock("交叉验证 RWKV 输入", event.prompt, { className: "trace-long-text" })}
+      {jsonBlock("交叉验证上下文", event.context_text, { className: "trace-long-text" })}
+      {jsonBlock("RWKV 交叉验证可见输出", event.raw_model_output, { open: true })}
+      {jsonBlock("上下文统计", event.context_stats)}
+    </div>
+  );
+}
+
+function PlannerSessionRebuiltView({ event }) {
+  const review = event.review || {};
+  const replanAction = event.replan_action || {};
+  const missingFields = Object.entries(review.task_point_status || {}).flatMap(([pointId, point]) =>
+    (point?.missing_fields || []).map((field) => `${pointId}: ${field}`),
+  );
+  return (
+    <div className="trace-detail-stack">
+      <div className="trace-fields">
+        <Field label="为什么 Replan" value={event.reason || review.reason || review.next_focus} wide />
+        <Field label="上一轮缺失任务点" value={review.missing_points} mono />
+        <Field label="上一轮缺失内容" value={missingFields} wide />
+        <Field label="上一轮冲突" value={review.conflicts} wide />
+        <Field label="Replan 次数" value={event.replan_count} mono />
+        <Field label="RWKV 新动作" value={replanAction.action} mono />
+        <Field label="新动作任务点" value={replanAction.task_point_id} mono />
+        <Field label="Replan temperature" value={replanAction.sampling_temperature} mono />
+        <Field label="Seed" value={replanAction.sampling_seed ?? "未设置"} mono />
+      </div>
+      {jsonBlock("RWKV 新动作", replanAction, { open: true })}
+      {jsonBlock("上一轮 Cross-validation", review, { open: true })}
+      {jsonBlock("重建后的共享检索状态", event.shared_state)}
+    </div>
+  );
+}
+
+function NetworkErrorView({ event }) {
+  const message = event.error || event.message || "模型或检索网络没有返回结果。";
+  return (
+    <div className="trace-detail-stack">
+      <div className="trace-alert">
+        网络/模型服务错误：{message}\n这表示服务连接或调用失败，不代表答案质量校验失败。
+      </div>
+      <div className="trace-fields">
+        <Field label="错误类型" value={event.error_class || event.status || event.type} mono />
+        <Field label="请求阶段" value={event.request_stage || event.phase} />
+        <Field label="调用类型" value={event.operation} mono />
+        <Field label="Provider" value={event.provider} mono />
+        <Field label="模型" value={event.model} mono />
+      </div>
+      {jsonBlock("错误事件完整 JSON", event, { open: true })}
+    </div>
+  );
+}
+
 function ToolResultView({ event }) {
   const result = parseMaybeJson(event.result);
   const rows = Array.isArray(result?.results) ? result.results : [];
@@ -197,6 +365,10 @@ function EventDetail({ event }) {
   const candidate = event.candidate || {};
   const pageData = type === "page_candidate_merge" ? data : null;
 
+  if (type === "model_call") return <ModelCallView event={event} />;
+  if (type === "cross_validation") return <CrossValidationView event={event} />;
+  if (type === "planner_session_rebuilt") return <PlannerSessionRebuiltView event={event} />;
+  if (isNetworkErrorEvent(event)) return <NetworkErrorView event={event} />;
   if (type === "task_plan" || type === "task_replan") return <PlanView plan={data} />;
 
   if (type === "model_tool_decision") {
@@ -511,6 +683,18 @@ function EventDetail({ event }) {
 
 function summaryFor(event) {
   const result = parseMaybeJson(event.result);
+  if (isNetworkErrorEvent(event)) {
+    return `网络/模型服务错误 · ${event.error || event.message || event.operation || "调用未返回"}`;
+  }
+  if (event.type === "model_call") {
+    return `${event.request_stage || event.operation || "模型请求"} · ${event.status || "unknown"} · ${event.prompt_tokens || 0}→${event.completion_tokens || 0} tokens · T=${event.temperature ?? "—"}`;
+  }
+  if (event.type === "cross_validation") {
+    return `${event.decision || "unknown"} · missing ${(event.missing_points || []).join(", ") || "none"} · conflicts ${(event.conflicts || []).length || 0} · T=${event.sampling_temperature ?? "—"}`;
+  }
+  if (event.type === "planner_session_rebuilt") {
+    return `${event.reason || event.review?.reason || "RWKV requested replan"} · ${event.replan_action?.action || "等待新动作"} · T=${event.replan_action?.sampling_temperature ?? "—"}`;
+  }
   if (event.type === "evidence_verification") {
     return `${event.status || "unknown"} · ${event.completion_ready ? "ready" : "incomplete"} · missing ${(event.missing_point_ids || []).join(", ") || "none"} · replans ${event.requires_replan ? "yes" : "no"}`;
   }
@@ -534,7 +718,7 @@ function summaryFor(event) {
 }
 
 function isImportant(event) {
-  return ["task_plan", "task_replan", "model_tool_decision", "page_candidate_merge", "context_build", "evidence_validation", "evidence_verification", "synthesis", "completion_judgement", "final"].includes(event.type);
+  return isNetworkErrorEvent(event) || ["task_plan", "task_replan", "model_call", "model_tool_decision", "planner_session_rebuilt", "page_candidate_merge", "context_build", "cross_validation", "evidence_validation", "evidence_verification", "synthesis", "completion_judgement", "final"].includes(event.type);
 }
 
 function Metric({ label, value, tone = "neutral" }) {
@@ -550,6 +734,20 @@ export default function ExecutionEventFeed({ events = [], finalAnswer = "", show
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("全部");
   const [expanded, setExpanded] = useState(() => new Set(events.filter(isImportant).map((event) => event.seq)));
+  const seenEventSeqs = useRef(new Set(events.map((event) => event.seq)));
+
+  useEffect(() => {
+    const newlyImportant = events.filter(
+      (event) => !seenEventSeqs.current.has(event.seq) && isImportant(event),
+    );
+    events.forEach((event) => seenEventSeqs.current.add(event.seq));
+    if (!newlyImportant.length) return;
+    setExpanded((current) => {
+      const next = new Set(current);
+      newlyImportant.forEach((event) => next.add(event.seq));
+      return next;
+    });
+  }, [events]);
 
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -569,7 +767,7 @@ export default function ExecutionEventFeed({ events = [], finalAnswer = "", show
       if (event.type === "page_chunk_candidate") result.candidates += 1;
       if (event.type === "context_build") result.contexts += 1;
       if (event.type === "completion_judgement") result.judgements += 1;
-      if (event.type === "error" || event.type === "provider_error") result.errors += 1;
+      if (event.type === "error" || event.type === "provider_error" || isNetworkErrorEvent(event)) result.errors += 1;
     });
     return result;
   }, [events]);

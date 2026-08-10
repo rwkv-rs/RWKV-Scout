@@ -1,0 +1,161 @@
+{
+  "schema_version": "rwkv-retrieval-rst-operators.v1",
+  "operators": [
+    {
+      "family": "task_and_time_decomposition",
+      "operator": "add_temporal_role_separation",
+      "teaches": [
+        "historical_vs_current",
+        "field_complete_planning"
+      ],
+      "extension": "Add distinct reveal, launch, anniversary, and current-version fields.",
+      "shortcut_rejection": [
+        "do not substitute launch for reveal",
+        "do not label a derived date as quoted"
+      ]
+    },
+    {
+      "family": "task_and_time_decomposition",
+      "operator": "add_deterministic_date_derivation",
+      "teaches": [
+        "sourced_fact_vs_derivation",
+        "date_calculator_use"
+      ],
+      "extension": "Require one date computed from a sourced date and label the derivation.",
+      "shortcut_rejection": [
+        "reject unsourced arithmetic",
+        "reject contradictory date labels"
+      ]
+    },
+    {
+      "family": "retrieval_and_source_choice",
+      "operator": "add_stale_conflicting_source",
+      "teaches": [
+        "freshness",
+        "authority",
+        "conflict_resolution"
+      ],
+      "extension": "Add an older plausible page that conflicts with a newer authoritative source.",
+      "shortcut_rejection": [
+        "reject newest-looking snippet without timestamp comparison"
+      ]
+    },
+    {
+      "family": "retrieval_and_source_choice",
+      "operator": "add_missing_official_source",
+      "teaches": [
+        "source_role_calibration",
+        "practical_stop_condition"
+      ],
+      "extension": "Remove the presumed official guide while retaining a well-supported community procedure.",
+      "shortcut_rejection": [
+        "do not call community guidance official",
+        "do not claim hands-on verification"
+      ]
+    },
+    {
+      "family": "retrieval_and_source_choice",
+      "operator": "add_direct_url_scope",
+      "teaches": [
+        "direct_page",
+        "bounded_tool_use"
+      ],
+      "extension": "Give one explicit page and require an answer from that page only.",
+      "shortcut_rejection": [
+        "reject open-web expansion",
+        "reject uncited external details"
+      ]
+    },
+    {
+      "family": "evidence_and_context",
+      "operator": "add_navigation_noise",
+      "teaches": [
+        "page_cleaning",
+        "exact_span_selection"
+      ],
+      "extension": "Surround a short answer-bearing span with menus, login text, and unrelated sections.",
+      "shortcut_rejection": [
+        "reject navigation text as evidence"
+      ]
+    },
+    {
+      "family": "evidence_and_context",
+      "operator": "add_context_budget_pressure",
+      "teaches": [
+        "claim_scoped_context",
+        "answer_ready_fact_binding"
+      ],
+      "extension": "Add many relevant-looking chunks while keeping one exact answer span per field.",
+      "shortcut_rejection": [
+        "reject omission of required fields",
+        "reject stale duplicate spans"
+      ]
+    },
+    {
+      "family": "protocol_and_recovery",
+      "operator": "add_cross_validation_protocol_repair",
+      "teaches": [
+        "strict_json",
+        "same_temperature_repair",
+        "supported_facts"
+      ],
+      "extension": "Include one masked malformed attempt and one valid corrected cross-validation object.",
+      "shortcut_rejection": [
+        "never train loss on malformed attempt",
+        "reject empty supported_facts"
+      ]
+    },
+    {
+      "family": "protocol_and_recovery",
+      "operator": "add_strategy_changing_replan",
+      "teaches": [
+        "replan",
+        "avoid_duplicate_query",
+        "missing_field_focus"
+      ],
+      "extension": "Make the first retrieval insufficient and require a changed source strategy.",
+      "shortcut_rejection": [
+        "reject repeated equivalent query",
+        "reject controller-authored answer"
+      ]
+    },
+    {
+      "family": "answer_grounding",
+      "operator": "add_source_role_trap",
+      "teaches": [
+        "official_vs_community",
+        "no_fake_testing_claim"
+      ],
+      "extension": "Add a useful community page whose wording tempts the writer to call it official or tested.",
+      "shortcut_rejection": [
+        "reject unsupported source labels",
+        "reject fabricated environment versions"
+      ]
+    },
+    {
+      "family": "answer_grounding",
+      "operator": "add_internal_consistency_check",
+      "teaches": [
+        "single_value_per_field",
+        "final_answer_consistency"
+      ],
+      "extension": "Require the same date/version value in heading, prose, and summary.",
+      "shortcut_rejection": [
+        "reject mutually inconsistent values"
+      ]
+    },
+    {
+      "family": "answer_grounding",
+      "operator": "add_partial_evidence_answer",
+      "teaches": [
+        "answer_supported_part",
+        "calibrated_uncertainty"
+      ],
+      "extension": "Support some requested fields and leave another genuinely unavailable.",
+      "shortcut_rejection": [
+        "reject fabricated missing field",
+        "reject empty blanket refusal"
+      ]
+    }
+  ]
+}

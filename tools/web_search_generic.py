@@ -35,6 +35,7 @@ from utils.evidence_quality import (
 from utils.concurrency import shutdown_pool, submit_with_context, task_wait_timeout
 from utils.source_authority import (
     annotate_source,
+    explicit_domains,
     infer_candidate_authority_domains,
     required_domains_for_task_point,
     resolve_source_policy,
@@ -596,6 +597,135 @@ def _fetch_candidate(candidate: dict[str, Any], task_id: str) -> dict[str, Any]:
     return result
 
 
+def _has_usable_fetched_page(result: dict[str, Any]) -> bool:
+    pages = [item for item in result.get("results") or [] if isinstance(item, dict)]
+    if len(pages) != 1:
+        return False
+    page = pages[0]
+    text = str(page.get("page_excerpt") or page.get("content") or "").strip()
+    quality = page.get("body_quality") if isinstance(page.get("body_quality"), dict) else {}
+    return bool(text and (page.get("body_verified") or quality.get("body_eligible")))
+
+
+def _resolve_failed_page_fetches(
+    query: str,
+    fetched: list[tuple[dict[str, Any], dict[str, Any]]],
+    task_id: str,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Try optional extractors for exact URLs whose primary fetch had no body.
+
+    The boundary is capability-based rather than provider-based. A deployment
+    with no extractor plugin keeps the primary fetch result unchanged, and a
+    failed plugin never turns a retrieval miss into an engineering failure.
+    """
+
+    try:
+        fallback_limit = max(
+            1,
+            min(
+                int(DATA_PIPELINE.get("web_page_content_fallback_max_urls", 4) or 4),
+                20,
+            ),
+        )
+    except (TypeError, ValueError):
+        fallback_limit = 4
+
+    unresolved = [
+        index
+        for index, (_, result) in enumerate(fetched)
+        if not _has_usable_fetched_page(result)
+    ][:fallback_limit]
+    adapters = ToolRegistry.capability_names("page_content_extract", phase="ALL")
+    if not unresolved or not adapters:
+        return fetched
+
+    resolved = list(fetched)
+    attempts: list[dict[str, Any]] = []
+    remaining = set(unresolved)
+    for adapter in adapters:
+        requested_urls = [
+            str(resolved[index][0].get("url") or "").strip()
+            for index in sorted(remaining)
+            if str(resolved[index][0].get("url") or "").strip()
+        ]
+        if not requested_urls:
+            break
+        payload = _parse_result(
+            ToolRegistry.execute(
+                adapter,
+                {"urls": requested_urls, "query": query},
+                {"task_id": task_id},
+                phase="ALL",
+            )
+        )
+        pages_by_url = {
+            normalize_url(str(page.get("url") or "")): page
+            for page in payload.get("results") or []
+            if isinstance(page, dict)
+            and normalize_url(str(page.get("url") or ""))
+            and _has_usable_fetched_page({"results": [page]})
+        }
+        recovered: list[str] = []
+        for index in sorted(remaining):
+            candidate, primary_result = resolved[index]
+            normalized = normalize_url(str(candidate.get("url") or ""))
+            page = pages_by_url.get(normalized)
+            if page is None:
+                continue
+            page = dict(page)
+            page.setdefault("content_resolver", str(payload.get("provider") or adapter))
+            page.setdefault("content_transport", "provider_extract")
+            resolved[index] = (
+                candidate,
+                {
+                    "status": "ok",
+                    "real_network": True,
+                    "provider": str(payload.get("provider") or adapter),
+                    "query": str(candidate.get("url") or ""),
+                    "results": [page],
+                    "sources": [str(page.get("url") or candidate.get("url") or "")],
+                    "primary_fetch": {
+                        "status": str(primary_result.get("status") or "error"),
+                        "message": str(primary_result.get("message") or "")[:500],
+                    },
+                    "content_resolver": adapter,
+                },
+            )
+            remaining.discard(index)
+            recovered.append(str(candidate.get("url") or ""))
+        attempts.append(
+            {
+                "adapter": adapter,
+                "status": str(payload.get("status") or "error"),
+                "requested_count": len(requested_urls),
+                "recovered_count": len(recovered),
+                "provider_errors": [
+                    str(value)[:500] for value in payload.get("provider_errors") or []
+                ],
+            }
+        )
+        if not remaining:
+            break
+
+    for index in sorted(remaining):
+        candidate, result = resolved[index]
+        result = dict(result)
+        result["content_resolver_attempts"] = attempts
+        resolved[index] = (candidate, result)
+    append_task_event(
+        task_id,
+        "web_search_stage",
+        phase="EXTRACTION",
+        action="web_search",
+        stage="page_content_resolution",
+        query=query,
+        unresolved_count=len(unresolved),
+        recovered_count=len(unresolved) - len(remaining),
+        attempts=attempts,
+    )
+    return resolved
+
+
 def _claim_evidence_focus(
     query: str,
     task_plan: dict[str, Any] | None,
@@ -857,6 +987,7 @@ def _compact_page(
                 if isinstance(item, dict)
             ],
             max_chunks=int(DATA_PIPELINE.get("web_fallback_chunks_per_source", 3) or 3),
+            task_plan=task_plan,
         )
     source_excerpt = "\n\n".join(
         str(item.get("text") or "").strip()
@@ -880,6 +1011,8 @@ def _compact_page(
     page_evidence = {
         "url": url,
         "title": str(page.get("title") or candidate.get("title") or url),
+        "content_resolver": str(page.get("content_resolver") or "direct_http"),
+        "content_transport": str(page.get("content_transport") or "direct_fetch"),
         "status": str(evidence.get("status") or "no_evidence"),
         "error_class": str(evidence.get("error_class") or ""),
         "source_body_available": bool(source_excerpt),
@@ -896,6 +1029,9 @@ def _compact_page(
         "negative_response_count": int(evidence.get("negative_response_count") or 0),
         "all_chunks_valid_negative": bool(evidence.get("all_chunks_valid_negative")),
         "all_selected_chunks_valid_negative": bool(evidence.get("all_selected_chunks_valid_negative")),
+        "all_selected_chunks_semantically_rejected": bool(
+            evidence.get("all_selected_chunks_semantically_rejected")
+        ),
         "extraction_degraded": bool(evidence.get("extraction_degraded")),
         "unresolved_chunk_indexes": [
             int(value)
@@ -912,13 +1048,21 @@ def _compact_page(
         "model_chunks": evidence.get("model_chunks") or [],
         "errors": evidence.get("errors") or [],
     }
-    if page_evidence["all_chunks_valid_negative"]:
+    if (
+        page_evidence["all_chunks_valid_negative"]
+        or page_evidence["all_selected_chunks_valid_negative"]
+        or page_evidence["all_selected_chunks_semantically_rejected"]
+    ):
         # The locator has made a valid semantic decision that every inspected
         # chunk lacks the requested fact.  Retaining a lexical fallback here
-        # lets the final writer infer an answer from adjacent notices, which is
-        # exactly how unrelated CISA entries were previously conflated.
+        # lets the final writer infer an answer from unrelated adjacent notices.
         page_evidence["source_body_available"] = bool(source_excerpt)
-        page_evidence["model_extraction_status"] = "negative"
+        page_evidence["model_extraction_status"] = (
+            "semantically_rejected"
+            if page_evidence["all_selected_chunks_semantically_rejected"]
+            and not page_evidence["all_selected_chunks_valid_negative"]
+            else "negative"
+        )
         page_evidence["deterministic_chunk_fallback"] = False
         page_evidence["evidence_origin"] = "rejected_fetched_page_body"
         return None, page_evidence
@@ -960,6 +1104,8 @@ def _compact_page(
             "char_start": 0,
             "char_end": len(source_excerpt[:14000]),
         },
+        "content_resolver": page_evidence["content_resolver"],
+        "content_transport": page_evidence["content_transport"],
         "evidence_status": page_evidence["status"],
         "chunk_count": page_evidence["chunk_count"],
         "inspected_chunk_count": page_evidence["inspected_chunk_count"],
@@ -1093,12 +1239,45 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         task_point_id,
         fallback_query=query,
     )
-    if scoped_domains:
-        effective_task_plan["required_domains"] = scoped_domains
+    # A hostname invented by the task-plan model is useful as a discovery
+    # hypothesis, but it must not become a hard admission gate.  Only a domain
+    # explicitly present in the user's goal is mandatory before retrieval;
+    # otherwise the generic providers and official-site adapter verify or
+    # replace the hypothesis from observable web results.
+    explicit_goal_domains = explicit_domains(original_goal)
+    model_domain_hypotheses = list(scoped_domains)
+    explicit_scoped_domains = [
+        domain
+        for domain in scoped_domains
+        if any(
+            domain == explicit
+            or domain.endswith("." + explicit)
+            or explicit.endswith("." + domain)
+            for explicit in explicit_goal_domains
+        )
+    ]
+    if explicit_scoped_domains:
+        effective_task_plan["required_domains"] = explicit_scoped_domains
+    elif scoped_domains:
+        effective_task_plan["required_domains"] = []
+        effective_task_plan["preferred_domains"] = model_domain_hypotheses
+        effective_task_plan["source_resolution"] = {
+            "domain_source": "model_hypothesis_unverified",
+            "required_domains": [],
+            "preferred_domains": model_domain_hypotheses,
+        }
     active_answer_requirements = _claim_answer_requirements(task_plan, task_point_id)
     if task_point_id:
         effective_task_plan["answer_requirements"] = active_answer_requirements
-    freshness_policy = build_freshness_policy(kwargs.get("original_goal") or query, task_plan)
+    freshness_policy = build_freshness_policy(
+        kwargs.get("original_goal") or query,
+        effective_task_plan,
+    )
+    # Evidence locators need the same observable time boundary that is stored
+    # in the retrieval result.  This prevents a future, explicitly labelled
+    # prerelease row from being selected as the current release while keeping
+    # the fetched source body intact for RWKV.
+    effective_task_plan["freshness_policy"] = freshness_policy
     source_policy = resolve_source_policy(query, {"task_plan": effective_task_plan})
     if not query:
         return json.dumps({"status": "error", "message": "query is empty", "results": []}, ensure_ascii=False)
@@ -1169,6 +1348,16 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             constraint_query=constraint_query,
         )
 
+    def run_model_domain_hypothesis() -> dict[str, Any]:
+        return discover_official_urls(
+            query,
+            model_domain_hypotheses,
+            answer_requirements=active_answer_requirements,
+            max_results=max_candidates,
+            prefer_recent=str(effective_task_plan.get("task_mode") or "").casefold() == "latest_list",
+            constraint_query=constraint_query,
+        )
+
     direct_url = _extract_direct_url(query) or _extract_single_goal_url(kwargs.get("original_goal"))
     if direct_url:
         provider_results: list[dict[str, Any]] = []
@@ -1184,6 +1373,8 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         provider_jobs = (
             [run_official_site, run_keyless, run_tavily]
             if source_policy.get("required") and source_policy.get("required_domains")
+            else [run_model_domain_hypothesis, run_keyless, run_tavily]
+            if model_domain_hypotheses
             else [run_keyless, run_tavily]
         )
         provider_results: list[dict[str, Any]] = [
@@ -1662,6 +1853,11 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         shutdown_pool(pool, list(future_map), cancelled=cancelled)
 
     fetched.sort(key=lambda item: int(item[0].get("candidate_rank") or 10**6))
+    fetched = _resolve_failed_page_fetches(
+        _claim_evidence_focus(query, effective_task_plan, task_point_id),
+        fetched,
+        task_id,
+    )
     # Page extraction is independent once fetches have completed. Run pages
     # concurrently, while page_evidence.py applies the separate global model
     # request gate to every chunk call.

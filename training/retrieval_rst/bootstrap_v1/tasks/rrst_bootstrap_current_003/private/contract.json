@@ -1,0 +1,68 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "current_version",
+      "expected": "2.6",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "version 2.6 launched on 2042-09-27"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C2",
+      "point_id": "P1",
+      "field": "current_release_date",
+      "expected": "2042-09-27",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "version 2.6 launched on 2042-09-27"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C3",
+      "point_id": "P1",
+      "field": "current_theme",
+      "expected": "Lanterns Below",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "release title and theme are Lanterns Below"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    }
+  ],
+  "forbidden_values": [
+    "version 2.1 is current"
+  ],
+  "behavior": {
+    "max_tool_calls": 2
+  },
+  "reward_dimensions": [
+    "field_coverage",
+    "freshness",
+    "fact_binding",
+    "citation_grounding"
+  ]
+}

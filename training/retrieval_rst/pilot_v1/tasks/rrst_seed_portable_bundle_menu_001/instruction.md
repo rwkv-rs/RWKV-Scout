@@ -1,0 +1,1 @@
+How should a Nova Desktop user add a PortableBundle application to the start menu? Use the frozen sources, give the minimal launcher procedure, and accurately distinguish the official menu-entry specification from community PortableBundle guidance.

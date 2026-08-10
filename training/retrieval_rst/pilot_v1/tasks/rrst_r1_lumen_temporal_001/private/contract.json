@@ -1,0 +1,87 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "first_reveal_date",
+      "expected": "2032-02-03",
+      "evidence_refs": [
+        "S1"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S1",
+          "text": "first publicly revealed on 2032-02-03"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C2",
+      "point_id": "P2",
+      "field": "first_anniversary_date",
+      "expected": "2034-06-12",
+      "evidence_refs": [
+        "S3"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S3",
+          "text": "first anniversary celebration begins on 2034-06-12"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C3",
+      "point_id": "P3",
+      "field": "current_version",
+      "expected": "2.4",
+      "evidence_refs": [
+        "S5"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S5",
+          "text": "version 2.4 launched on 2035-09-18"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C4",
+      "point_id": "P3",
+      "field": "current_theme",
+      "expected": "Orbit After Rain",
+      "evidence_refs": [
+        "S5"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S5",
+          "text": "The current theme is Orbit After Rain"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    }
+  ],
+  "forbidden_values": [
+    "version 1.8 is current",
+    "first anniversary was 2033-06-12"
+  ],
+  "behavior": {
+    "max_tool_calls": 3
+  },
+  "reward_dimensions": [
+    "temporal_roles",
+    "freshness",
+    "conflict_resolution",
+    "internal_consistency",
+    "fact_binding"
+  ]
+}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import config
 
 from app.models import AnalyzeRequest
@@ -12,6 +14,46 @@ from utils.task_events import append_task_event, get_task_events
 from utils.task_manager import is_task_stopped, record_task
 from utils.time_budget import task_time_budget
 from utils.token_tracker import current_task_id
+
+
+def _first_configured(*values: object) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def resolve_model_connection(request: AnalyzeRequest, profile: dict | None = None) -> dict[str, str]:
+    """Resolve request-local model settings without exposing credentials."""
+
+    selected_provider = _first_configured(
+        request.llm_provider,
+        request.model_key,
+        config.DEFAULT_LLM_PROVIDER,
+    )
+    selected_profile = profile or {}
+    configured_profile = config.LLM_ENDPOINTS.get(selected_provider, {})
+    if not isinstance(configured_profile, dict):
+        configured_profile = {}
+
+    base_url = _first_configured(
+        request.llm_base_url,
+        os.environ.get("RWKV_ECRA_LLM_BASE_URL"),
+        selected_profile.get("base_url"),
+        configured_profile.get("base_url"),
+    )
+    api_key = _first_configured(
+        request.llm_api_key,
+        os.environ.get("RWKV_ECRA_LLM_API_KEY"),
+        selected_profile.get("api_key"),
+        config.API_KEYS.get(selected_provider),
+    )
+    return {
+        "provider": selected_provider,
+        "base_url": base_url,
+        "api_key": api_key,
+    }
 
 
 def run_background_analysis(
@@ -26,23 +68,26 @@ def run_background_analysis(
         if value is not None:
             context_tokens.append((context, context.set(value)))
 
-    override(config.override_llm_key, request.llm_api_key)
-    override(config.override_llm_url, request.llm_base_url)
-    override(config.override_llm_provider, request.llm_provider)
-    override(config.override_slm_endpoint, request.slm_endpoint)
-    override(config.override_slm_password, request.slm_password)
-    override(config.override_slm_async_enabled, request.slm_async_enabled)
-
     try:
+        profile: dict = {}
         if request.model_key:
             profile = config.get_model_profile(request.model_key)
-            override(config.override_llm_provider, request.model_key)
             override(config.override_model_backend, profile.get("runtime_backend"))
             override(config.override_direct_rwkv_config, profile.get("direct_runtime"))
-            base_url = str(profile.get("base_url") or "")
-            override(config.override_llm_url, base_url)
-            if base_url:
-                override(config.override_slm_endpoint, base_url.rstrip("/") + "/chat/completions")
+
+        connection = resolve_model_connection(request, profile)
+        override(config.override_llm_provider, connection["provider"])
+        override(config.override_llm_url, connection["base_url"])
+        override(config.override_llm_key, connection["api_key"])
+        slm_endpoint = _first_configured(
+            request.slm_endpoint,
+            connection["base_url"].rstrip("/") + "/chat/completions"
+            if connection["base_url"]
+            else "",
+        )
+        override(config.override_slm_endpoint, slm_endpoint)
+        override(config.override_slm_password, request.slm_password)
+        override(config.override_slm_async_enabled, request.slm_async_enabled)
 
         from agent.orchestrator import Orchestrator
 

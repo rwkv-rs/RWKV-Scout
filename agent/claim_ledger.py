@@ -158,29 +158,94 @@ def _source_text(item: Mapping[str, Any]) -> str:
 
 
 def _source_record(item: Mapping[str, Any]) -> dict[str, Any]:
+    # The ledger is persistent state, not a model prompt.  Keep enough of each
+    # exact source span to survive later context reconstruction; final and
+    # validation packers apply their own token budgets.  The former 2,400-char
+    # prefix silently cut query-focused examples located near the end of a
+    # 1,600-token chunk.
+    retained_span_chars = 6000
     chunks = [
         {
             "chunk_id": str(row.get("chunk_id") or ""),
             "index": int(row.get("index") or 0),
-            "text": str(row.get("text") or "")[:2400],
+            "text": str(row.get("text") or "")[:retained_span_chars],
         }
         for row in item.get("source_chunks") or []
         if isinstance(row, Mapping) and str(row.get("text") or "").strip()
     ][:8]
-    return {
+    selected_chunks = [
+        {
+            "chunk_id": str(row.get("chunk_id") or ""),
+            "index": int(row.get("index") or 0),
+            "text": str(row.get("text") or "")[:retained_span_chars],
+            "attention_rank": int(row.get("attention_rank") or 0),
+            "attention_score": int(row.get("attention_score") or 0),
+            "attention_reasons": [
+                str(value)[:160]
+                for value in row.get("attention_reasons") or []
+                if str(value).strip()
+            ][:12],
+        }
+        for row in item.get("selected_source_chunks") or []
+        if isinstance(row, Mapping) and str(row.get("text") or "").strip()
+    ][:8]
+    grounded_spans = []
+    for row in item.get("chunk_candidates") or []:
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("supported") is not True or row.get("source_grounded") is not True:
+            continue
+        quote = str(row.get("quote") or "").strip()
+        if not quote:
+            continue
+        grounded_spans.append(
+            {
+                "chunk_id": str(row.get("chunk_id") or ""),
+                "index": int(row.get("chunk_index") or 0),
+                "text": quote[:1200],
+                "source_locator": deepcopy(dict(row.get("source_locator") or {})),
+                "grounding_basis": str(row.get("grounding_basis") or ""),
+            }
+        )
+        if len(grounded_spans) >= 8:
+            break
+    record = {
         "title": str(item.get("title") or ""),
         "url": str(item.get("url") or ""),
         "retrieval_query": str(item.get("retrieval_query") or ""),
         "text_available": bool(_source_text(item)),
         "chunk_count": len(chunks) or int(item.get("chunk_count") or 0),
         "chunks": chunks,
+        "selected_chunks": selected_chunks,
+        "grounded_spans": grounded_spans,
     }
+    # Preserve observable time/source metadata for the planner and final
+    # writer. This is transport only: the ledger never decides whether a date
+    # is current or whether a source is authoritative.
+    for key in (
+        "source",
+        "provider",
+        "source_type",
+        "published",
+        "published_at",
+        "updated",
+        "updated_at",
+        "date",
+        "retrieved_at",
+    ):
+        value = item.get(key)
+        if value not in (None, "", [], {}):
+            record[key] = deepcopy(value)
+    freshness = item.get("freshness")
+    if isinstance(freshness, Mapping):
+        record["freshness"] = deepcopy(dict(freshness))
+    return record
 
 
 class ClaimLedger:
     """Record retrieved material per RWKV-planned task point."""
 
-    VERSION = "claim-ledger.v2"
+    VERSION = "claim-ledger.v3"
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -188,6 +253,8 @@ class ClaimLedger:
         self._source_policy = "open_web"
         self._required_domains: list[str] = []
         self._query = ""
+        self._unassigned_sources: list[dict[str, Any]] = []
+        self._unassigned_attempts: list[dict[str, Any]] = []
 
     def reset(self) -> None:
         with self._lock:
@@ -195,6 +262,8 @@ class ClaimLedger:
             self._source_policy = "open_web"
             self._required_domains = []
             self._query = ""
+            self._unassigned_sources.clear()
+            self._unassigned_attempts.clear()
 
     def initialize(self, task_plan: Mapping[str, Any] | None, query: str) -> None:
         plan = task_plan if isinstance(task_plan, Mapping) else {}
@@ -256,15 +325,32 @@ class ClaimLedger:
         with self._lock:
             explicit_targets = [task_point_id] if task_point_id in self._claims else []
             added = 0
+            added_unassigned = 0
             touched: set[str] = set()
             for item in items:
                 item_claim_ids = [
                     str(value) for value in item.get("claim_ids") or [] if str(value) in self._claims
                 ]
                 targets = list(dict.fromkeys([*explicit_targets, *item_claim_ids]))
-                if not targets:
-                    targets = list(self._claims)
                 record = _source_record(item)
+                if not targets and len(self._claims) == 1:
+                    targets = list(self._claims)
+                if not targets:
+                    attempt = {
+                        "query": str(query or ""),
+                        "strategy": str(strategy or ""),
+                        "step": int(step or 0),
+                        "url": record["url"],
+                    }
+                    self._unassigned_attempts.append(attempt)
+                    identity = record["url"] or record["title"]
+                    if identity and not any(
+                        (row.get("url") or row.get("title")) == identity
+                        for row in self._unassigned_sources
+                    ):
+                        self._unassigned_sources.append(deepcopy(record))
+                        added_unassigned += 1
+                    continue
                 for claim_id in targets:
                     claim = self._claims[claim_id]
                     claim["attempts"].append(
@@ -276,10 +362,35 @@ class ClaimLedger:
                         }
                     )
                     identity = record["url"] or record["title"]
-                    if identity and any(
-                        (row.get("url") or row.get("title")) == identity
-                        for row in claim["sources"]
-                    ):
+                    existing_source = next(
+                        (
+                            row
+                            for row in claim["sources"]
+                            if identity
+                            and (row.get("url") or row.get("title")) == identity
+                        ),
+                        None,
+                    )
+                    if existing_source is not None:
+                        for field_name in ("grounded_spans", "selected_chunks", "chunks"):
+                            merged_rows: list[dict[str, Any]] = []
+                            seen_rows: set[tuple[str, str]] = set()
+                            for span in [
+                                *list(record.get(field_name) or []),
+                                *list(existing_source.get(field_name) or []),
+                            ]:
+                                if not isinstance(span, Mapping):
+                                    continue
+                                row_identity = (
+                                    str(span.get("chunk_id") or ""),
+                                    str(span.get("text") or ""),
+                                )
+                                if not row_identity[1] or row_identity in seen_rows:
+                                    continue
+                                seen_rows.add(row_identity)
+                                merged_rows.append(deepcopy(dict(span)))
+                            if merged_rows:
+                                existing_source[field_name] = merged_rows[:8]
                         continue
                     claim["sources"].append(deepcopy(record))
                     touched.add(claim_id)
@@ -296,8 +407,10 @@ class ClaimLedger:
                     )
             return {
                 "added_source_bindings": added,
+                "added_unassigned_sources": added_unassigned,
                 "touched_claim_ids": sorted(touched),
                 "claim_count": len(self._claims),
+                "unassigned_source_count": len(self._unassigned_sources),
             }
 
     def snapshot(self, *, max_spans_per_claim: int = 4) -> dict[str, Any]:
@@ -311,10 +424,28 @@ class ClaimLedger:
                     projected = {
                         key: value
                         for key, value in source.items()
-                        if key != "chunks"
+                        if key not in {"chunks", "selected_chunks"}
                     }
                     if span_limit:
-                        projected["spans"] = list(source.get("chunks") or [])[:span_limit]
+                        span_rows = [
+                            *list(source.get("grounded_spans") or []),
+                            *list(source.get("selected_chunks") or []),
+                            *list(source.get("chunks") or []),
+                        ]
+                        distinct_spans: list[dict[str, Any]] = []
+                        seen_spans: set[tuple[str, str]] = set()
+                        for span in span_rows:
+                            if not isinstance(span, Mapping):
+                                continue
+                            identity = (
+                                str(span.get("chunk_id") or ""),
+                                str(span.get("text") or ""),
+                            )
+                            if not identity[1] or identity in seen_spans:
+                                continue
+                            seen_spans.add(identity)
+                            distinct_spans.append(deepcopy(dict(span)))
+                        projected["spans"] = distinct_spans[:span_limit]
                     sources.append(projected)
                 claims.append(
                     {
@@ -337,6 +468,16 @@ class ClaimLedger:
                 "required_domains": list(self._required_domains),
                 "claim_count": len(claims),
                 "claims": claims,
+                "unassigned_source_count": len(self._unassigned_sources),
+                "unassigned_attempt_count": len(self._unassigned_attempts),
+                "unassigned_sources": [
+                    {
+                        key: deepcopy(value)
+                        for key, value in source.items()
+                        if key != "chunks"
+                    }
+                    for source in self._unassigned_sources[:8]
+                ],
                 "advisory_only": True,
             }
 

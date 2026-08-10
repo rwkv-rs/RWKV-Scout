@@ -11,7 +11,9 @@ from datetime import datetime
 from typing import Any, Dict, Set
 
 from agent.claim_ledger import ClaimLedger
+from config import get_llm_context_length
 from utils.chunker import get_token_count
+from utils.context_budget import routing_observation_tokens
 from utils.retrieval_ledger import RetrievalLedger, canonical_url
 
 
@@ -27,15 +29,49 @@ _SOURCE_BODY_FIELDS = (
 def _original_source_chunks(item: dict[str, Any]) -> list[dict[str, Any]]:
     """Return fetched source text without extractor paraphrases or snippets."""
 
-    rows = item.get("source_chunks") or item.get("selected_source_chunks") or []
-    chunks = [
-        {
-            "chunk_id": str(row.get("chunk_id") or f"chunk-{index + 1}"),
-            "text": str(row.get("text") or "").replace("\x00", ""),
+    # Put the original chunks selected for the active evidence focus first,
+    # then retain bounded surrounding page chunks. Using only either side was
+    # brittle: a page preamble can hide the relevant section, while a narrow
+    # selected span can hide the version/date context that disambiguates it.
+    selected_rows = list(item.get("selected_source_chunks") or [])
+    source_rows = list(item.get("source_chunks") or [])
+    rows = list(selected_rows)
+    if selected_rows:
+        selected_indices = {
+            int(row.get("index"))
+            for row in selected_rows
+            if isinstance(row, dict)
+            and isinstance(row.get("index"), int)
         }
-        for index, row in enumerate(rows)
-        if isinstance(row, dict) and str(row.get("text") or "")
-    ]
+        neighbour_indices = {
+            value + offset
+            for value in selected_indices
+            for offset in (-1, 0, 1)
+            if value + offset >= 0
+        }
+        rows.extend(
+            row
+            for row in source_rows
+            if isinstance(row, dict)
+            and isinstance(row.get("index"), int)
+            and int(row.get("index")) in neighbour_indices
+        )
+    else:
+        rows.extend(source_rows)
+    chunks = []
+    seen: set[tuple[str, str]] = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("text") or "").replace("\x00", "")
+        if not text:
+            continue
+        chunk_id = str(row.get("chunk_id") or f"chunk-{index + 1}")
+        identity = (chunk_id, text)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        chunks.append({"chunk_id": chunk_id, "text": text})
     if chunks:
         return chunks
 
@@ -75,6 +111,7 @@ class RetrievalEpisodeState:
     frozen_paths: list[dict[str, Any]] = field(default_factory=list)
     infrastructure_events: list[dict[str, Any]] = field(default_factory=list)
     replan_count: int = 0
+    evidence_revision: int = 0
     progress: RetrievalLedger = field(default_factory=RetrievalLedger)
     claims: ClaimLedger = field(default_factory=ClaimLedger)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
@@ -103,6 +140,7 @@ class RetrievalEpisodeState:
 
         query_text = " ".join(str(query or "").split()).strip()
         added: list[str] = []
+        material_changed = False
         with self._lock:
             self.query_history.append(
                 {
@@ -168,25 +206,72 @@ class RetrievalEpisodeState:
                 if key not in self.sources:
                     self.sources[key] = dict(item)
                     added.append(key)
+                    material_changed = True
                 else:
                     # Keep the richest representation when the same URL is
                     # encountered by a focused follow-up search.
                     current = self.sources[key]
+                    prior_selected = list(current.get("selected_source_chunks") or [])
                     if len(str(item.get("content") or "")) > len(str(current.get("content") or "")):
                         self.sources[key] = {**current, **item}
-                    else:
-                        current["claim_ids"] = list(dict.fromkeys([
-                            *[
-                                str(value)
-                                for value in current.get("claim_ids") or []
-                                if str(value).strip()
-                            ],
-                            *[
-                                str(value)
-                                for value in item.get("claim_ids") or []
-                                if str(value).strip()
-                            ],
-                        ]))
+                        material_changed = True
+                    current = self.sources[key]
+                    current["claim_ids"] = list(dict.fromkeys([
+                        *[
+                            str(value)
+                            for value in current.get("claim_ids") or []
+                            if str(value).strip()
+                        ],
+                        *[
+                            str(value)
+                            for value in item.get("claim_ids") or []
+                            if str(value).strip()
+                        ],
+                    ]))
+                    selected_chunks: list[dict[str, Any]] = []
+                    selected_seen: set[tuple[str, str]] = set()
+                    for selected in [
+                        *list(item.get("selected_source_chunks") or []),
+                        *prior_selected,
+                    ]:
+                        if not isinstance(selected, dict):
+                            continue
+                        text = str(selected.get("text") or "").strip()
+                        if not text:
+                            continue
+                        identity = (str(selected.get("chunk_id") or ""), text)
+                        if identity in selected_seen:
+                            continue
+                        selected_seen.add(identity)
+                        selected_chunks.append(dict(selected))
+                    if selected_chunks:
+                        if selected_chunks != list(current.get("selected_source_chunks") or []):
+                            material_changed = True
+                        current["selected_source_chunks"] = selected_chunks[:12]
+                    locator_candidates: list[dict[str, Any]] = []
+                    locator_seen: set[tuple[str, str]] = set()
+                    for candidate in [
+                        *list(item.get("chunk_candidates") or []),
+                        *list(current.get("chunk_candidates") or []),
+                    ]:
+                        if not isinstance(candidate, dict):
+                            continue
+                        identity = (
+                            str(candidate.get("chunk_id") or ""),
+                            str(candidate.get("quote") or ""),
+                        )
+                        if not identity[1] or identity in locator_seen:
+                            continue
+                        locator_seen.add(identity)
+                        locator_candidates.append(dict(candidate))
+                    if locator_candidates:
+                        if locator_candidates != list(current.get("chunk_candidates") or []):
+                            material_changed = True
+                        current["chunk_candidates"] = locator_candidates[:64]
+                    locator_text = str(item.get("model_locator_facts") or "").strip()
+                    if locator_text and locator_text != str(current.get("model_locator_facts") or ""):
+                        current["model_locator_facts"] = locator_text
+                        material_changed = True
                 if task_point_id:
                     point_sources = self.sources_by_claim.setdefault(task_point_id, {})
                     current_point_source = point_sources.get(key)
@@ -195,6 +280,8 @@ class RetrievalEpisodeState:
                         or len(str(item.get("content") or ""))
                         >= len(str(current_point_source.get("content") or ""))
                     ):
+                        if current_point_source != item:
+                            material_changed = True
                         point_sources[key] = dict(item)
             self.query_history[-1]["new_source_count"] = len(added)
             self.rounds.append((query_text, result))
@@ -211,11 +298,20 @@ class RetrievalEpisodeState:
             strategy=strategy,
             step=step,
         )
+        material_changed = material_changed or int(
+            claim_delta.get("added_source_bindings") or 0
+        ) > 0 or int(claim_delta.get("added_unassigned_sources") or 0) > 0
+        with self._lock:
+            if material_changed:
+                self.evidence_revision += 1
+            evidence_revision = self.evidence_revision
         return {
             "new_source_keys": added,
             "new_source_count": len(added),
             "total_sources": len(self.sources),
             "claim_delta": claim_delta,
+            "evidence_revision": evidence_revision,
+            "material_changed": material_changed,
         }
 
     def source_records(self) -> list[dict[str, Any]]:
@@ -242,6 +338,7 @@ class RetrievalEpisodeState:
         }
         with self._lock:
             self.deterministic_results.append(record)
+            self.evidence_revision += 1
             if len(self.deterministic_results) > 32:
                 del self.deterministic_results[:-32]
 
@@ -264,15 +361,32 @@ class RetrievalEpisodeState:
         max_total_chars = max(512, int(max_total_chars or 512))
         with self._lock:
             all_sources = [dict(item) for item in self.sources.values()]
+            sources_by_claim = {
+                point_id: [dict(item) for item in values.values()]
+                for point_id, values in self.sources_by_claim.items()
+            }
 
-        if len(all_sources) <= max_sources:
-            selected = all_sources
-        else:
-            first_count = max_sources // 2
-            selected = [
-                *all_sources[:first_count],
-                *all_sources[-(max_sources - first_count) :],
-            ]
+        # Give every explicitly bound task point one source before using the
+        # remaining budget for recent material. This is context packing, not a
+        # judgement that the selected source proves the point.
+        selected: list[dict[str, Any]] = []
+        selected_keys: set[str] = set()
+
+        def select(item: dict[str, Any]) -> None:
+            key = self.source_key(item)
+            if key in selected_keys or len(selected) >= max_sources:
+                return
+            selected.append(item)
+            selected_keys.add(key)
+
+        for point_sources in sources_by_claim.values():
+            if point_sources:
+                select(point_sources[0])
+        for item in reversed(all_sources):
+            select(item)
+        if len(selected) < max_sources:
+            for item in all_sources:
+                select(item)
 
         projected: list[dict[str, Any]] = []
         remaining = max_total_chars
@@ -319,6 +433,13 @@ class RetrievalEpisodeState:
                         for value in item.get("claim_ids") or []
                         if str(value).strip()
                     ],
+                    "published": item.get("published") or item.get("published_at") or "",
+                    "updated": item.get("updated") or item.get("updated_at") or "",
+                    "date": item.get("date") or "",
+                    "provider": item.get("provider") or item.get("source") or "",
+                    "freshness": dict(item.get("freshness") or {})
+                    if isinstance(item.get("freshness"), dict)
+                    else {},
                     "spans": spans,
                     "source_chars": source_chars,
                     "visible_chars": included_chars,
@@ -371,6 +492,7 @@ class RetrievalEpisodeState:
         with self._lock:
             return {
                 "round_count": len(self.query_history),
+                "evidence_revision": self.evidence_revision,
                 "source_count": len(self.sources),
                 "queries": [
                     {
@@ -402,12 +524,114 @@ class RetrievalEpisodeState:
                 "retrieval_infrastructure": self.infrastructure_report(),
             }
 
+    def planner_routing_snapshot(
+        self,
+        *,
+        max_sources: int = 6,
+        max_queries: int = 6,
+        max_frozen_paths: int = 4,
+    ) -> dict[str, Any]:
+        """Return a small routing projection for the next RWKV decision.
+
+        Full source bodies, Claim source records, infrastructure events and
+        URL histories remain in persistent state and the audit trace.  A
+        planner only needs progress, point bindings, recent requests and the
+        frozen paths it must avoid; replaying the complete ledger crowds the
+        actual replan instruction out of a 16K context window.
+        """
+
+        claim_snapshot = self.claims.snapshot(max_spans_per_claim=0)
+        with self._lock:
+            infrastructure = self.infrastructure_report()
+            return {
+                "schema_version": "planner-routing.v1",
+                "evidence_revision": self.evidence_revision,
+                "round_count": len(self.query_history),
+                "source_count": len(self.sources),
+                "queries": [
+                    {
+                        "query": str(item.get("query") or "")[:500],
+                        "status": str(item.get("status") or "")[:80],
+                        "new_source_count": int(item.get("new_source_count") or 0),
+                        "task_point_id": str(item.get("task_point_id") or "")[:120],
+                    }
+                    for item in self.query_history[-max(1, int(max_queries or 1)) :]
+                ],
+                "sources": [
+                    {
+                        "title": str(item.get("title") or "")[:300],
+                        "url": str(item.get("url") or "")[:500],
+                        "claim_ids": [
+                            str(value)[:120]
+                            for value in item.get("claim_ids") or []
+                            if str(value).strip()
+                        ][:8],
+                        "published": str(
+                            item.get("published") or item.get("published_at") or ""
+                        )[:120],
+                        "updated": str(
+                            item.get("updated") or item.get("updated_at") or ""
+                        )[:120],
+                    }
+                    for item in list(self.sources.values())[
+                        -max(1, int(max_sources or 1)) :
+                    ]
+                ],
+                "claims": [
+                    {
+                        "claim_id": str(item.get("claim_id") or "")[:120],
+                        "retrieval_state": str(
+                            item.get("retrieval_state") or "not_retrieved"
+                        )[:80],
+                        "attempt_count": int(item.get("attempt_count") or 0),
+                        "source_count": int(item.get("source_count") or 0),
+                    }
+                    for item in claim_snapshot.get("claims") or []
+                    if isinstance(item, dict)
+                ],
+                "unassigned_source_count": int(
+                    claim_snapshot.get("unassigned_source_count") or 0
+                ),
+                "attempted_url_count": len(self.attempted_urls),
+                "claim_source_counts": {
+                    point_id: len(values)
+                    for point_id, values in self.sources_by_claim.items()
+                },
+                "frozen_paths": [
+                    {
+                        "query": str(item.get("query") or "")[:500],
+                        "action": str(item.get("action") or "")[:120],
+                        "task_point_id": str(item.get("task_point_id") or "")[:120],
+                        "step": int(item.get("step") or 0),
+                        "reason": str(item.get("reason") or "")[:240],
+                    }
+                    for item in self.frozen_paths[
+                        -max(1, int(max_frozen_paths or 1)) :
+                    ]
+                ],
+                "replan_count": self.replan_count,
+                "retrieval_infrastructure": {
+                    "complete": bool(infrastructure.get("complete")),
+                    "event_count": int(infrastructure.get("event_count") or 0),
+                    "affected_claim_ids": list(
+                        infrastructure.get("affected_claim_ids") or []
+                    )[:16],
+                    "unresolved_chunk_count": int(
+                        infrastructure.get("unresolved_chunk_count") or 0
+                    ),
+                    "transport_error_count": int(
+                        infrastructure.get("transport_error_count") or 0
+                    ),
+                },
+            }
+
     def freeze_path(
         self,
         query: str,
         *,
         action: str = "",
         arguments: dict[str, Any] | None = None,
+        task_point_id: str = "",
         step: int = 0,
         reason: str = "",
     ) -> dict[str, Any]:
@@ -417,6 +641,7 @@ class RetrievalEpisodeState:
             "query": " ".join(str(query or "").split()).strip(),
             "action": str(action or ""),
             "arguments": dict(arguments or {}),
+            "task_point_id": str(task_point_id or ""),
             "step": int(step or 0),
             "reason": str(reason or "")[:500],
         }
@@ -561,17 +786,127 @@ class AgentState:
         ``to_markdown_context``; the model-owned web loop gets this narrow
         routing view instead.
         """
+        def compact_review(value: Any) -> dict[str, Any]:
+            review = value if isinstance(value, dict) else {}
+            point_status = review.get("task_point_status") or {}
+            if not isinstance(point_status, dict):
+                point_status = {}
+            return {
+                key: review.get(key)
+                for key in (
+                    "decision",
+                    "decision_source",
+                    "missing_points",
+                    "conflicts",
+                    "next_focus",
+                    "reason",
+                )
+                if key in review
+            } | {
+                "task_point_status": {
+                    str(point_id)[:120]: (
+                        {"status": str(status.get("status") or "")[:120]}
+                        if isinstance(status, dict)
+                        else {"status": str(status)[:120]}
+                    )
+                    for point_id, status in list(point_status.items())[:32]
+                }
+            }
+
+        def compact_feedback(raw: str) -> dict[str, Any] | str:
+            try:
+                value = json.loads(str(raw or ""))
+            except json.JSONDecodeError:
+                return str(raw or "")[:1200]
+            if not isinstance(value, dict):
+                return str(raw or "")[:1200]
+            output: dict[str, Any] = {
+                key: value.get(key)
+                for key in (
+                    "status",
+                    "error_class",
+                    "repeat_count",
+                    "replan_count",
+                    "stalled_actions_after_replan",
+                    "max_stalled_actions_after_replan",
+                    "replan_rebuilds_without_progress",
+                )
+                if key in value
+            }
+            if value.get("message"):
+                output["message"] = str(value.get("message") or "")[:600]
+            request = value.get("request") or {}
+            if isinstance(request, dict):
+                arguments = request.get("arguments") or {}
+                output["request"] = {
+                    "action": str(request.get("action") or "")[:120],
+                    "arguments": dict(arguments) if isinstance(arguments, dict) else {},
+                }
+            frozen = value.get("frozen_path") or {}
+            if isinstance(frozen, dict):
+                output["frozen_path"] = {
+                    "query": str(frozen.get("query") or "")[:500],
+                    "action": str(frozen.get("action") or "")[:120],
+                    "task_point_id": str(frozen.get("task_point_id") or "")[:120],
+                    "step": int(frozen.get("step") or 0),
+                    "reason": str(frozen.get("reason") or "")[:240],
+                }
+            previous = value.get("previous_request_status") or {}
+            if isinstance(previous, dict):
+                output["previous_request_status"] = {
+                    key: previous.get(key)
+                    for key in (
+                        "attempted",
+                        "count",
+                        "match_type",
+                        "matched_query",
+                        "similarity",
+                        "threshold",
+                    )
+                    if key in previous
+                }
+            for review_key in ("evidence_review", "pending_replan"):
+                review = value.get(review_key)
+                if isinstance(review, dict):
+                    output[review_key] = compact_review(review)
+            return output
+
         lines = ["Retrieval task state:", f"Task: {self.refined_query or self.user_query}"]
         if self.last_feedback:
-            lines.append(f"Latest controller feedback: {self.last_feedback}")
-        lines.append("Shared retrieval ledger (progress metadata; not a finish gate):")
-        lines.append(json.dumps(self.retrieval.routing_snapshot(), ensure_ascii=False, separators=(",", ":")))
-        lines.append(
-            "Persistent original source spans (shared evidence for RWKV planning; no extractor paraphrases):"
-        )
+            lines.append("Latest controller feedback (compact routing projection):")
+            lines.append(
+                json.dumps(
+                    compact_feedback(self.last_feedback),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        freshness_policy = self.run_metadata.get("freshness_policy")
+        if isinstance(freshness_policy, dict) and freshness_policy:
+            lines.append("Question time/freshness policy (observable metadata, not a gate):")
+            lines.append(
+                json.dumps(
+                    freshness_policy,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        lines.append("Shared retrieval ledger (compact progress metadata; not a finish gate):")
         lines.append(
             json.dumps(
-                self.retrieval.planner_evidence_snapshot(),
+                self.retrieval.planner_routing_snapshot(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        lines.append("Bounded original source locators for routing (not final-answer evidence):")
+        lines.append(
+            json.dumps(
+                self.retrieval.planner_evidence_snapshot(
+                    max_sources=4,
+                    max_chars_per_source=700,
+                    max_total_chars=2200,
+                ),
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
@@ -585,4 +920,35 @@ class AgentState:
                     separators=(",", ":"),
                 )
             )
-        return "\n".join(lines)
+        rendered = "\n".join(lines)
+        token_budget = routing_observation_tokens(get_llm_context_length())
+        if get_token_count(rendered) <= token_budget:
+            return rendered
+
+        # A huge feedback object or unusually dense CJK source may still
+        # exceed the routing budget. Rebuild with much smaller locators rather
+        # than slicing through JSON and hiding the missing-point/frozen-path
+        # records at the end.
+        compact_lines: list[str] = []
+        skip_evidence_payload = False
+        for line in lines:
+            if line.startswith("Bounded original source locators"):
+                skip_evidence_payload = True
+                continue
+            if skip_evidence_payload:
+                skip_evidence_payload = False
+                continue
+            compact_lines.append(line)
+        compact_lines.append("Minimal original source locators for routing:")
+        compact_lines.append(
+            json.dumps(
+                self.retrieval.planner_evidence_snapshot(
+                    max_sources=3,
+                    max_chars_per_source=300,
+                    max_total_chars=900,
+                ),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        return "\n".join(compact_lines)

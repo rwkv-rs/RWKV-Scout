@@ -140,8 +140,91 @@ def merge_retrieval_results(
                 current = merged[key]
                 current["candidate_queries"] = list(dict.fromkeys([*current.get("candidate_queries", []), candidate_query]))
                 current["candidate_ranks"] = [*current.get("candidate_ranks", []), rank]
-                for field in ("page_excerpt", "abstract", "snippet"):
+                current["claim_ids"] = list(
+                    dict.fromkeys(
+                        [
+                            *[
+                                str(value)
+                                for value in current.get("claim_ids") or []
+                                if str(value).strip()
+                            ],
+                            *[
+                                str(value)
+                                for value in item.get("claim_ids") or []
+                                if str(value).strip()
+                            ],
+                        ]
+                    )
+                )
+                for field in (
+                    "source_excerpt",
+                    "page_excerpt",
+                    "structured_evidence_text",
+                    "content",
+                    "abstract",
+                    "snippet",
+                    "model_locator_facts",
+                ):
                     if len(str(item.get(field) or "")) > len(str(current.get(field) or "")):
+                        current[field] = item.get(field)
+                current_chunks = current.get("source_chunks") or []
+                item_chunks = item.get("source_chunks") or []
+                current_chunk_chars = sum(
+                    len(str(row.get("text") or ""))
+                    for row in current_chunks
+                    if isinstance(row, Mapping)
+                )
+                item_chunk_chars = sum(
+                    len(str(row.get("text") or ""))
+                    for row in item_chunks
+                    if isinstance(row, Mapping)
+                )
+                if item_chunk_chars > current_chunk_chars:
+                    current["source_chunks"] = list(item_chunks)
+                # A focused follow-up on the same page can nominate different
+                # original chunks for a newly missing task point. Keep the
+                # newest attention selection first while retaining prior
+                # selections and the complete source_chunks provenance.
+                selected_chunks: list[dict[str, Any]] = []
+                selected_seen: set[tuple[str, int, str]] = set()
+                for selected in [
+                    *list(item.get("selected_source_chunks") or []),
+                    *list(current.get("selected_source_chunks") or []),
+                ]:
+                    if not isinstance(selected, Mapping):
+                        continue
+                    text = str(selected.get("text") or "").strip()
+                    if not text:
+                        continue
+                    identity = (
+                        str(selected.get("chunk_id") or ""),
+                        int(selected.get("index") or 0),
+                        text,
+                    )
+                    if identity in selected_seen:
+                        continue
+                    selected_seen.add(identity)
+                    selected_chunks.append(dict(selected))
+                if selected_chunks:
+                    current["selected_source_chunks"] = selected_chunks[:12]
+                for field in (
+                    "source",
+                    "provider",
+                    "source_type",
+                    "published",
+                    "published_at",
+                    "updated",
+                    "updated_at",
+                    "date",
+                    "retrieved_at",
+                    "freshness",
+                ):
+                    if current.get(field) in (None, "", [], {}) and item.get(field) not in (
+                        None,
+                        "",
+                        [],
+                        {},
+                    ):
                         current[field] = item.get(field)
     results = list(merged.values())
     quality_terms = _quality_terms(query, candidate_queries)

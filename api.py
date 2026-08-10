@@ -5,9 +5,10 @@ import uvicorn
 import uuid
 import requests
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Form, HTTPException
-from fastapi.responses import PlainTextResponse, FileResponse
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Form, HTTPException, Request
+from fastapi.responses import PlainTextResponse, FileResponse, JSONResponse
 import config
+from app.public_access import public_frontend_request_allowed, public_mode_enabled
 from runtime import get_model_backend
 from app.models import AnalyzeRequest, ChatRequest
 from app.services.task_runner import run_background_analysis
@@ -38,7 +39,22 @@ for _stream in (sys.stdout, sys.stderr):
 
 setup_env()
 
-app = FastAPI(title="RWKV-ECRA Agent API", description="支持前端隔离请求、文件上传与历史回溯")
+app = FastAPI(title="RWKV Retrieval Agent API", description="支持前端隔离请求、文件上传与历史回溯")
+
+
+@app.middleware("http")
+async def restrict_public_frontend_api(request: Request, call_next):
+    path = request.url.path
+    if (
+        public_mode_enabled()
+        and path.startswith("/frontend-api/")
+        and not public_frontend_request_allowed(request.method, path)
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={"code": 403, "message": "This endpoint is disabled in public mode."},
+        )
+    return await call_next(request)
 
 # =====================================
 @app.get("/healthz")
@@ -208,11 +224,19 @@ def get_input_file(path: str):
 
 @app.get("/frontend-api/config")
 def get_frontend_config():
+    public_mode = public_mode_enabled()
+    model_profiles = config.get_model_profiles()
+    if public_mode:
+        model_profiles = [
+            {key: value for key, value in profile.items() if key != "base_url"}
+            for profile in model_profiles
+        ]
     return {
         "code": 200,
         "data": {
             "default_model": config.DEFAULT_LLM_PROVIDER,
-            "models": config.get_model_profiles(),
+            "models": model_profiles,
+            "public_mode": public_mode,
             "slm_async_enabled": config.get_slm_async_enabled(),
             "slm_concurrency": config.get_slm_concurrency(),
             "slm_async_parallelism": config.get_slm_async_parallelism(),
@@ -294,6 +318,19 @@ def get_prometheus_metrics():
 @app.post("/api/v1/analyze")
 @app.post("/frontend-api/analyze")
 def analyze_endpoint(req: AnalyzeRequest, bg_tasks: BackgroundTasks):
+    if public_mode_enabled():
+        # Public browsers may submit work, but concurrency/sampling execution
+        # and model-service connection details remain operator-owned policies.
+        req = req.model_copy(
+            update={
+                "llm_api_key": None,
+                "llm_base_url": None,
+                "llm_provider": None,
+                "slm_endpoint": None,
+                "slm_password": None,
+                "slm_async_enabled": None,
+            }
+        )
     task_id = f"TASK_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     task_output_dir = os.path.join(config.DATA_PIPELINE["output_directory"], task_id)
     

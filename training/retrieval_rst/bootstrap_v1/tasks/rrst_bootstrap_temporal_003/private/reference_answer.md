@@ -1,0 +1,4 @@
+- First public reveal: **2036-07-04** [S1].
+- Public live launch: **2037-11-16** [S2].
+- First anniversary event: **2038-11-16** [S3].
+- Current live release: **version 3.9**, themed **After the Brass Rain** [S4].

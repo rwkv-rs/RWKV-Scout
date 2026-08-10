@@ -23,7 +23,7 @@ import {
   X,
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
-  import { getHistory, getReport, getTaskEvents, startAnalyze, stopTask, deleteTask, getFiles, deleteFile, getFileContent, uploadFile, getRuntimeConfig } from "./api.js";
+import { getHistory, getReport, getTaskEvents, startAnalyze, stopTask, deleteTask, getFiles, deleteFile, getFileContent, uploadFile, getRuntimeConfig } from "./api.js";
 import { extractMarkdownOutline, renderModelMarkdown, renderMarkdown, reportToMarkdown } from "./markdown.js";
 import { AppSidebar } from "@/components/app-sidebar";
 import { TaskStatusBadge } from "@/components/task-status-badge";
@@ -72,6 +72,86 @@ function parseTaskTime(taskId) {
   if (!match) return null;
 
   return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]}`;
+}
+
+const PUBLIC_TASK_IDS_KEY = "rwkv_public_task_ids";
+
+function getBrowserTaskIds() {
+  try {
+    const value = JSON.parse(localStorage.getItem(PUBLIC_TASK_IDS_KEY) || "[]");
+    return Array.isArray(value)
+      ? [...new Set(value.filter((item) => typeof item === "string" && item.trim()))]
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberBrowserTaskId(taskId) {
+  if (!taskId) return;
+  const taskIds = [taskId, ...getBrowserTaskIds().filter((item) => item !== taskId)].slice(0, 20);
+  localStorage.setItem(PUBLIC_TASK_IDS_KEY, JSON.stringify(taskIds));
+}
+
+function browserTaskFromEvents(taskId, events) {
+  const userInput = events.find(
+    (event) => event.type === "user_input" && String(event.content || "").trim(),
+  );
+  const finalEvent = [...events].reverse().find((event) => event.type === "final");
+  const stoppedEvent = [...events].reverse().find((event) => event.type === "stopped");
+  const progressEvent = [...events].reverse().find((event) => event.type === "progress");
+  const lastEvent = events[events.length - 1];
+  const query = String(userInput?.content || "").trim();
+  const status = finalEvent?.status === "network_error"
+    ? "network_error"
+    : finalEvent
+      ? "ready"
+      : stoppedEvent
+        ? "stopped"
+        : "running";
+
+  return {
+    id: taskId,
+    title: query || taskId,
+    query,
+    status,
+    progress: progressEvent?.message || progressEvent?.content || "",
+    steps: [],
+    updated_at: lastEvent?.timestamp || parseTaskTime(taskId) || "-",
+    queued_at: "",
+    start_time: parseTaskTime(taskId) || "",
+    end_time: finalEvent?.timestamp || stoppedEvent?.timestamp || "",
+    path: "",
+  };
+}
+
+function mergeBrowserTaskEvents(task, events) {
+  if (!task || !events.length) return task;
+  const snapshot = browserTaskFromEvents(task.id, events);
+  const hasFinal = events.some((event) => event.type === "final");
+  const hasStopped = events.some((event) => event.type === "stopped");
+  return {
+    ...task,
+    title: snapshot.query || task.title,
+    query: snapshot.query || task.query,
+    status: hasFinal || hasStopped ? snapshot.status : task.status,
+    progress: snapshot.progress || task.progress,
+    updated_at: snapshot.updated_at || task.updated_at,
+    end_time: snapshot.end_time || task.end_time,
+  };
+}
+
+async function getBrowserTaskHistory() {
+  const taskIds = getBrowserTaskIds();
+  const tasks = await Promise.all(taskIds.map(async (taskId) => {
+    try {
+      const payload = await getTaskEvents(taskId, 0);
+      return browserTaskFromEvents(taskId, payload.events || []);
+    } catch {
+      return browserTaskFromEvents(taskId, []);
+    }
+  }));
+  return tasks;
 }
 
 function getScrollShadowState(element) {
@@ -566,6 +646,8 @@ function Composer({
   onModelChange,
   variant = "compact",
   onOpenFiles,
+  publicMode = false,
+  backendConcurrency = 4,
   autoFocus = false,
 }) {
   const [query, setQuery] = useState("");
@@ -660,14 +742,14 @@ function Composer({
               <span aria-hidden="true">·</span>
               <span>Shift + Enter 换行</span>
               <span aria-hidden="true">·</span>
-              <span>{asyncEnabled ? "并行模式" : isAnyRunning ? "将加入队列" : "顺序模式"}</span>
+              <span>{publicMode ? `后端并发上限 ${backendConcurrency}` : asyncEnabled ? "并行模式" : isAnyRunning ? "将加入队列" : "顺序模式"}</span>
             </div>
           ) : null}
         </div>
 
         {isCreateMode ? (
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
-            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+            {!publicMode ? <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
               <button
                 type="button"
                 onClick={onOpenFiles}
@@ -679,7 +761,11 @@ function Composer({
               <span className="text-[11px] text-muted-foreground">
                 未选择时使用工作区可用文件
               </span>
-            </div>
+            </div> : (
+              <span className="text-[11px] text-muted-foreground">
+                公网模式由后端固定控制最多 {backendConcurrency} 个并发任务
+              </span>
+            )}
             <Button
               size="sm"
               className="h-9 shrink-0 rounded-md px-4"
@@ -1122,6 +1208,8 @@ function LandingState({
   modelKey,
   onModelChange,
   onOpenFiles,
+  publicMode = false,
+  backendConcurrency = 4,
   resetKey,
 }) {
   return (
@@ -1146,10 +1234,12 @@ function LandingState({
           modelKey={modelKey}
           onModelChange={onModelChange}
           onOpenFiles={onOpenFiles}
+          publicMode={publicMode}
+          backendConcurrency={backendConcurrency}
         />
 
         <div className="mt-4 flex items-center justify-between border-t border-border pt-4 text-xs text-muted-foreground">
-          <div className="flex items-center gap-4">
+          {!publicMode ? <div className="flex items-center gap-4">
             <button
               type="button"
               onClick={onOpenFiles}
@@ -1158,7 +1248,7 @@ function LandingState({
               <FolderOpen className="size-3.5" />
               文件目录
             </button>
-          </div>
+          </div> : <span>公网模式 · 仅保留本浏览器任务</span>}
           <span>Enter 开始 · Shift + Enter 换行</span>
         </div>
       </section>
@@ -1259,7 +1349,9 @@ function ChatPanel({ modelProfiles, modelKey, onModelChange, onSubmit, onBack, i
 
 function ConversationTaskView({ task, finalAnswer, events, onStop }) {
   const isRunning = task?.status === "running" || task?.status === "queued";
-  const hasAnswer = Boolean(String(finalAnswer || "").trim());
+  const isNetworkError = task?.status === "network_error"
+    || events.some((event) => event.type === "final" && event.status === "network_error");
+  const hasAnswer = !isNetworkError && Boolean(String(finalAnswer || "").trim());
 
   return (
     <section className="chat-thread" aria-label="RWKV 检索对话">
@@ -1289,6 +1381,11 @@ function ConversationTaskView({ task, finalAnswer, events, onStop }) {
             className="trace-model-markdown trace-final-answer-body"
             dangerouslySetInnerHTML={{ __html: renderModelMarkdown(finalAnswer) }}
           />
+        </section>
+      ) : isNetworkError ? (
+        <section className="chat-empty-answer border-rose-200 bg-rose-50 text-rose-700" aria-live="polite">
+          <div className="chat-empty-answer-title">网络/模型服务错误</div>
+          <p>模型服务或检索网络没有正常返回。这是连接/调用故障，不是对答案质量的判定；可展开执行上下文查看失败阶段。</p>
         </section>
       ) : !isRunning && task ? (
         <section className="chat-empty-answer" aria-live="polite">
@@ -1322,6 +1419,9 @@ export function App() {
   const [executionEvents, setExecutionEvents] = useState([]);
   const [modelProfiles, setModelProfiles] = useState([]);
   const [modelKey, setModelKey] = useState(() => localStorage.getItem("rwkv_model_key") || "local_7b");
+  const [publicMode, setPublicMode] = useState(false);
+  const [runtimeConfigReady, setRuntimeConfigReady] = useState(false);
+  const [backendConcurrency, setBackendConcurrency] = useState(4);
   const [chatOpen, setChatOpen] = useState(false);
   const [newTaskKey, setNewTaskKey] = useState(0);
   const mainScrollRef = useRef(null);
@@ -1365,6 +1465,7 @@ export function App() {
     [executionEvents],
   );
   const visibleFinalAnswer = String(markdown || eventFinalAnswer || "");
+  const restrictedUi = !runtimeConfigReady || publicMode;
   const isAnyRunning = history.some((task) => task.status === "running");
   const activeTaskItem = history.find((task) => task.id === activeId) || null;
   const reportScrollAffordance = useReportScrollAffordance(
@@ -1382,7 +1483,7 @@ export function App() {
     } catch (reason) {
       const task = items.find((item) => item.id === id);
 
-      if (!task || task.status === "running" || task.status === "queued") {
+      if (!task || ["running", "queued", "network_error", "stopped"].includes(task.status)) {
         setReport(null);
         return;
       }
@@ -1395,7 +1496,7 @@ export function App() {
   async function refreshHistory(selectFirst = false) {
     try {
       setError("");
-      const items = await getHistory();
+      const items = publicMode ? await getBrowserTaskHistory() : await getHistory();
       setHistory(items);
 
       const nextId = (selectFirst || !activeId) ? items[0]?.id : activeId;
@@ -1413,9 +1514,9 @@ export function App() {
 
   const pollHistory = useCallback(async () => {
     try {
-      setHistory(await getHistory());
+      if (!publicMode) setHistory(await getHistory());
     } catch {}
-  }, []);
+  }, [publicMode]);
 
   const pollExecutionEvents = useCallback(async () => {
     if (!activeId) return;
@@ -1424,9 +1525,14 @@ export function App() {
       if (payload.events?.length) {
         eventCursorRef.current = payload.next_seq || eventCursorRef.current;
         setExecutionEvents((current) => [...current, ...payload.events]);
+        if (publicMode) {
+          setHistory((current) => current.map((task) =>
+            task.id === activeId ? mergeBrowserTaskEvents(task, payload.events) : task,
+          ));
+        }
       }
     } catch {}
-  }, [activeId]);
+  }, [activeId, publicMode]);
 
   useEffect(() => {
     localStorage.setItem("rwkv_task_queue", JSON.stringify(taskQueue));
@@ -1436,10 +1542,10 @@ export function App() {
   }, [taskQueue]);
 
   useEffect(() => {
-    if (asyncPreferenceLoadedRef.current) {
+    if (!publicMode && asyncPreferenceLoadedRef.current) {
       localStorage.setItem("rwkv_async_parallel_enabled", JSON.stringify(asyncEnabled));
     }
-  }, [asyncEnabled]);
+  }, [asyncEnabled, publicMode]);
 
   useEffect(() => {
     if (modelKey) localStorage.setItem("rwkv_model_key", modelKey);
@@ -1449,7 +1555,10 @@ export function App() {
     async function loadRuntimeConfig() {
       try {
         const config = await getRuntimeConfig();
+        const detectedPublicMode = config.public_mode === true;
         const saved = localStorage.getItem("rwkv_async_parallel_enabled");
+        setPublicMode(detectedPublicMode);
+        setBackendConcurrency(Number(config.max_parallel_cases) || 4);
 
         if (Array.isArray(config.models) && config.models.length) {
           setModelProfiles(config.models);
@@ -1461,21 +1570,29 @@ export function App() {
           setModelKey(available ? savedModel : defaultModel);
         }
 
-        if (saved === null && typeof config.slm_async_enabled === "boolean") {
+        if (detectedPublicMode) {
+          setAsyncEnabled(true);
+          setTaskQueue([]);
+        } else if (saved === null && typeof config.slm_async_enabled === "boolean") {
           asyncPreferenceLoadedRef.current = true;
           setAsyncEnabled(config.slm_async_enabled);
         }
-      } catch {}
+      } catch {
+        setPublicMode(false);
+      } finally {
+        setRuntimeConfigReady(true);
+      }
     }
 
     loadRuntimeConfig();
   }, []);
 
   useEffect(() => {
+    if (!runtimeConfigReady) return undefined;
     refreshHistory(true);
     const timer = setInterval(pollHistory, 3000);
     return () => clearInterval(timer);
-  }, [pollHistory]);
+  }, [pollHistory, runtimeConfigReady]);
 
   useEffect(() => {
     eventCursorRef.current = 0;
@@ -1593,7 +1710,21 @@ export function App() {
     await handleQuerySubmit(query);
   }
 
-  async function handleNewTaskSubmitted(taskId) {
+  async function handleNewTaskSubmitted(taskId, query = "") {
+    if (publicMode) {
+      rememberBrowserTaskId(taskId);
+      const task = {
+        ...browserTaskFromEvents(taskId, []),
+        title: query || taskId,
+        query,
+      };
+      setHistory((current) => [task, ...current.filter((item) => item.id !== taskId)]);
+      setActiveId(taskId);
+      setReport(null);
+      setError("");
+      return;
+    }
+
     try {
       const items = await getHistory();
       setHistory(items);
@@ -1614,11 +1745,11 @@ export function App() {
         query: taskObj.query,
         model_key: taskObj.modelKey || modelKey,
         queued_at: taskObj.queuedAt,
-        slm_async_enabled: asyncEnabled,
+        ...(publicMode ? {} : { slm_async_enabled: asyncEnabled }),
       });
 
       toast.success("任务已提交");
-      await handleNewTaskSubmitted(response.task_id);
+      await handleNewTaskSubmitted(response.task_id, taskObj.query);
     } catch (error) {
       toast.error(`提交失败：${error.message}`);
     } finally {
@@ -1650,6 +1781,7 @@ export function App() {
   }
 
   async function handleDeleteTask(id) {
+    if (publicMode) return;
     if (!window.confirm("确定彻底删除该研究记录及其所有落盘文件吗？此操作无法撤销。")) {
       return;
     }
@@ -1696,6 +1828,7 @@ export function App() {
           onOpenChat={handleOpenChat}
           onStop={handleStopTask}
           onDelete={handleDeleteTask}
+          publicMode={restrictedUi}
         />
 
         <SidebarInset className="h-svh max-h-svh min-h-0 overflow-hidden">
@@ -1810,6 +1943,8 @@ export function App() {
                     modelKey={modelKey}
                     onModelChange={setModelKey}
                     onOpenFiles={() => setFileManagerOpen(true)}
+                    publicMode={restrictedUi}
+                    backendConcurrency={backendConcurrency}
                     resetKey={newTaskKey}
                   />
                 </>
@@ -1830,13 +1965,15 @@ export function App() {
                   modelProfiles={modelProfiles}
                   modelKey={modelKey}
                   onModelChange={setModelKey}
+                  publicMode={restrictedUi}
+                  backendConcurrency={backendConcurrency}
                 />
               </div>
             </div>
           ) : null}
         </SidebarInset>
 
-        <Dialog open={fileManagerOpen} onOpenChange={setFileManagerOpen}>
+        {!restrictedUi ? <Dialog open={fileManagerOpen} onOpenChange={setFileManagerOpen}>
           <DialogContent className="max-h-[90vh] max-w-[1200px] overflow-hidden p-0 sm:max-w-[1200px]">
             <div className="border-b border-border px-6 py-5">
               <DialogHeader>
@@ -1848,7 +1985,7 @@ export function App() {
               <FileManager />
             </div>
           </DialogContent>
-        </Dialog>
+        </Dialog> : null}
       </SidebarProvider>
 
       <Toaster position="top-center" richColors />

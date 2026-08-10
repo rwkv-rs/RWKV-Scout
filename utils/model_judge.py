@@ -11,6 +11,7 @@ import json
 import re
 from typing import Any
 
+from config import get_model_stage_temperature, model_sampling_parameters
 from utils.human_review import RUBRIC
 from utils.model_events import visible_model_text
 
@@ -97,13 +98,19 @@ def judge_pair(
 ) -> dict[str, Any]:
     prompt = build_judge_prompt(question, answer_a, answer_b)
     try:
-        response = llm.chat_completion(
-            [
-                {"role": "system", "content": "Return only the requested JSON evaluation."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=512,
-        )
+        temperature = get_model_stage_temperature("model_judge")
+        with model_sampling_parameters(
+            temperature,
+            stage="model_judge",
+            policy_reason="structured_supplementary_quality_judgement",
+        ):
+            response = llm.chat_completion(
+                [
+                    {"role": "system", "content": "Return only the requested JSON evaluation."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=512,
+            )
         raw = str(getattr(response, "content", "") or "")
         parsed = parse_judge_output(raw)
         return {

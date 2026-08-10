@@ -1,0 +1,95 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "atomic_points": [
+          {
+            "id": "P1",
+            "objective": "Bind current version, release date, and theme."
+          }
+        ],
+        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "Project Lumen current official update"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S1",
+            "url": "https://updates.project-lumen.invalid/v1-8",
+            "title": "Project Lumen 1.8: Glass Harbor",
+            "authority": "official",
+            "published_at": "2035-03-01",
+            "retrieved_at": "2035-09-20T12:00:00Z",
+            "content": "Official archive. Version 1.8, Glass Harbor, launched on 2035-03-01."
+          },
+          {
+            "source_id": "S2",
+            "url": "https://updates.project-lumen.invalid/v2-4",
+            "title": "Project Lumen 2.4: Orbit After Rain",
+            "authority": "official",
+            "published_at": "2035-09-18",
+            "retrieved_at": "2035-09-20T12:00:00Z",
+            "content": "Official live update. Project Lumen version 2.4 launched on 2035-09-18. The update title and theme are Orbit After Rain."
+          }
+        ]
+      }
+    },
+    {
+      "type": "cross_validation",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S2"
+            ],
+            "supported_facts": [
+              {
+                "field": "current_version",
+                "value": "2.4",
+                "evidence_ref": "S2",
+                "quote": "version 2.4 launched on 2035-09-18"
+              },
+              {
+                "field": "current_theme",
+                "value": "Orbit After Rain",
+                "evidence_ref": "S2",
+                "quote": "The update title and theme are Orbit After Rain"
+              },
+              {
+                "field": "current_release_date",
+                "value": "2035-09-18",
+                "evidence_ref": "S2",
+                "quote": "version 2.4 launched on 2035-09-18"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "Project Lumen's current live release is **version 2.4**, launched on **2035-09-18**, with the theme **Orbit After Rain** [S2]. The 1.8 page is an older archive, not the current release [S1]."
+    }
+  ],
+  "rejected_attempts": []
+}

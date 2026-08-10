@@ -1,0 +1,68 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "current_version",
+      "expected": "5.1",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "version 5.1 launched on 2041-06-03"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C2",
+      "point_id": "P1",
+      "field": "current_release_date",
+      "expected": "2041-06-03",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "version 5.1 launched on 2041-06-03"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C3",
+      "point_id": "P1",
+      "field": "current_theme",
+      "expected": "Paper Constellations",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "release title and theme are Paper Constellations"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    }
+  ],
+  "forbidden_values": [
+    "version 4.8 is current"
+  ],
+  "behavior": {
+    "max_tool_calls": 2
+  },
+  "reward_dimensions": [
+    "field_coverage",
+    "freshness",
+    "fact_binding",
+    "citation_grounding"
+  ]
+}

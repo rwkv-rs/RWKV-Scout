@@ -1,0 +1,1 @@
+On the specified page, `selector: {}` applies the policy to **every workload in the namespace**, while `directions: [Inbound, Outbound]` activates **isolation in both directions** [S1]. With the empty allow list described there, no traffic is admitted [S1].

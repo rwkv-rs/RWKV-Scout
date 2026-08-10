@@ -1,0 +1,38 @@
+{
+  "schema_version": "rwkv-retrieval-rst-task.v1",
+  "task_id": "rrst_bootstrap_howto_004",
+  "task_group_id": "rrst_bootstrap_howto_004",
+  "round": 0,
+  "parent_id": null,
+  "original_parent_id": "rrst_bootstrap_howto_004",
+  "domain": "fictional_desktop_howto",
+  "rewrite_family": "bootstrap",
+  "rewrite_operator": "bootstrap_source_role_howto",
+  "repair_count": 0,
+  "snapshot_time": "2045-01-15T12:00:00Z",
+  "allowed_tools": [
+    "web_search",
+    "direct_page",
+    "date_diff"
+  ],
+  "capability_tags": [
+    "official_vs_community",
+    "procedure",
+    "no_fake_testing_claim"
+  ],
+  "training_lanes": [
+    "stage_sft",
+    "trajectory_sft",
+    "preference",
+    "verifier_rl"
+  ],
+  "public_files": [
+    "instruction.md",
+    "environment/sources.jsonl"
+  ],
+  "private_files": [
+    "private/contract.json",
+    "private/oracle_trajectory.json",
+    "private/reference_answer.md"
+  ]
+}

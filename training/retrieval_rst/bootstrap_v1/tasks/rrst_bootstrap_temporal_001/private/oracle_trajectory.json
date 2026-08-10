@@ -1,0 +1,187 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "atomic_points": [
+          {
+            "id": "P1",
+            "objective": "Separate first reveal from launch."
+          },
+          {
+            "id": "P2",
+            "objective": "Find the dated first-anniversary event."
+          },
+          {
+            "id": "P3",
+            "objective": "Bind current version and theme."
+          }
+        ],
+        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "Blue Orchard official reveal launch first anniversary"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S1",
+            "url": "https://news.blue-orchard.invalid/reveal",
+            "title": "Blue Orchard reveal",
+            "authority": "official",
+            "published_at": "2034-01-17",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Blue Orchard was first publicly revealed on 2034-01-17; this was not the live launch."
+          },
+          {
+            "source_id": "S2",
+            "url": "https://news.blue-orchard.invalid/launch",
+            "title": "Blue Orchard launch",
+            "authority": "official",
+            "published_at": "2035-05-09",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Blue Orchard entered public live service on 2035-05-09."
+          },
+          {
+            "source_id": "S3",
+            "url": "https://events.blue-orchard.invalid/anniversary-one",
+            "title": "Blue Orchard first anniversary",
+            "authority": "official",
+            "published_at": "2036-05-09",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "The first anniversary event for Blue Orchard begins on 2036-05-09."
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "site:updates.blue-orchard.invalid current live release"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S4",
+            "url": "https://updates.blue-orchard.invalid/current",
+            "title": "Blue Orchard current release",
+            "authority": "official",
+            "published_at": "2040-08-21",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "The current live release is Blue Orchard version 4.3, launched on 2040-08-21, with theme Clouds Remember."
+          }
+        ]
+      }
+    },
+    {
+      "type": "cross_validation",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1",
+              "S2"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_reveal_date",
+                "value": "2034-01-17",
+                "evidence_ref": "S1",
+                "quote": "first publicly revealed on 2034-01-17"
+              },
+              {
+                "field": "launch_date",
+                "value": "2035-05-09",
+                "evidence_ref": "S2",
+                "quote": "entered public live service on 2035-05-09"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P2": {
+            "status": "supported",
+            "evidence_refs": [
+              "S3"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_anniversary_event_date",
+                "value": "2036-05-09",
+                "evidence_ref": "S3",
+                "quote": "first anniversary event for Blue Orchard begins on 2036-05-09"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P3": {
+            "status": "supported",
+            "evidence_refs": [
+              "S4"
+            ],
+            "supported_facts": [
+              {
+                "field": "current_version",
+                "value": "4.3",
+                "evidence_ref": "S4",
+                "quote": "current live release is Blue Orchard version 4.3"
+              },
+              {
+                "field": "current_theme",
+                "value": "Clouds Remember",
+                "evidence_ref": "S4",
+                "quote": "with theme Clouds Remember"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "- First public reveal: **2034-01-17** [S1].\n- Public live launch: **2035-05-09** [S2].\n- First anniversary event: **2036-05-09** [S3].\n- Current live release: **version 4.3**, themed **Clouds Remember** [S4]."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "final",
+      "failure_class": "temporal_role_conflation",
+      "prompt": {
+        "required_fields": [
+          "first_reveal_date",
+          "launch_date",
+          "first_anniversary_event_date",
+          "current_version",
+          "current_theme"
+        ]
+      },
+      "rejected": {
+        "content": "Blue Orchard was revealed, launched, and first celebrated on 2035-05-09."
+      },
+      "chosen": {
+        "content": "- First public reveal: **2034-01-17** [S1].\n- Public live launch: **2035-05-09** [S2].\n- First anniversary event: **2036-05-09** [S3].\n- Current live release: **version 4.3**, themed **Clouds Remember** [S4]."
+      }
+    }
+  ]
+}

@@ -136,21 +136,44 @@ class RetrievalLedger:
             default=str,
         )
 
-    def request_status(self, action: Any, arguments: Mapping[str, Any] | None) -> dict[str, Any] | None:
-        """Return the shared status for an exact request, if it was attempted."""
+    def request_status(
+        self,
+        action: Any,
+        arguments: Mapping[str, Any] | None,
+        *,
+        task_point_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Return an exact request status within the requested task point."""
 
         key = self.request_key(action, arguments)
         with self._lock:
-            return deepcopy(self._requests.get(key))
+            value = self._requests.get(key)
+            if not value:
+                return None
+            if task_point_id and task_point_id not in set(value.get("task_point_ids") or []):
+                return None
+            return deepcopy(value)
 
-    def query_status(self, query: Any) -> dict[str, Any]:
-        """Return whether an exact or equivalent web query already ran."""
+    def query_status(
+        self,
+        query: Any,
+        *,
+        task_point_id: str = "",
+        threshold: float = 0.88,
+    ) -> dict[str, Any]:
+        """Return whether an exact/equivalent query ran for this task point."""
 
         query_key = normalize_query(query)
+        similarity_threshold = max(0.0, min(float(threshold), 1.0))
         with self._lock:
-            exact_matches = [
+            candidates = [
                 item
                 for item in self._searches
+                if not task_point_id or str(item.get("task_point_id") or "") == task_point_id
+            ]
+            exact_matches = [
+                item
+                for item in candidates
                 if query_key and item.get("query_key") == query_key
             ]
             if exact_matches:
@@ -163,14 +186,15 @@ class RetrievalLedger:
                     "match_type": "exact",
                     "matched_query": last.get("query", ""),
                     "similarity": 1.0,
+                    "threshold": similarity_threshold,
                     "last": last,
                     "blocked_count": int(self._blocked_duplicates.get(query_key, 0)),
                 }
 
             best: tuple[float, dict[str, Any]] | None = None
-            for item in self._searches:
+            for item in candidates:
                 score = query_similarity(query, item.get("query", ""))
-                if score >= 0.88 and (best is None or score > best[0]):
+                if score >= similarity_threshold and (best is None or score > best[0]):
                     best = (score, item)
             if best:
                 score, matched = best
@@ -182,6 +206,7 @@ class RetrievalLedger:
                     "match_type": "equivalent",
                     "matched_query": matched.get("query", ""),
                     "similarity": round(score, 4),
+                    "threshold": similarity_threshold,
                     "last": deepcopy(matched),
                     "blocked_count": int(self._blocked_duplicates.get(query_key, 0)),
                 }
@@ -193,6 +218,7 @@ class RetrievalLedger:
                 "match_type": "none",
                 "matched_query": "",
                 "similarity": 0.0,
+                "threshold": similarity_threshold,
                 "last": None,
                 "blocked_count": int(self._blocked_duplicates.get(query_key, 0)),
             }
@@ -243,6 +269,7 @@ class RetrievalLedger:
                 "arguments": deepcopy(dict(arguments or {})),
                 "attempts": 0,
                 "failed_attempts": 0,
+                "task_point_ids": [],
             }
             previous["attempts"] = int(previous.get("attempts") or 0) + 1
             if failed:
@@ -255,6 +282,8 @@ class RetrievalLedger:
             )[:600]
             previous["last_step"] = step
             previous["task_point_id"] = task_point_id
+            if task_point_id and task_point_id not in previous["task_point_ids"]:
+                previous["task_point_ids"].append(task_point_id)
             previous["failed"] = failed
             self._requests[key] = previous
             return deepcopy(previous)

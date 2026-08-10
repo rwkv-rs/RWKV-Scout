@@ -1,0 +1,39 @@
+{
+  "schema_version": "rwkv-retrieval-rst-task.v1",
+  "task_id": "rrst_r1_lumen_temporal_001",
+  "task_group_id": "rrst_group_lumen_001",
+  "round": 1,
+  "parent_id": "rrst_seed_lumen_current_001",
+  "original_parent_id": "rrst_seed_lumen_current_001",
+  "domain": "fictional_product_updates",
+  "rewrite_family": "task_and_time_decomposition",
+  "rewrite_operator": "add_temporal_role_separation",
+  "repair_count": 0,
+  "snapshot_time": "2035-09-20T12:00:00Z",
+  "allowed_tools": [
+    "web_search",
+    "direct_page",
+    "date_diff"
+  ],
+  "capability_tags": [
+    "historical_vs_current",
+    "derived_date",
+    "conflict_resolution",
+    "internal_consistency"
+  ],
+  "training_lanes": [
+    "stage_sft",
+    "trajectory_sft",
+    "preference",
+    "verifier_rl"
+  ],
+  "public_files": [
+    "instruction.md",
+    "environment/sources.jsonl"
+  ],
+  "private_files": [
+    "private/contract.json",
+    "private/oracle_trajectory.json",
+    "private/reference_answer.md"
+  ]
+}

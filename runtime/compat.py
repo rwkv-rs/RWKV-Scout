@@ -15,6 +15,7 @@ from config import (
     get_llm_base_url,
     get_llm_model,
     get_llm_seed,
+    get_llm_sampling_parameters,
     get_llm_temperature,
     get_model_connect_timeout_seconds,
     get_model_chunk_requests_per_task,
@@ -125,6 +126,7 @@ class OpenAICompatBackend:
             "max_tokens": max_tokens or 768,
             "temperature": get_llm_temperature(),
         }
+        self._apply_request_sampling(payload)
         seed = get_llm_seed()
         if seed is not None:
             payload["seed"] = seed
@@ -147,12 +149,38 @@ class OpenAICompatBackend:
             "temperature": get_llm_temperature(),
             "stream": False,
         }
+        self._apply_request_sampling(payload)
         seed = get_llm_seed()
         if seed is not None:
             payload["seed"] = seed
         if stop:
             payload["stop"] = list(stop)
         return self._response(self._post("/completions", payload), text_key="text")
+
+    @staticmethod
+    def _apply_request_sampling(payload: dict[str, Any]) -> None:
+        """Attach only the active request's RWKV-compatible decoding profile."""
+
+        sampling = get_llm_sampling_parameters()
+        for name in (
+            "temperature",
+            "top_p",
+            "top_k",
+            "presence_penalty",
+            "frequency_penalty",
+            "penalty_decay",
+        ):
+            if name in sampling:
+                payload[name] = sampling[name]
+        if "no_penalty_token_ids" in sampling:
+            payload["no_penalty_token_ids"] = list(
+                sampling["no_penalty_token_ids"]
+            )
+        if "presence_penalty" in sampling or "frequency_penalty" in sampling:
+            # vllm-rwkv's additive coefficients are carried by the two OpenAI
+            # penalty fields. Its standard multiplicative repetition penalty
+            # must remain neutral; values such as 0.25 severely distort logits.
+            payload["repetition_penalty"] = 1.0
 
     def batch_text_completion(self, prompts: Sequence[str], *, max_tokens: int = 768) -> list[str]:
         def generate(prompt: str) -> str:

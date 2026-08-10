@@ -102,6 +102,58 @@ class RetrievalLedgerTests(unittest.TestCase):
             0.88,
         )
 
+    def test_equivalent_query_freeze_is_scoped_to_one_task_point(self):
+        ledger = RetrievalLedger()
+        ledger.record(
+            "Zenless Zone Zero current version theme official",
+            {"status": "ok", "results": [{"url": "https://example.com/current"}]},
+            step=1,
+            task_point_id="P2",
+            action="web_search",
+        )
+
+        same_point = ledger.query_status(
+            "official current theme Zenless Zone Zero version",
+            task_point_id="P2",
+        )
+        different_point = ledger.query_status(
+            "official current theme Zenless Zone Zero version",
+            task_point_id="P1",
+        )
+
+        self.assertTrue(same_point["attempted"])
+        self.assertFalse(different_point["attempted"])
+
+    def test_exact_request_freeze_is_scoped_to_every_point_that_ran_it(self):
+        ledger = RetrievalLedger()
+        arguments = {"query": "same query"}
+        ledger.record_request(
+            "web_search",
+            arguments,
+            {"status": "ok", "results": []},
+            task_point_id="P1",
+        )
+
+        self.assertIsNotNone(
+            ledger.request_status("web_search", arguments, task_point_id="P1")
+        )
+        self.assertIsNone(
+            ledger.request_status("web_search", arguments, task_point_id="P2")
+        )
+
+        ledger.record_request(
+            "web_search",
+            arguments,
+            {"status": "ok", "results": []},
+            task_point_id="P2",
+        )
+        self.assertIsNotNone(
+            ledger.request_status("web_search", arguments, task_point_id="P1")
+        )
+        self.assertIsNotNone(
+            ledger.request_status("web_search", arguments, task_point_id="P2")
+        )
+
     def test_branch_view_contains_shared_progress_and_branch_scope(self):
         ledger = RetrievalLedger()
         ledger.record(

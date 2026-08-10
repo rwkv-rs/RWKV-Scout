@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from agent.planner import Planner
@@ -30,8 +30,26 @@ from tools.builtin import load_builtin_tools
 from clients.llm_client import LLMClient
 from utils.experiment_strategies import normalize_strategy
 from utils.freshness import build_freshness_policy
+from utils.chunker import get_token_count
 from utils.task_events import append_task_event
 from utils.task_manager import update_task_progress
+
+
+def planner_environment_context(now: datetime | None = None) -> str:
+    """Expose observable runtime time to RWKV before current/latest planning."""
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    return json.dumps(
+        {
+            "current_utc_datetime": current.isoformat(timespec="seconds"),
+            "current_utc_date": current.date().isoformat(),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 from utils.time_budget import check_time_budget
 from utils.tracker import EventTracker
 
@@ -110,21 +128,162 @@ class Orchestrator:
             },
             constraints=self.state.run_metadata,
             query=user_query,
+            max_sources=6,
+            token_budget=3200,
+            max_chunks_per_source=2,
+            source_locator_char_limit=800,
         )
+        routing_snapshot = self.state.retrieval.planner_routing_snapshot()
         review_context = (
-            context["text"]
+            "CURRENT RUNTIME:\n"
+            + str(self.state.run_metadata.get("runtime_environment") or planner_environment_context())
+            + "\n\n"
+            + context["text"]
             + "\n\nSHARED RETRIEVAL STATE:\n"
             + json.dumps(
-                self.state.retrieval.routing_snapshot(),
+                routing_snapshot,
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
         )
+        validation_context_stats = {
+            **context["context_stats"],
+            "review_context_tokens": get_token_count(review_context),
+            "routing_snapshot_schema": str(
+                routing_snapshot.get("schema_version") or ""
+            ),
+        }
+        available_evidence_refs = [
+            str(item.get("ref_id") or "").strip()
+            for item in context.get("citation_refs") or []
+            if isinstance(item, dict) and str(item.get("ref_id") or "").strip()
+        ]
+        if self._deterministic_results():
+            available_evidence_refs.append("TOOL_RESULTS")
+        evidence_text_by_ref = {
+            str(item.get("ref_id") or ""): "\n".join(
+                value
+                for value in (
+                    str(item.get("title") or ""),
+                    str(item.get("url") or ""),
+                    str(item.get("evidence_text") or ""),
+                )
+                if value
+            )
+            for item in context.get("selected_evidence") or []
+            if isinstance(item, dict) and str(item.get("ref_id") or "").strip()
+        }
+        if self._deterministic_results():
+            evidence_text_by_ref["TOOL_RESULTS"] = json.dumps(
+                self._deterministic_results(), ensure_ascii=False
+            )
         review = self.planner.cross_validate_research(
             user_query,
             task_plan,
             review_context,
+            evidence_refs=available_evidence_refs,
+            evidence_text_by_ref=evidence_text_by_ref,
         )
+        evidence_ref_map = {
+            str(item.get("ref_id") or ""): {
+                "title": str(item.get("title") or ""),
+                "url": str(item.get("url") or ""),
+            }
+            for item in context.get("citation_refs") or []
+            if isinstance(item, dict) and str(item.get("ref_id") or "").strip()
+        }
+        validated_source_urls: list[str] = []
+        point_status = review.get("task_point_status") or {}
+        if isinstance(point_status, dict):
+            for value in point_status.values():
+                if not isinstance(value, dict):
+                    continue
+                if str(value.get("status") or "").casefold() not in {
+                    "answered",
+                    "complete",
+                    "completed",
+                    "supported",
+                    "verified",
+                }:
+                    continue
+                for ref in value.get("evidence_refs") or []:
+                    url = str((evidence_ref_map.get(str(ref)) or {}).get("url") or "").strip()
+                    if url and url not in validated_source_urls:
+                        validated_source_urls.append(url)
+        review["evidence_ref_map"] = evidence_ref_map
+        review["validated_source_urls"] = validated_source_urls
+        evidence_revision = int(self.state.retrieval.evidence_revision or 0)
+        review["evidence_revision"] = evidence_revision
+        point_status_projection: dict[str, dict[str, Any]] = {}
+        if isinstance(point_status, dict):
+            for point_id, value in point_status.items():
+                if not isinstance(value, dict):
+                    continue
+                review_refs = [
+                    str(ref)
+                    for ref in value.get("evidence_refs") or []
+                    if str(ref).strip()
+                ][:8]
+                point_status_projection[str(point_id)] = {
+                    "status": str(value.get("status") or "")[:120],
+                    # [S#] identifiers are local to the validation context and
+                    # may be renumbered by final evidence packing. Persist the
+                    # bound URLs instead so the final writer cannot confuse a
+                    # review-local S1 with a different final S1.
+                    "evidence_urls": [
+                        str((evidence_ref_map.get(ref) or {}).get("url") or "")[:1000]
+                        for ref in review_refs
+                        if str((evidence_ref_map.get(ref) or {}).get("url") or "").strip()
+                    ],
+                    "supported_facts": [
+                        {
+                            "field": str(fact.get("field") or "")[:160],
+                            "value": str(fact.get("value") or "")[:500],
+                            "evidence_url": str(
+                                (
+                                    evidence_ref_map.get(
+                                        str(fact.get("evidence_ref") or "")
+                                    )
+                                    or {}
+                                ).get("url")
+                                or ""
+                            )[:1000],
+                            "quote": str(fact.get("quote") or "")[:1000],
+                        }
+                        for fact in value.get("supported_facts") or []
+                        if isinstance(fact, dict)
+                    ][:12],
+                    "missing_fields": [
+                        str(field)[:300]
+                        for field in value.get("missing_fields") or []
+                        if str(field).strip()
+                    ][:12],
+                }
+        self.state.run_metadata["last_cross_validation"] = {
+            "schema_version": str(
+                review.get("schema_version") or "rwkv-cross-validation.v1"
+            ),
+            "decision": str(review.get("decision") or "")[:120],
+            "missing_points": [
+                str(value)[:120]
+                for value in review.get("missing_points") or []
+                if str(value).strip()
+            ][:16],
+            "conflicts": [
+                str(value)[:500]
+                for value in review.get("conflicts") or []
+                if str(value).strip()
+            ][:8],
+            "task_point_status": point_status_projection,
+            "next_focus": str(review.get("next_focus") or "")[:1000],
+            "reason": str(review.get("reason") or "")[:1000],
+            "evidence_revision": evidence_revision,
+        }
+        if str(review.get("decision") or "").casefold() in {"finish", "replan"}:
+            self.state.run_metadata["last_cross_validation_evidence_revision"] = (
+                evidence_revision
+            )
+            self.state.run_metadata["validated_source_urls"] = validated_source_urls[:24]
         append_task_event(
             self.state.task_id,
             "cross_validation",
@@ -139,14 +298,42 @@ class Orchestrator:
             message=review.get("message", ""),
             sampling_temperature=review.get("sampling_temperature"),
             sampling_seed=review.get("sampling_seed"),
+            task_point_status=point_status_projection,
             raw_model_output=review.get("raw_model_output", ""),
             prompt=review.get("prompt", ""),
             context_text=review_context,
-            context_stats=context["context_stats"],
+            context_stats=validation_context_stats,
+            evidence_revision=evidence_revision,
             claim_ledger=claim_snapshot,
             decision_owner="rwkv",
         )
         return review
+
+    def _cross_validate_if_evidence_changed(
+        self,
+        user_query: str,
+        task_plan: dict[str, Any],
+        *,
+        step: int,
+    ) -> dict[str, Any] | None:
+        """Review one material evidence revision at most once before synthesis."""
+
+        current_revision = int(self.state.retrieval.evidence_revision or 0)
+        reviewed_revision_value = self.state.run_metadata.get(
+            "last_cross_validation_evidence_revision"
+        )
+        reviewed_revision = (
+            int(reviewed_revision_value)
+            if reviewed_revision_value is not None
+            else -1
+        )
+        if current_revision <= reviewed_revision:
+            return None
+        return self._cross_validate_research(
+            user_query,
+            task_plan,
+            step=step,
+        )
 
     def _retrieval_context(self) -> dict[str, Any]:
         return {
@@ -384,7 +571,9 @@ class Orchestrator:
         """Use the RWKV plan directly; no deterministic Intake rewrite."""
 
         self.planner.reset()
-        task_plan = self.planner.create_task_plan(user_query, "")
+        environment_context = planner_environment_context()
+        self.state.run_metadata["runtime_environment"] = environment_context
+        task_plan = self.planner.create_task_plan(user_query, environment_context)
         append_task_event(
             self.state.task_id,
             "task_plan",
@@ -403,7 +592,7 @@ class Orchestrator:
         self.state.run_metadata["freshness_policy"] = freshness_policy
         self.state.retrieval.claims.initialize(task_plan, user_query)
         self.state.run_metadata["claim_ledger"] = self.state.retrieval.claims.snapshot()
-        self.planner.begin_task(user_query, "", task_plan, phase)
+        self.planner.begin_task(user_query, environment_context, task_plan, phase)
         return task_plan
 
     def _run_model_tool_loop(self, user_query: str, model_profile: dict[str, Any]) -> str:

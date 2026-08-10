@@ -1,0 +1,4 @@
+- First public reveal: **2034-01-17** [S1].
+- Public live launch: **2035-05-09** [S2].
+- First anniversary event: **2036-05-09** [S3].
+- Current live release: **version 4.3**, themed **Clouds Remember** [S4].

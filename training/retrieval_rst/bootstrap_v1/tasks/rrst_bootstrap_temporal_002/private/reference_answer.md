@@ -1,0 +1,4 @@
+- First public reveal: **2035-03-28** [S1].
+- Public live launch: **2036-10-02** [S2].
+- First anniversary event: **2037-10-02** [S3].
+- Current live release: **version 6.1**, themed **A Map of Embers** [S4].

@@ -1,0 +1,1 @@
+Orbit Notes launched on **2030-11-07** [S1]. Adding **1 calendar year** gives **2031-11-07**, its first calendar anniversary. This is a deterministic derivation; the source does not announce an anniversary event.

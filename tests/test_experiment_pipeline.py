@@ -27,6 +27,7 @@ from utils.human_review import aggregate_reviews, build_blind_packet, create_rev
 from utils.model_judge import build_judge_prompt, parse_judge_output
 from utils.operational_metrics import collect_operational_metrics, prometheus_text
 from scripts.preflight import run_preflight
+from scripts.run_json_acceptance import _trace_summary
 from utils.retry import retry_with_fallback
 from utils.runtime_gate import analysis_slot
 from utils.time_budget import TaskTimeoutError, task_time_budget
@@ -774,7 +775,9 @@ class ExperimentPipelineTests(unittest.TestCase):
                 orchestrator.planner.begin_task = lambda *_args: None
                 orchestrator.planner.plan_next_action = lambda *_args: next(decisions)
                 orchestrator.planner.observe_tool_result = lambda *_args: None
-                orchestrator.planner.rebuild_session_after_review = lambda *_args: None
+                orchestrator.planner.rebuild_session_after_review = (
+                    lambda *_args, **_kwargs: None
+                )
                 orchestrator._cross_validate_research = lambda *_args, **_kwargs: {
                     "decision": "replan",
                     "missing_points": ["P1"],
@@ -860,6 +863,40 @@ class ExperimentPipelineTests(unittest.TestCase):
             model_output = next(item for item in trace["model_outputs"] if item["phase"] == "query_rewrite")
             self.assertEqual(model_output["output"], "visible query")
             self.assertNotIn("private", json.dumps(trace))
+
+    def test_acceptance_trace_keeps_request_level_sampling_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            token = current_task_id.set("SAMPLING_TRACE")
+            try:
+                with patch.dict("config.DATA_PIPELINE", {"output_directory": str(output)}, clear=False):
+                    record_model_event(
+                        "SAMPLING_TRACE",
+                        status="completed",
+                        operation="chat_completion",
+                        prompt="User: replan",
+                        output='{"name":"web_search"}',
+                        request_stage="planner_replan",
+                        sampling_policy_reason="repeated_strategy_failure",
+                        temperature=0.35,
+                        seed=None,
+                        sampling_parameters={
+                            "temperature": 0.35,
+                            "top_k": 50,
+                            "top_p": 0.35,
+                        },
+                    )
+                    trace = _trace_summary("SAMPLING_TRACE")
+            finally:
+                current_task_id.reset(token)
+            call = trace["model_calls"][0]
+            self.assertEqual(call["request_stage"], "planner_replan")
+            self.assertEqual(call["sampling_policy_reason"], "repeated_strategy_failure")
+            self.assertEqual(call["temperature"], 0.35)
+            self.assertEqual(
+                call["sampling_parameters"],
+                {"temperature": 0.35, "top_k": 50, "top_p": 0.35},
+            )
 
     def test_offline_risk_policy_does_not_enter_or_rewrite_runtime_answer(self):
         policy = {"domain": "medicine_literacy", "risk_checks": ["professional confirmation"]}

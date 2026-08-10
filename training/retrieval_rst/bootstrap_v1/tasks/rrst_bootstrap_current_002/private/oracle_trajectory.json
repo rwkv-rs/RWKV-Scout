@@ -1,0 +1,112 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "atomic_points": [
+          {
+            "id": "P1",
+            "objective": "Bind the current release fields to the newest official source."
+          }
+        ],
+        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "Copper Finch current official release"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S1",
+            "url": "https://archive.copper-finch.invalid/4.8",
+            "title": "Copper Finch 4.8: Quiet Furnace",
+            "authority": "official",
+            "published_at": "2041-01-19",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Official archive: Copper Finch version 4.8, Quiet Furnace, launched on 2041-01-19."
+          },
+          {
+            "source_id": "S2",
+            "url": "https://updates.copper-finch.invalid/5.1",
+            "title": "Copper Finch 5.1: Paper Constellations",
+            "authority": "official",
+            "published_at": "2041-06-03",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Official live update: Copper Finch version 5.1 launched on 2041-06-03. The release title and theme are Paper Constellations."
+          }
+        ]
+      }
+    },
+    {
+      "type": "cross_validation",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S2"
+            ],
+            "supported_facts": [
+              {
+                "field": "current_version",
+                "value": "5.1",
+                "evidence_ref": "S2",
+                "quote": "version 5.1 launched on 2041-06-03"
+              },
+              {
+                "field": "current_release_date",
+                "value": "2041-06-03",
+                "evidence_ref": "S2",
+                "quote": "version 5.1 launched on 2041-06-03"
+              },
+              {
+                "field": "current_theme",
+                "value": "Paper Constellations",
+                "evidence_ref": "S2",
+                "quote": "release title and theme are Paper Constellations"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "Copper Finch's current live release is **version 5.1**, launched on **2041-06-03**, with the theme **Paper Constellations** [S2]. Version 4.8 is an older archived release [S1]."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "final",
+      "failure_class": "stale_source_selected_as_current",
+      "prompt": {
+        "source_order": [
+          "S1",
+          "S2"
+        ]
+      },
+      "rejected": {
+        "content": "Copper Finch is currently on version 4.8, Quiet Furnace."
+      },
+      "chosen": {
+        "content": "Copper Finch's current live release is **version 5.1**, launched on **2041-06-03**, with the theme **Paper Constellations** [S2]. Version 4.8 is an older archived release [S1]."
+      }
+    }
+  ]
+}

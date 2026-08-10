@@ -1,0 +1,1 @@
+Read only https://docs.mesh-garden.invalid/policies/default-isolation and explain what `selector: {}` and `directions: [Inbound, Outbound]` mean in its default-isolation example. Do not expand to open-web search.

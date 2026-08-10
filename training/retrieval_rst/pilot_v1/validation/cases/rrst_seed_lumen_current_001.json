@@ -1,0 +1,57 @@
+{
+  "schema_version": "rwkv-retrieval-rst-validation.v1",
+  "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks/rrst_seed_lumen_current_001",
+  "task_id": "rrst_seed_lumen_current_001",
+  "accepted": true,
+  "issues": [],
+  "metrics": {
+    "source_count": 2,
+    "claim_count": 3,
+    "oracle_event_count": 5,
+    "oracle_tool_call_count": 1,
+    "oracle_cross_validation_count": 1,
+    "instruction_tokens": 33,
+    "answer_tokens": 35,
+    "contamination": {
+      "exact_window_size": 13,
+      "exact_matches": [],
+      "max_5gram_jaccard": 0.0,
+      "nearest": [
+        {
+          "id": "INT_001",
+          "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+          "jaccard_5gram": 0.0
+        },
+        {
+          "id": "INT_002",
+          "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+          "jaccard_5gram": 0.0
+        },
+        {
+          "id": "INT_003",
+          "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+          "jaccard_5gram": 0.0
+        },
+        {
+          "id": "INT_004",
+          "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+          "jaccard_5gram": 0.0
+        },
+        {
+          "id": "INT_005",
+          "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+          "jaccard_5gram": 0.0
+        }
+      ]
+    }
+  },
+  "provenance": {
+    "bundle_sha256": "bc80dd283dad38b737ba63281f31d592270443e360a39ea7396572f99bd1961b",
+    "task_sha256": "695993768ac33c4c5f16bdfb1fb976d0b64ca54758b9f32b017d29372295c825",
+    "instruction_sha256": "6b64e171b73366ea3abfe01a3f9abef1062d53eb6eb53af9b56d5a9968855406",
+    "sources_sha256": "ee01926ae8360536da1afeeda46a1ff2822e308c6ca0ac6614bfef03432e2107",
+    "contract_sha256": "a1b8165c96ae403748972416224d26958bf65f1b2d20fbddf0869a0dc3774336",
+    "oracle_sha256": "d8a73fe231ca1760f83cfe6e958fac511a22eed2063a28cb192c5ed9952e7756",
+    "reference_answer_sha256": "2a3fe5a110065323e1c07aceeb4beaeb06bfc4dd09a0649835151f461109774e"
+  }
+}

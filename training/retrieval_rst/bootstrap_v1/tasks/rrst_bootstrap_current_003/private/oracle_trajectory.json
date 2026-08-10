@@ -1,0 +1,112 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "atomic_points": [
+          {
+            "id": "P1",
+            "objective": "Bind the current release fields to the newest official source."
+          }
+        ],
+        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "Juniper Circuit current official release"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S1",
+            "url": "https://archive.juniper-circuit.invalid/2.1",
+            "title": "Juniper Circuit 2.1: Marble Signal",
+            "authority": "official",
+            "published_at": "2042-04-08",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Official archive: Juniper Circuit version 2.1, Marble Signal, launched on 2042-04-08."
+          },
+          {
+            "source_id": "S2",
+            "url": "https://updates.juniper-circuit.invalid/2.6",
+            "title": "Juniper Circuit 2.6: Lanterns Below",
+            "authority": "official",
+            "published_at": "2042-09-27",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Official live update: Juniper Circuit version 2.6 launched on 2042-09-27. The release title and theme are Lanterns Below."
+          }
+        ]
+      }
+    },
+    {
+      "type": "cross_validation",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S2"
+            ],
+            "supported_facts": [
+              {
+                "field": "current_version",
+                "value": "2.6",
+                "evidence_ref": "S2",
+                "quote": "version 2.6 launched on 2042-09-27"
+              },
+              {
+                "field": "current_release_date",
+                "value": "2042-09-27",
+                "evidence_ref": "S2",
+                "quote": "version 2.6 launched on 2042-09-27"
+              },
+              {
+                "field": "current_theme",
+                "value": "Lanterns Below",
+                "evidence_ref": "S2",
+                "quote": "release title and theme are Lanterns Below"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "Juniper Circuit's current live release is **version 2.6**, launched on **2042-09-27**, with the theme **Lanterns Below** [S2]. Version 2.1 is an older archived release [S1]."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "final",
+      "failure_class": "stale_source_selected_as_current",
+      "prompt": {
+        "source_order": [
+          "S1",
+          "S2"
+        ]
+      },
+      "rejected": {
+        "content": "Juniper Circuit is currently on version 2.1, Marble Signal."
+      },
+      "chosen": {
+        "content": "Juniper Circuit's current live release is **version 2.6**, launched on **2042-09-27**, with the theme **Lanterns Below** [S2]. Version 2.1 is an older archived release [S1]."
+      }
+    }
+  ]
+}

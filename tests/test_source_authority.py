@@ -642,7 +642,7 @@ class SourceAuthorityTests(unittest.TestCase):
         self.assertTrue(result["selected_evidence"])
         self.assertIn("WebSocket proxying", llm_prompt_text(llm))
 
-    def test_official_gate_skips_third_party_page_fetches(self):
+    def test_user_explicit_official_domain_gate_skips_third_party_page_fetches(self):
         plan = {
             "source_policy": "official_required",
             "required_domains": ["miit.gov.cn"],
@@ -669,13 +669,54 @@ class SourceAuthorityTests(unittest.TestCase):
         ):
             result = json.loads(
                 web_search(
-                    "latest MIIT official statistic",
+                    "latest MIIT official statistic site:miit.gov.cn",
                     task_plan=plan,
                     task_id="SOURCE_AUTHORITY_GATE_TEST",
                 )
             )
         self.assertTrue(result["authority_missing"])
         self.assertFalse(result["evidence_ready"])
+        fetch_candidate.assert_not_called()
+
+    def test_model_planned_domain_is_a_discovery_hypothesis_not_a_hard_domain(self):
+        plan = {
+            "source_policy": "official_required",
+            "required_domains": ["miit.gov.cn"],
+        }
+        empty = {
+            "status": "no_results",
+            "provider": "test",
+            "results": [],
+        }
+        with (
+            patch("tools.web_search_generic.search_web_keyless", return_value=empty),
+            patch("tools.web_search_generic.search_web_tavily", return_value=empty),
+            patch(
+                "tools.web_search_generic.discover_official_urls",
+                return_value={
+                    "status": "no_results",
+                    "provider": "official site adapter",
+                    "results": [],
+                },
+            ) as discover,
+            patch("tools.web_search_generic._fetch_candidate") as fetch_candidate,
+            patch("tools.web_search_generic.append_task_event"),
+        ):
+            result = json.loads(
+                web_search(
+                    "latest MIIT official statistic",
+                    task_plan=plan,
+                    task_id="SOURCE_AUTHORITY_HYPOTHESIS_TEST",
+                )
+            )
+
+        self.assertNotIn("required_domains", result)
+        self.assertEqual(
+            result["source_resolution"]["domain_source"],
+            "model_hypothesis_unverified",
+        )
+        self.assertEqual(result["source_resolution"]["preferred_domains"], ["miit.gov.cn"])
+        self.assertEqual(discover.call_args.args[1], ["miit.gov.cn"])
         fetch_candidate.assert_not_called()
 
     def test_unseen_official_task_bootstraps_domain_before_page_fetch(self):

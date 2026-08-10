@@ -1,0 +1,76 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "atomic_points": [
+          {
+            "id": "P1",
+            "objective": "Read the explicit page and bind the two requested fields."
+          }
+        ],
+        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "direct_page",
+      "args": {
+        "url": "https://docs.mesh-garden.invalid/policies/default-isolation"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "direct_page",
+      "content": {
+        "source_id": "S1",
+        "url": "https://docs.mesh-garden.invalid/policies/default-isolation",
+        "title": "Mesh Garden default isolation policy",
+        "authority": "official",
+        "published_at": "2035-04-14",
+        "retrieved_at": "2035-09-20T12:00:00Z",
+        "content": "Skip to content | Sign in | Products | Images | Search. Default isolation example: selector: {} applies the policy to every workload in the namespace. directions: [Inbound, Outbound] activates isolation in both directions. An empty allow list admits no traffic. Footer | Privacy | Navigation."
+      }
+    },
+    {
+      "type": "cross_validation",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ],
+            "supported_facts": [
+              {
+                "field": "selector_semantics",
+                "value": "every workload in the namespace",
+                "evidence_ref": "S1",
+                "quote": "selector: {} applies the policy to every workload in the namespace"
+              },
+              {
+                "field": "directions_semantics",
+                "value": "isolation in both directions",
+                "evidence_ref": "S1",
+                "quote": "directions: [Inbound, Outbound] activates isolation in both directions"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "On the specified page, `selector: {}` applies the policy to **every workload in the namespace**, while `directions: [Inbound, Outbound]` activates **isolation in both directions** [S1]. With the empty allow list described there, no traffic is admitted [S1]."
+    }
+  ],
+  "rejected_attempts": []
+}

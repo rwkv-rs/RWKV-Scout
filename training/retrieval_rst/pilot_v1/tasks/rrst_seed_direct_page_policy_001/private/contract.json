@@ -1,0 +1,54 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "selector_semantics",
+      "expected": "every workload in the namespace",
+      "evidence_refs": [
+        "S1"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S1",
+          "text": "selector: {} applies the policy to every workload in the namespace"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C2",
+      "point_id": "P1",
+      "field": "directions_semantics",
+      "expected": "isolation in both directions",
+      "evidence_refs": [
+        "S1"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S1",
+          "text": "directions: [Inbound, Outbound] activates isolation in both directions"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    }
+  ],
+  "forbidden_values": [
+    "external source"
+  ],
+  "behavior": {
+    "max_tool_calls": 1,
+    "direct_urls_only": true,
+    "allowed_urls": [
+      "https://docs.mesh-garden.invalid/policies/default-isolation"
+    ]
+  },
+  "reward_dimensions": [
+    "direct_url_scope",
+    "noise_rejection",
+    "field_grounding"
+  ]
+}

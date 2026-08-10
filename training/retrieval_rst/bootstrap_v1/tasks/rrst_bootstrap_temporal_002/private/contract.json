@@ -1,0 +1,103 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "first_reveal_date",
+      "expected": "2035-03-28",
+      "evidence_refs": [
+        "S1"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S1",
+          "text": "first publicly revealed on 2035-03-28"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C2",
+      "point_id": "P1",
+      "field": "launch_date",
+      "expected": "2036-10-02",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "entered public live service on 2036-10-02"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C3",
+      "point_id": "P2",
+      "field": "first_anniversary_event_date",
+      "expected": "2037-10-02",
+      "evidence_refs": [
+        "S3"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S3",
+          "text": "first anniversary event for Signal Harbor begins on 2037-10-02"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C4",
+      "point_id": "P3",
+      "field": "current_version",
+      "expected": "6.1",
+      "evidence_refs": [
+        "S4"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S4",
+          "text": "current live release is Signal Harbor version 6.1"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C5",
+      "point_id": "P3",
+      "field": "current_theme",
+      "expected": "A Map of Embers",
+      "evidence_refs": [
+        "S4"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S4",
+          "text": "with theme A Map of Embers"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    }
+  ],
+  "forbidden_values": [
+    "first anniversary event was 2036-10-02",
+    "first reveal was 2036-10-02"
+  ],
+  "behavior": {
+    "max_tool_calls": 3
+  },
+  "reward_dimensions": [
+    "temporal_roles",
+    "field_coverage",
+    "internal_consistency",
+    "fact_binding"
+  ]
+}

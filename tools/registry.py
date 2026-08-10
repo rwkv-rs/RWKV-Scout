@@ -46,6 +46,7 @@ class ToolRegistry:
         "agentic_tool_loop",
         "run_metadata",
         "task_plan",
+        "task_point_id",
     }
 
     @classmethod
@@ -55,6 +56,27 @@ class ToolRegistry:
     @classmethod
     def metadata(cls, name: str) -> dict[str, Any]:
         return dict(cls._tools.get(str(name or ""), {}))
+
+    @classmethod
+    def capability_names(
+        cls,
+        capability: str,
+        *,
+        phase: str | None = None,
+        model_visible_only: bool = False,
+    ) -> list[str]:
+        """Return registered tools implementing one backend capability."""
+
+        requested = str(capability or "").strip()
+        if not requested:
+            return []
+        return [
+            name
+            for name, meta in cls._tools.items()
+            if requested in set(meta.get("capabilities") or ())
+            and cls._phase_allows(meta, phase)
+            and (not model_visible_only or bool(meta.get("model_visible")))
+        ]
 
     @classmethod
     def can_execute(cls, name: str, phase: str | None = None) -> bool:
