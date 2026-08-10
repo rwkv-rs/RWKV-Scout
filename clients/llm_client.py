@@ -1,4 +1,4 @@
-# RWKV-ECRA/clients/llm_client.py
+# RWKV-Scout/clients/llm_client.py
 """Model client facade.
 
 The workflow layer depends on this small facade, while local model execution

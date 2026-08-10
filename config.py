@@ -1,4 +1,4 @@
-# RWKV-ECRA/config.py
+# RWKV-Scout/config.py
 import os
 import json
 import tempfile

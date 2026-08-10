@@ -1,4 +1,4 @@
-"""Production preflight for the exact local RWKV-ECRA deployment contract."""
+"""Production preflight for the exact local RWKV-Scout deployment contract."""
 
 from __future__ import annotations
 

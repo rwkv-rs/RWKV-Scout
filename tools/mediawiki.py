@@ -26,7 +26,7 @@ _PROJECTS = {
 }
 _HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "RWKV-ECRA/0.1 (MediaWiki API retrieval)",
+    "User-Agent": "RWKV-Scout/0.1 (MediaWiki API retrieval)",
 }
 
 

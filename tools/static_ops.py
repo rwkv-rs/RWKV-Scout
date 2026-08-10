@@ -1,4 +1,4 @@
-# RWKV-ECRA/tools/static_ops.py
+# RWKV-Scout/tools/static_ops.py
 import os
 import json
 from utils.file_reader import read_local_file

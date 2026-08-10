@@ -21,7 +21,7 @@ from utils.network_fetch import NetworkFetchError, fetch_json
 _CROSSREF_ENDPOINT = "https://api.crossref.org/works"
 _CROSSREF_HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "RWKV-ECRA/0.1 (research retrieval; Crossref REST)",
+    "User-Agent": "RWKV-Scout/0.1 (research retrieval; Crossref REST)",
 }
 
 

@@ -1,6 +1,6 @@
 # 模型运行时迁移
 
-RWKV-ECRA 的工作流不再把 OpenAI 协议当成模型抽象。工作流只依赖
+RWKV-Scout 的工作流不再把 OpenAI 协议当成模型抽象。工作流只依赖
 `runtime.backend.ModelBackend`，目前有两个实现：
 
 - `direct_rwkv`：项目进程直接加载 checkpoint，通过 Albatross 的 `reference.rwkv7` 推理；

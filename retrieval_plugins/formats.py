@@ -1,7 +1,7 @@
 """Canonical retrieval envelope and provider-response conversion.
 
 Provider adapters may speak Tavily JSON, HTML search rows, scholarly metadata,
-or a local service protocol. The rest of RWKV-ECRA consumes only this stable
+or a local service protocol. The rest of RWKV-Scout consumes only this stable
 envelope, so adding a provider does not add another orchestrator branch.
 """
 

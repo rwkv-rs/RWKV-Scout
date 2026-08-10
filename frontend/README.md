@@ -1,4 +1,4 @@
-# RWKV-ECRA React Frontend
+# RWKV-Scout React Frontend
 
 React + Vite 独立前端，生产环境由 `frontend/server.py` 提供构建文件并代理后端 API。
 
@@ -7,7 +7,7 @@ React + Vite 独立前端，生产环境由 `frontend/server.py` 提供构建文
 先安装依赖：
 
 ```bash
-cd RWKV-ECRA
+cd RWKV-Scout
 npm install --prefix frontend
 ```
 

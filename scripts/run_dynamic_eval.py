@@ -1,4 +1,4 @@
-"""Execute a versioned evaluation dataset through the real RWKV-ECRA flow."""
+"""Execute a versioned evaluation dataset through the real RWKV-Scout flow."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-# RWKV-ECRA/utils/asset_manager.py
+# RWKV-Scout/utils/asset_manager.py
 import os
 import json
 import threading

@@ -1,4 +1,4 @@
-"""Protocol adapters at the RWKV-ECRA tool boundary.
+"""Protocol adapters at the RWKV-Scout tool boundary.
 
 The RWKV engine keeps its existing transcript and JSON contract.  This module
 only converts transport envelopes at the harness boundary so the same agent

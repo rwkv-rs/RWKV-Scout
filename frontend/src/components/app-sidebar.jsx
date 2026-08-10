@@ -151,7 +151,7 @@ export function AppSidebar({
             <span className="text-[10px] font-bold tracking-[-0.04em]">R</span>
           </div>
           <div className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight text-sidebar-foreground">
-            RWKV-ECRA
+            RWKV-Scout
           </div>
         </div>
 

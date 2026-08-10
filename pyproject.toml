@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rwkv-ecra"
+name = "rwkv-scout"
 version = "0.1.0"
 description = "Auditable RWKV retrieval-augmented research system"
 requires-python = ">=3.10"

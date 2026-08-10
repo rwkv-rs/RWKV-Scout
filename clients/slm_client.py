@@ -1,4 +1,4 @@
-# RWKV-ECRA/clients/slm_client.py
+# RWKV-Scout/clients/slm_client.py
 import json
 import requests
 import time

@@ -1,4 +1,4 @@
-# RWKV-ECRA/api.py
+# RWKV-Scout/api.py
 import os
 import sys
 import uvicorn
@@ -39,7 +39,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 setup_env()
 
-app = FastAPI(title="RWKV-ECRA Agent API", description="支持前端隔离请求、文件上传与历史回溯")
+app = FastAPI(title="RWKV-Scout Agent API", description="支持前端隔离请求、文件上传与历史回溯")
 
 
 @app.middleware("http")

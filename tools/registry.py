@@ -1,4 +1,4 @@
-# RWKV-ECRA/tools/registry.py
+# RWKV-Scout/tools/registry.py
 import inspect
 import json
 from typing import Callable, Dict, Any, Iterable, get_origin

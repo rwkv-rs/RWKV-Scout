@@ -1,4 +1,4 @@
-"""Bounded public-web discovery and evidence extraction for RWKV-ECRA.
+"""Bounded public-web discovery and evidence extraction for RWKV-Scout.
 
 This module is deliberately self-contained.  It borrows the useful ideas of
 bounded candidate admission, domain pivots, one-hop expansion and an explicit

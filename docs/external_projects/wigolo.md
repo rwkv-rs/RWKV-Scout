@@ -15,7 +15,7 @@ wigolo solves web acquisition and navigation, not RWKV answer quality, experimen
 1. receive a short search query and bounded result/fetch parameters;
 2. return result metadata and page content/evidence;
 3. preserve provider citation identifiers and source spans when available;
-4. leave synthesis, trust decisions, citation validation and final answer generation to RWKV-ECRA.
+4. leave synthesis, trust decisions, citation validation and final answer generation to RWKV-Scout.
 
 The local adapter in `tools/web_search_wigolo.py` uses only the documented local REST boundary. It does not copy wigolo source code or make wigolo a hard dependency. `auto` falls back to the existing keyless provider; `only` fails explicitly; `off` keeps the original provider. This keeps the core pipeline replaceable and avoids an unreviewed dependency expansion.
 

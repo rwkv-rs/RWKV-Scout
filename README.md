@@ -1,6 +1,6 @@
-# RWKV-ECRA
+# RWKV-Scout
 
-RWKV-ECRA 是一个以 RWKV 为决策核心的联网检索 Agent。它面向需要实时网页、官方资料、结构化数据和多来源核验的问题：RWKV 负责拆解任务、选择工具与查询、判断是否需要继续检索，以及生成最终回答；工程层负责稳定执行工具、抓取和清洗网页、分块提取证据、隔离并发状态、记录 trace 与控制资源。
+RWKV-Scout 是一个以 RWKV 为决策核心的联网检索 Agent。它面向需要实时网页、官方资料、结构化数据和多来源核验的问题：RWKV 负责拆解任务、选择工具与查询、判断是否需要继续检索，以及生成最终回答；工程层负责稳定执行工具、抓取和清洗网页、分块提取证据、隔离并发状态、记录 trace 与控制资源。
 
 当前版本定位为**可运行、可审计的公开 Beta**。单轮检索 Agent 的主链路、并发控制、request-level temperature、网页证据抽取、交叉验证和前后端均已实现；它不是通用长程任务执行器，长任务持久化、断点恢复和 Task Graph 将在后续本地开发分支中实现。
 
@@ -264,8 +264,8 @@ curl http://127.0.0.1:8787/metrics
 下面的流程只依赖仓库文件、你自己的模型服务和私密配置：
 
 ```bash
-git clone git@github.com:w1c2j3/rwkv-ecra-rebuild.git
-cd rwkv-ecra-rebuild
+git clone git@github.com:w1c2j3/RWKV-Scout.git
+cd RWKV-Scout
 git switch chase/retrieval-agent
 
 uv sync --frozen --dev

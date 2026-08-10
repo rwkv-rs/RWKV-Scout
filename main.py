@@ -1,4 +1,4 @@
-# RWKV-ECRA/main.py
+# RWKV-Scout/main.py
 import os
 import sys
 from config import DATA_PIPELINE, API_KEYS

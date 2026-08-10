@@ -26,7 +26,7 @@ _API_ROOT = "https://api.github.com"
 _API_HEADERS_BASE = {
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
-    "User-Agent": "RWKV-ECRA/0.1 (GitHub REST retrieval)",
+    "User-Agent": "RWKV-Scout/0.1 (GitHub REST retrieval)",
 }
 
 

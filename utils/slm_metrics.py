@@ -1,4 +1,4 @@
-# RWKV-ECRA/utils/slm_metrics.py
+# RWKV-Scout/utils/slm_metrics.py
 import json
 import os
 import threading
