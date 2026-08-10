@@ -9,11 +9,27 @@ import urllib.parse
 
 _PUBLIC_TASK_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
 _PUBLIC_TASK_GET = re.compile(
-    rf"^/frontend-api/history/{_PUBLIC_TASK_ID}/(?:events|report)$"
+    rf"^/frontend-api/history/{_PUBLIC_TASK_ID}/(?:events|report|trace)$"
 )
 _PUBLIC_TASK_STOP = re.compile(
-    rf"^/frontend-api/analyze/{_PUBLIC_TASK_ID}/stop$"
+    rf"^/frontend-api/(?:analyze|history)/{_PUBLIC_TASK_ID}/stop$"
 )
+_PUBLIC_TASK_METRICS = re.compile(
+    rf"^/frontend-api/metrics/tokens/{_PUBLIC_TASK_ID}$"
+)
+
+_PUBLIC_GET_ENDPOINTS = {
+    "/frontend-api/config",
+    "/frontend-api/history",
+    "/frontend-api/metrics/operational",
+    "/frontend-api/metrics/tokens",
+    "/frontend-api/tokens",
+}
+
+_PUBLIC_POST_ENDPOINTS = {
+    "/frontend-api/analyze",
+    "/frontend-api/chat",
+}
 
 
 def public_mode_enabled() -> bool:
@@ -22,16 +38,19 @@ def public_mode_enabled() -> bool:
 
 
 def public_frontend_request_allowed(method: str, path: str) -> bool:
-    """Return whether one ``/frontend-api`` request is safe for a public tunnel."""
+    """Allow internal-company UI features except files and destructive deletion."""
 
     normalized_method = str(method or "").upper()
     normalized_path = urllib.parse.unquote(str(path or "")).rstrip("/") or "/"
     if normalized_method == "GET":
-        return normalized_path == "/frontend-api/config" or bool(
-            _PUBLIC_TASK_GET.fullmatch(normalized_path)
+        return (
+            normalized_path in _PUBLIC_GET_ENDPOINTS
+            or bool(_PUBLIC_TASK_GET.fullmatch(normalized_path))
+            or bool(_PUBLIC_TASK_METRICS.fullmatch(normalized_path))
         )
     if normalized_method == "POST":
-        return normalized_path == "/frontend-api/analyze" or bool(
+        return normalized_path in _PUBLIC_POST_ENDPOINTS or bool(
             _PUBLIC_TASK_STOP.fullmatch(normalized_path)
         )
+    # File deletion and task deletion remain disabled in company-public mode.
     return False

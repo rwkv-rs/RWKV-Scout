@@ -71,6 +71,6 @@ export RWKV_ECRA_PUBLIC_MODE=1
 python frontend/server.py --host 0.0.0.0 --port 5177
 ```
 
-Tunnel 只应指向前端端口 `5177`，后端 API 继续监听本机地址。公网模式只开放配置、提交分析、停止当前任务，以及按 task ID 获取 events/report；文件管理、全局历史、删除、直接模型聊天、trace 和 metrics 会返回 `403`。
+Tunnel 只应指向前端端口 `5177`，后端 API 继续监听本机地址。当前“公网模式”面向公司内部开发使用：全局历史、检索对话、直接模型聊天、events/report/trace 和 metrics 都正常开放；只隐藏并阻止文件管理、文件上传以及任务/文件删除。模型连接地址和凭证仍不会返回给浏览器。
 
 生产服务优先读取 `frontend/dist/`，未知页面路径会回退到 `dist/index.html`，因此刷新任务详情页不会返回 404。

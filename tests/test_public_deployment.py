@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -13,34 +14,41 @@ def test_public_frontend_api_uses_an_explicit_allowlist():
     task_id = "TASK_20260810_120000_abcdef"
     allowed = {
         ("GET", "/frontend-api/config"),
+        ("GET", "/frontend-api/history"),
+        ("GET", "/frontend-api/metrics/operational"),
+        ("GET", "/frontend-api/metrics/tokens"),
+        ("GET", f"/frontend-api/metrics/tokens/{task_id}"),
         ("POST", "/frontend-api/analyze"),
+        ("POST", "/frontend-api/chat"),
         ("POST", f"/frontend-api/analyze/{task_id}/stop"),
+        ("POST", f"/frontend-api/history/{task_id}/stop"),
         ("GET", f"/frontend-api/history/{task_id}/events"),
         ("GET", f"/frontend-api/history/{task_id}/report"),
+        ("GET", f"/frontend-api/history/{task_id}/trace"),
     }
     denied = {
-        ("GET", "/frontend-api/history"),
         ("POST", "/frontend-api/upload"),
         ("GET", "/frontend-api/files"),
         ("GET", "/frontend-api/files/content"),
+        ("DELETE", "/frontend-api/files"),
         ("DELETE", f"/frontend-api/history/{task_id}"),
-        ("POST", "/frontend-api/chat"),
-        ("GET", f"/frontend-api/history/{task_id}/trace"),
-        ("GET", "/frontend-api/metrics/operational"),
-        ("GET", "/frontend-api/metrics/tokens"),
     }
 
     assert all(public_frontend_request_allowed(method, path) for method, path in allowed)
     assert not any(public_frontend_request_allowed(method, path) for method, path in denied)
 
 
-def test_public_api_guard_blocks_management_and_returns_sanitized_config(monkeypatch):
+def test_public_api_guard_only_blocks_files_and_destructive_deletion(monkeypatch):
     monkeypatch.setenv("RWKV_ECRA_PUBLIC_MODE", "1")
     from api import app
 
     with TestClient(app) as client:
-        assert client.get("/frontend-api/history").status_code == 403
-        assert client.post("/frontend-api/chat", json={"messages": []}).status_code == 403
+        assert client.get("/frontend-api/history").status_code == 200
+        assert client.get("/frontend-api/metrics/operational").status_code == 200
+        # Validation reaches the chat route (422), so the public-mode guard did not hide it.
+        assert client.post("/frontend-api/chat", json={"messages": []}).status_code == 422
+        assert client.get("/frontend-api/files").status_code == 403
+        assert client.delete("/frontend-api/history/TASK_20260810_120000_abcdef").status_code == 403
         response = client.get("/frontend-api/config")
 
     assert response.status_code == 200
@@ -48,6 +56,30 @@ def test_public_api_guard_blocks_management_and_returns_sanitized_config(monkeyp
     assert data["public_mode"] is True
     assert all("base_url" not in profile for profile in data["models"])
     assert "api_key" not in json.dumps(data).casefold()
+
+
+def test_public_mode_keeps_direct_rwkv_chat_available(monkeypatch):
+    monkeypatch.setenv("RWKV_ECRA_PUBLIC_MODE", "1")
+    monkeypatch.setattr(
+        "clients.llm_client.LLMClient.chat_completion",
+        lambda self, messages, max_tokens: SimpleNamespace(
+            role="assistant",
+            content=f"direct reply to: {messages[-1]['content']}",
+        ),
+    )
+    from api import app
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/frontend-api/chat",
+            json={"messages": [{"role": "user", "content": "hello"}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["message"] == {
+        "role": "assistant",
+        "content": "direct reply to: hello",
+    }
 
 
 def test_model_connection_request_overrides_environment(monkeypatch):

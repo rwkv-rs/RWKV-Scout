@@ -23,7 +23,7 @@ import {
   X,
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
-import { getHistory, getReport, getTaskEvents, startAnalyze, stopTask, deleteTask, getFiles, deleteFile, getFileContent, uploadFile, getRuntimeConfig } from "./api.js";
+import { getHistory, getReport, getTaskEvents, startAnalyze, stopTask, deleteTask, getFiles, deleteFile, getFileContent, uploadFile, getRuntimeConfig, sendChat } from "./api.js";
 import { extractMarkdownOutline, renderModelMarkdown, renderMarkdown, reportToMarkdown } from "./markdown.js";
 import { AppSidebar } from "@/components/app-sidebar";
 import { TaskStatusBadge } from "@/components/task-status-badge";
@@ -72,86 +72,6 @@ function parseTaskTime(taskId) {
   if (!match) return null;
 
   return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]}`;
-}
-
-const PUBLIC_TASK_IDS_KEY = "rwkv_public_task_ids";
-
-function getBrowserTaskIds() {
-  try {
-    const value = JSON.parse(localStorage.getItem(PUBLIC_TASK_IDS_KEY) || "[]");
-    return Array.isArray(value)
-      ? [...new Set(value.filter((item) => typeof item === "string" && item.trim()))]
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function rememberBrowserTaskId(taskId) {
-  if (!taskId) return;
-  const taskIds = [taskId, ...getBrowserTaskIds().filter((item) => item !== taskId)].slice(0, 20);
-  localStorage.setItem(PUBLIC_TASK_IDS_KEY, JSON.stringify(taskIds));
-}
-
-function browserTaskFromEvents(taskId, events) {
-  const userInput = events.find(
-    (event) => event.type === "user_input" && String(event.content || "").trim(),
-  );
-  const finalEvent = [...events].reverse().find((event) => event.type === "final");
-  const stoppedEvent = [...events].reverse().find((event) => event.type === "stopped");
-  const progressEvent = [...events].reverse().find((event) => event.type === "progress");
-  const lastEvent = events[events.length - 1];
-  const query = String(userInput?.content || "").trim();
-  const status = finalEvent?.status === "network_error"
-    ? "network_error"
-    : finalEvent
-      ? "ready"
-      : stoppedEvent
-        ? "stopped"
-        : "running";
-
-  return {
-    id: taskId,
-    title: query || taskId,
-    query,
-    status,
-    progress: progressEvent?.message || progressEvent?.content || "",
-    steps: [],
-    updated_at: lastEvent?.timestamp || parseTaskTime(taskId) || "-",
-    queued_at: "",
-    start_time: parseTaskTime(taskId) || "",
-    end_time: finalEvent?.timestamp || stoppedEvent?.timestamp || "",
-    path: "",
-  };
-}
-
-function mergeBrowserTaskEvents(task, events) {
-  if (!task || !events.length) return task;
-  const snapshot = browserTaskFromEvents(task.id, events);
-  const hasFinal = events.some((event) => event.type === "final");
-  const hasStopped = events.some((event) => event.type === "stopped");
-  return {
-    ...task,
-    title: snapshot.query || task.title,
-    query: snapshot.query || task.query,
-    status: hasFinal || hasStopped ? snapshot.status : task.status,
-    progress: snapshot.progress || task.progress,
-    updated_at: snapshot.updated_at || task.updated_at,
-    end_time: snapshot.end_time || task.end_time,
-  };
-}
-
-async function getBrowserTaskHistory() {
-  const taskIds = getBrowserTaskIds();
-  const tasks = await Promise.all(taskIds.map(async (taskId) => {
-    try {
-      const payload = await getTaskEvents(taskId, 0);
-      return browserTaskFromEvents(taskId, payload.events || []);
-    } catch {
-      return browserTaskFromEvents(taskId, []);
-    }
-  }));
-  return tasks;
 }
 
 function getScrollShadowState(element) {
@@ -1248,7 +1168,7 @@ function LandingState({
               <FolderOpen className="size-3.5" />
               文件目录
             </button>
-          </div> : <span>公网模式 · 仅保留本浏览器任务</span>}
+          </div> : <span>公司内部模式 · 文件管理已隐藏</span>}
           <span>Enter 开始 · Shift + Enter 换行</span>
         </div>
       </section>
@@ -1256,15 +1176,34 @@ function LandingState({
   );
 }
 
-function ChatPanel({ modelProfiles, modelKey, onModelChange, onSubmit, onBack, isSubmitting }) {
+function ChatPanel({ modelProfiles, modelKey, onModelChange, onBack }) {
   const activeProfile = modelProfiles.find((profile) => profile.key === modelKey);
   const [draft, setDraft] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [isSending, setIsSending] = useState(false);
 
-  function submitMessage() {
+  async function submitMessage() {
     const content = draft.trim();
-    if (!content || isSubmitting || !modelKey) return;
+    if (!content || isSending || !modelKey) return;
+    const nextMessages = [...messages, { role: "user", content }];
     setDraft("");
-    onSubmit(content);
+    setMessages(nextMessages);
+    setIsSending(true);
+    try {
+      const requestMessages = nextMessages.filter((message) =>
+        message.role === "user" || message.role === "assistant"
+      );
+      const result = await sendChat(requestMessages, modelKey, 2048);
+      const reply = result?.message?.content || "（模型没有返回可见内容）";
+      setMessages((current) => [...current, { role: "assistant", content: reply }]);
+    } catch (error) {
+      setMessages((current) => [
+        ...current,
+        { role: "error", content: `模型调用失败：${error.message}` },
+      ]);
+    } finally {
+      setIsSending(false);
+    }
   }
 
   return (
@@ -1273,18 +1212,18 @@ function ChatPanel({ modelProfiles, modelKey, onModelChange, onSubmit, onBack, i
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold">
             <MessageCircle className="size-4 text-primary" />
-            检索对话
+            RWKV 直接聊天
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
-            每次发送都会创建真实研究任务，由 RWKV 自己决定是否联网、调用工具、抓取网页并生成报告。
+            直接调用所选 RWKV 模型，不创建检索任务，也不调用搜索工具。
           </p>
         </div>
         <div className="flex items-center gap-2">
           <select
             value={modelKey}
             onChange={(event) => onModelChange(event.target.value)}
-            disabled={!modelProfiles.length || isSubmitting}
-            aria-label="选择检索模型"
+            disabled={!modelProfiles.length || isSending}
+            aria-label="选择聊天模型"
             className="h-8 min-w-48 rounded-md border border-border bg-background px-2 text-xs text-foreground outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
           >
             {modelProfiles.length ? modelProfiles.map((profile) => (
@@ -1300,15 +1239,44 @@ function ChatPanel({ modelProfiles, modelKey, onModelChange, onSubmit, onBack, i
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col py-5">
-        <div className="flex flex-1 flex-col items-center justify-center rounded-md border border-dashed border-border px-6 py-12 text-center">
-          <Search className="size-7 text-muted-foreground/50" />
-          <p className="mt-3 text-sm font-medium">从一个可验证的问题开始</p>
-          <p className="mt-1 max-w-lg text-xs leading-5 text-muted-foreground">
-            例如“深圳地铁一号线有哪些站点？”发送后会进入任务执行页，你可以看到搜索、网页正文、chunk 和最终总结。
-          </p>
-          <span className="mt-3 font-mono text-[10px] text-muted-foreground/70">
-            {activeProfile?.model || "等待模型配置"}
-          </span>
+        <div className="chat-thread min-h-[20rem] flex-1 overflow-y-auto rounded-md border border-border bg-background p-4">
+          {messages.length ? messages.map((message, index) => (
+            <div
+              className={cn(
+                "chat-message",
+                message.role === "user" ? "chat-message-user" : "chat-message-assistant",
+                message.role === "error" && "text-rose-700",
+              )}
+              key={`${message.role}-${index}`}
+            >
+              <div className="chat-message-label">
+                {message.role === "user" ? "你" : message.role === "error" ? "错误" : "RWKV"}
+              </div>
+              {message.role === "assistant" ? (
+                <div
+                  className="trace-model-markdown chat-message-content"
+                  dangerouslySetInnerHTML={{ __html: renderModelMarkdown(message.content) }}
+                />
+              ) : (
+                <div className="chat-message-content whitespace-pre-wrap">{message.content}</div>
+              )}
+            </div>
+          )) : (
+            <div className="flex h-full min-h-[18rem] flex-col items-center justify-center text-center">
+              <MessageCircle className="size-7 text-muted-foreground/50" />
+              <p className="mt-3 text-sm font-medium">直接和 RWKV 模型对话</p>
+              <p className="mt-1 text-xs text-muted-foreground">不会触发检索、网页抓取或研究任务历史。</p>
+              <span className="mt-3 font-mono text-[10px] text-muted-foreground/70">
+                {activeProfile?.model || "等待模型配置"}
+              </span>
+            </div>
+          )}
+          {isSending ? (
+            <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              RWKV 正在生成…
+            </div>
+          ) : null}
         </div>
 
         <div className="mt-5 rounded-md border border-border bg-card p-3">
@@ -1321,24 +1289,24 @@ function ChatPanel({ modelProfiles, modelKey, onModelChange, onSubmit, onBack, i
                 submitMessage();
               }
             }}
-            placeholder="输入需要检索的问题，Enter 创建研究任务，Shift + Enter 换行"
-            aria-label="输入检索问题"
+            placeholder="输入消息，Enter 发送，Shift + Enter 换行"
+            aria-label="输入聊天消息"
             rows={3}
-            disabled={isSubmitting || !modelProfiles.length}
+            disabled={isSending || !modelProfiles.length}
             className="min-h-20 resize-none border-0 px-0 py-0 text-sm shadow-none focus-visible:ring-0"
           />
           <div className="mt-3 flex items-center justify-between border-t border-border pt-3">
             <span className="text-[11px] text-muted-foreground">
-              会触发联网检索，并写入研究任务历史
+              直接模型请求 · 不触发联网检索
             </span>
             <Button
               size="sm"
               className="h-8 rounded-md"
-              disabled={isSubmitting || !draft.trim() || !modelProfiles.length}
+              disabled={isSending || !draft.trim() || !modelProfiles.length}
               onClick={submitMessage}
             >
-              {isSubmitting ? <Loader2 className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />}
-              创建检索任务
+              {isSending ? <Loader2 className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />}
+              发送
             </Button>
           </div>
         </div>
@@ -1465,7 +1433,8 @@ export function App() {
     [executionEvents],
   );
   const visibleFinalAnswer = String(markdown || eventFinalAnswer || "");
-  const restrictedUi = !runtimeConfigReady || publicMode;
+  const hideFileManagement = !runtimeConfigReady || publicMode;
+  const hideDelete = !runtimeConfigReady || publicMode;
   const isAnyRunning = history.some((task) => task.status === "running");
   const activeTaskItem = history.find((task) => task.id === activeId) || null;
   const reportScrollAffordance = useReportScrollAffordance(
@@ -1496,7 +1465,7 @@ export function App() {
   async function refreshHistory(selectFirst = false) {
     try {
       setError("");
-      const items = publicMode ? await getBrowserTaskHistory() : await getHistory();
+      const items = await getHistory();
       setHistory(items);
 
       const nextId = (selectFirst || !activeId) ? items[0]?.id : activeId;
@@ -1514,9 +1483,9 @@ export function App() {
 
   const pollHistory = useCallback(async () => {
     try {
-      if (!publicMode) setHistory(await getHistory());
+      setHistory(await getHistory());
     } catch {}
-  }, [publicMode]);
+  }, []);
 
   const pollExecutionEvents = useCallback(async () => {
     if (!activeId) return;
@@ -1525,14 +1494,9 @@ export function App() {
       if (payload.events?.length) {
         eventCursorRef.current = payload.next_seq || eventCursorRef.current;
         setExecutionEvents((current) => [...current, ...payload.events]);
-        if (publicMode) {
-          setHistory((current) => current.map((task) =>
-            task.id === activeId ? mergeBrowserTaskEvents(task, payload.events) : task,
-          ));
-        }
       }
     } catch {}
-  }, [activeId, publicMode]);
+  }, [activeId]);
 
   useEffect(() => {
     localStorage.setItem("rwkv_task_queue", JSON.stringify(taskQueue));
@@ -1578,7 +1542,8 @@ export function App() {
           setAsyncEnabled(config.slm_async_enabled);
         }
       } catch {
-        setPublicMode(false);
+        // Fail closed until the server confirms whether file management is allowed.
+        setPublicMode(true);
       } finally {
         setRuntimeConfigReady(true);
       }
@@ -1705,26 +1670,7 @@ export function App() {
     setError("");
   }
 
-  async function handleChatSubmit(query) {
-    setChatOpen(false);
-    await handleQuerySubmit(query);
-  }
-
   async function handleNewTaskSubmitted(taskId, query = "") {
-    if (publicMode) {
-      rememberBrowserTaskId(taskId);
-      const task = {
-        ...browserTaskFromEvents(taskId, []),
-        title: query || taskId,
-        query,
-      };
-      setHistory((current) => [task, ...current.filter((item) => item.id !== taskId)]);
-      setActiveId(taskId);
-      setReport(null);
-      setError("");
-      return;
-    }
-
     try {
       const items = await getHistory();
       setHistory(items);
@@ -1811,7 +1757,7 @@ export function App() {
     }
   }
 
-  const currentTitle = chatOpen ? "检索对话" : activeId
+  const currentTitle = chatOpen ? "RWKV 直接聊天" : activeId
     ? getTaskLabel(activeTaskItem)
     : "准备新的研究任务";
 
@@ -1828,7 +1774,7 @@ export function App() {
           onOpenChat={handleOpenChat}
           onStop={handleStopTask}
           onDelete={handleDeleteTask}
-          publicMode={restrictedUi}
+          hideDelete={hideDelete}
         />
 
         <SidebarInset className="h-svh max-h-svh min-h-0 overflow-hidden">
@@ -1882,9 +1828,7 @@ export function App() {
                   modelProfiles={modelProfiles}
                   modelKey={modelKey}
                   onModelChange={setModelKey}
-                  onSubmit={handleChatSubmit}
                   onBack={handleNewRun}
-                  isSubmitting={isSubmitting}
                 />
               ) : (
                 <>
@@ -1943,7 +1887,7 @@ export function App() {
                     modelKey={modelKey}
                     onModelChange={setModelKey}
                     onOpenFiles={() => setFileManagerOpen(true)}
-                    publicMode={restrictedUi}
+                    publicMode={hideFileManagement}
                     backendConcurrency={backendConcurrency}
                     resetKey={newTaskKey}
                   />
@@ -1965,7 +1909,7 @@ export function App() {
                   modelProfiles={modelProfiles}
                   modelKey={modelKey}
                   onModelChange={setModelKey}
-                  publicMode={restrictedUi}
+                  publicMode={hideFileManagement}
                   backendConcurrency={backendConcurrency}
                 />
               </div>
@@ -1973,7 +1917,7 @@ export function App() {
           ) : null}
         </SidebarInset>
 
-        {!restrictedUi ? <Dialog open={fileManagerOpen} onOpenChange={setFileManagerOpen}>
+        {!hideFileManagement ? <Dialog open={fileManagerOpen} onOpenChange={setFileManagerOpen}>
           <DialogContent className="max-h-[90vh] max-w-[1200px] overflow-hidden p-0 sm:max-w-[1200px]">
             <div className="border-b border-border px-6 py-5">
               <DialogHeader>
