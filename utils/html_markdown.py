@@ -147,6 +147,8 @@ class _MarkdownParser(HTMLParser):
         self.table_cell: list[str] | None = None
         self.table_depth = 0
         self.link_stack: list[str] = []
+        self.pre_depth = 0
+        self.pre_parts: list[str] = []
 
     @property
     def active_parts(self) -> list[str]:
@@ -154,6 +156,9 @@ class _MarkdownParser(HTMLParser):
 
     def _append(self, value: str) -> None:
         raw = unescape(value or "")
+        if self.pre_depth:
+            self.pre_parts.append(raw.replace("\r\n", "\n").replace("\r", "\n"))
+            return
         value = re.sub(r"\s+", " ", raw)
         if value.strip():
             self.active_parts.append(value)
@@ -205,6 +210,16 @@ class _MarkdownParser(HTMLParser):
             return
         if tag in _SKIP_TAGS or _is_chrome_container(tag, attributes):
             self.skip_depth = 1
+            return
+        if tag == "pre" and self.table_cell is None:
+            self._flush_line()
+            self.pre_depth += 1
+            if self.pre_depth == 1:
+                self.pre_parts = []
+            return
+        if self.pre_depth:
+            if tag == "br":
+                self.pre_parts.append("\n")
             return
         if tag == "table":
             self._flush_line()
@@ -269,6 +284,17 @@ class _MarkdownParser(HTMLParser):
         if self.skip_depth:
             self.skip_depth -= 1
             return
+        if tag == "pre" and self.pre_depth:
+            self.pre_depth -= 1
+            if not self.pre_depth:
+                body = "".join(self.pre_parts).strip("\n")
+                if body.strip():
+                    fence = "````" if "```" in body else "```"
+                    self.lines.extend([fence, body.rstrip(), fence, ""])
+                self.pre_parts = []
+            return
+        if self.pre_depth:
+            return
         if tag in {"td", "th"} and self.table_cell is not None:
             if self.table_row is None:
                 self.table_row = []
@@ -309,6 +335,13 @@ class _MarkdownParser(HTMLParser):
             self._append(data)
 
     def finish(self) -> str:
+        if self.pre_depth and self.pre_parts:
+            body = "".join(self.pre_parts).strip("\n")
+            if body.strip():
+                fence = "````" if "```" in body else "```"
+                self.lines.extend([fence, body.rstrip(), fence, ""])
+            self.pre_depth = 0
+            self.pre_parts = []
         if self.table_cell is not None and self.table_row is not None:
             self.table_row.append("".join(self.table_cell))
             self.table_cell = None

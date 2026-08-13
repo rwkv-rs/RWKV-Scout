@@ -5,6 +5,10 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping, Sequence
 
+from agent.retrieval_object_contract import (
+    merge_candidate_observations,
+    merge_mapping_rows,
+)
 from utils.experiment_strategies import normalize_strategy
 from utils.evidence_quality import date_mentions, evidence_text, has_substantive_evidence, substantive_evidence_items
 
@@ -135,6 +139,17 @@ def merge_retrieval_results(
                 value = dict(item)
                 value["candidate_queries"] = [candidate_query]
                 value["candidate_ranks"] = [rank]
+                value["object_alignments"] = merge_mapping_rows(
+                    item.get("object_alignments"),
+                    item.get("object_alignment"),
+                )
+                value["retrieval_requests"] = merge_mapping_rows(
+                    item.get("retrieval_requests"),
+                    item.get("retrieval_request"),
+                )
+                value["retrieval_bindings"] = merge_mapping_rows(
+                    item.get("retrieval_bindings")
+                )
                 merged[key] = value
             else:
                 current = merged[key]
@@ -207,6 +222,28 @@ def merge_retrieval_results(
                     selected_chunks.append(dict(selected))
                 if selected_chunks:
                     current["selected_source_chunks"] = selected_chunks[:12]
+                merged_candidates = merge_candidate_observations(
+                    item.get("chunk_candidates"),
+                    current.get("chunk_candidates"),
+                )
+                if merged_candidates:
+                    current["chunk_candidates"] = merged_candidates
+                current["object_alignments"] = merge_mapping_rows(
+                    current.get("object_alignments"),
+                    current.get("object_alignment"),
+                    item.get("object_alignments"),
+                    item.get("object_alignment"),
+                )
+                current["retrieval_requests"] = merge_mapping_rows(
+                    current.get("retrieval_requests"),
+                    current.get("retrieval_request"),
+                    item.get("retrieval_requests"),
+                    item.get("retrieval_request"),
+                )
+                current["retrieval_bindings"] = merge_mapping_rows(
+                    current.get("retrieval_bindings"),
+                    item.get("retrieval_bindings"),
+                )
                 for field in (
                     "source",
                     "provider",
@@ -218,6 +255,9 @@ def merge_retrieval_results(
                     "date",
                     "retrieved_at",
                     "freshness",
+                    "source_object",
+                    "object_alignment",
+                    "retrieval_request",
                 ):
                     if current.get(field) in (None, "", [], {}) and item.get(field) not in (
                         None,

@@ -62,15 +62,23 @@ class AgentProductToolTests(unittest.TestCase):
         connector = next(row for row in catalog if row["name"] == "connector_lookup")
         schema = connector["arguments"]
 
-        self.assertEqual(schema["required"], ["connector", "query"])
+        self.assertEqual(schema["required"], ["operation", "query"])
         self.assertEqual(
-            schema["properties"]["connector"]["enum"],
-            ["weather", "weather_alerts", "github", "papers"],
+            schema["properties"]["operation"]["enum"],
+            [
+                "weather_current",
+                "weather_alerts",
+                "github_repository",
+                "github_code",
+                "github_release",
+                "paper",
+                "paper_series",
+                "crates_release",
+                "pypi_release",
+                "npm_release",
+            ],
         )
-        self.assertEqual(
-            schema["properties"]["scope"]["enum"],
-            ["current", "repositories", "code", "latest_release", "paper"],
-        )
+        self.assertNotIn("scope", schema["properties"])
         self.assertFalse(schema["additionalProperties"])
 
     def test_model_call_validation_rejects_combined_enum_without_rewriting_it(self):
@@ -78,9 +86,8 @@ class AgentProductToolTests(unittest.TestCase):
             ToolRegistry.validate_model_call(
                 "connector_lookup",
                 {
-                    "connector": "github",
+                    "operation": "github_repository,github_code,github_release",
                     "query": "repository release",
-                    "scope": "repositories,code,latest_release",
                 },
             )
 
@@ -131,6 +138,50 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertIn("minimal evidence check", prompt)
         self.assertTrue(prompt.endswith("Assistant: ```json\n"))
         self.assertNotIn('{"decision":"', prompt)
+
+    def test_replan_focus_is_rwkv_selected_without_generating_a_query(self):
+        planner = Planner()
+        prompts = []
+        profiles = []
+
+        class FocusRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                prompts.append(prompt)
+                profiles.append(
+                    {
+                        "stage": config.get_model_request_stage(),
+                        "temperature": config.get_llm_temperature(),
+                    }
+                )
+                return Mock(
+                    content=(
+                        '{"function":"focus_retrieval","arguments":'
+                        '{"task_point_id":"P2","missing_field":"official release date"}}'
+                    )
+                )
+
+        planner.llm = FocusRWKV()
+        focus = planner.select_replan_focus(
+            "find historical and current releases",
+            {
+                "atomic_points": [
+                    {"id": "P1", "task": "historical release"},
+                    {"id": "P2", "task": "current release date"},
+                ]
+            },
+            "[S1] official span: current version is 2.0",
+        )
+
+        self.assertEqual(focus["task_point_id"], "P2")
+        self.assertEqual(focus["missing_field"], "official release date")
+        self.assertEqual(profiles, [{"stage": "replan_focus", "temperature": 0.2}])
+        self.assertIn('"name":"focus_retrieval"', prompts[0])
+        self.assertNotIn('"name":"web_search"', prompts[0])
+        self.assertNotIn("already searched query", prompts[0])
+        self.assertEqual(prompts[0].count("Assistant: ```json"), 1)
 
     def test_rebuilt_planner_uses_request_level_replan_profile(self):
         planner = Planner()
@@ -268,15 +319,14 @@ class AgentProductToolTests(unittest.TestCase):
                     return Mock(
                         content=(
                             '{"name":"connector_lookup","arguments":'
-                            '{"connector":"github","query":"release",'
-                            '"scope":"repositories,code,latest_release"}}'
+                            '{"operation":"github_repository,github_code,github_release",'
+                            '"query":"release"}}'
                         )
                     )
                 return Mock(
                     content=(
                         '{"name":"connector_lookup","arguments":'
-                        '{"connector":"github","query":"release",'
-                        '"scope":"latest_release"}}'
+                        '{"operation":"github_release","query":"release"}}'
                     )
                 )
 
@@ -284,12 +334,12 @@ class AgentProductToolTests(unittest.TestCase):
         decision = planner.plan_next_action("question", {}, "state", "DISCOVERY")
 
         self.assertEqual(decision["action"], "connector_lookup")
-        self.assertEqual(decision["args"]["scope"], "latest_release")
+        self.assertEqual(decision["args"]["operation"], "github_release")
         self.assertEqual(decision["planner_attempts"], 2)
         self.assertEqual([temperature for _, temperature in seen], [0.1, 0.1])
         self.assertIn("must be one of", seen[1][0])
 
-    def test_planner_uses_complete_rolling_online_g1i_function_requests(self):
+    def test_planner_uses_independent_online_g1i_function_requests(self):
         planner = Planner()
         prompts = []
         outputs = [
@@ -332,14 +382,16 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertIn("\nReturn only a JSON function call.\n\nUser: ", prompts[0])
         self.assertTrue(prompts[0].endswith("Assistant: ```json\n"))
         self.assertEqual(prompts[1].count("System:"), 1)
-        self.assertIn("\n\nUser: Function output: ", prompts[1])
-        self.assertIn('"query":"RWKV release"', prompts[1])
+        self.assertNotIn("\n\nUser: Function output: ", prompts[1])
         self.assertIn("Find the RWKV release.", prompts[1])
-        self.assertIn(
+        self.assertIn("Latest completed tool outcome", prompts[1])
+        self.assertIn('"status":"ok"', prompts[1])
+        self.assertNotIn(
             'Assistant: ```json\n{"name":"web_search","arguments":{"query":"RWKV release"}}',
             prompts[1],
         )
-        self.assertEqual(prompts[1].count("Assistant: ```json"), 2)
+        self.assertNotIn('"query":"RWKV release"', prompts[1])
+        self.assertEqual(prompts[1].count("Assistant: ```json"), 1)
         self.assertTrue(prompts[1].endswith("Assistant: ```json\n"))
         for prompt in prompts:
             self.assertNotIn("### User", prompt)
@@ -366,6 +418,13 @@ class AgentProductToolTests(unittest.TestCase):
             "goal": "Find two facts.",
             "atomic_points": [{"id": "P1", "task": "facts", "objective": "find facts"}],
         }
+        authoritative_state = (
+            'Shared retrieval ledger:\n'
+            '{"queries":[{"action":"web_search","query":"same route",'
+            '"task_point_id":"P1","status":"completed"}],'
+            '"frozen_paths":[{"action":"web_search","query":"same route",'
+            '"task_point_id":"P1","reason":"duplicate"}]}'
+        )
         planner.begin_task("Find two facts.", "runtime", task_plan)
         planner.plan_next_action("Find two facts.", {}, "runtime", "DISCOVERY")
         planner.observe_tool_result({"status": "no_new_evidence", "query": "same route"})
@@ -375,23 +434,24 @@ class AgentProductToolTests(unittest.TestCase):
                 "frozen_path": {"action": "web_search", "query": "same route"},
             },
             user_query="Find two facts.",
-            env_context="authoritative state",
+            env_context=authoritative_state,
             phase="DISCOVERY",
         )
         decision = planner.plan_next_action(
-            "Find two facts.", {}, "authoritative state", "DISCOVERY"
+            "Find two facts.", {}, authoritative_state, "DISCOVERY"
         )
 
         self.assertEqual(decision["args"]["query"], "different exact gap")
         self.assertTrue(prompts[1].startswith("System: Tools: ["))
         self.assertIn("RECOVERY INSTRUCTION", prompts[1])
-        self.assertNotIn("same route", prompts[1])
-        self.assertIn('"route_text_withheld_from_rebuild":true', prompts[1])
+        self.assertIn('"query":"same route"', prompts[1])
+        self.assertNotIn("route_text_withheld", prompts[1])
         self.assertNotIn(
             'Assistant: ```json\n{"name":"web_search","arguments":{"query":"same route"}}',
             prompts[1],
         )
-        self.assertIn("Recovery observation:", prompts[1])
+        self.assertIn("Latest completed tool outcome", prompts[1])
+        self.assertNotIn('"previous_request"', prompts[1])
         self.assertEqual(prompts[1].count("Assistant: ```json"), 1)
         self.assertTrue(prompts[1].endswith("Assistant: ```json\n"))
 
@@ -677,9 +737,10 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertIn('"decision":"replan"', prompts[0])
         self.assertNotIn('"missing_point_id"', prompts[0])
         self.assertNotIn('"evidence_needed"', prompts[0])
-        self.assertNotIn("already attempted P1 query", prompts[0])
+        self.assertIn("already attempted P1 query", prompts[0])
+        self.assertEqual(prompts[0].count("already attempted P1 query"), 1)
         self.assertIn('"frozen_route_count":1', prompts[0])
-        self.assertIn('"route_text_withheld_from_replan":true', prompts[0])
+        self.assertNotIn("route_text_withheld", prompts[0])
         self.assertNotIn('"candidates"', prompts[0])
         self.assertTrue(prompts[0].endswith("Assistant: ```json\n"))
         self.assertEqual(decision["router"], "model_rwkv_json")
@@ -745,7 +806,8 @@ class AgentProductToolTests(unittest.TestCase):
         )
 
         self.assertEqual(len(prompts), 2)
-        self.assertNotIn("already searched route", prompts[0])
+        self.assertIn("already searched route", prompts[0])
+        self.assertEqual(prompts[0].count("already searched route"), 1)
         self.assertIn('"frozen_route_count":1', prompts[0])
         self.assertIn("Correction:", prompts[1])
         self.assertTrue(prompts[1].endswith("Assistant: ```json\n"))
@@ -815,10 +877,11 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertIn("LATE_CURRENT_SOURCE_SPAN", projected)
         self.assertIn("2026-08-10T00:00:00Z", projected)
         self.assertNotIn("x" * 100, projected)
-        self.assertNotIn("old route", projected)
+        self.assertIn("old route", projected)
         self.assertEqual(decoded["retrieval_ledger"]["previous_route_count"], 1)
-        self.assertTrue(
-            decoded["retrieval_ledger"]["route_text_withheld_from_replan"]
+        self.assertEqual(
+            decoded["retrieval_ledger"]["route_history"][0]["query"],
+            "old route",
         )
 
     def test_rebuilt_runtime_state_is_valid_json_after_bounding_large_spans(self):
@@ -900,9 +963,11 @@ class AgentProductToolTests(unittest.TestCase):
         )[0]
         runtime = json.loads(runtime_text)
 
-        self.assertNotIn("OLD_QUERY_SHOULD_NOT_REPLAY", body)
+        self.assertIn("OLD_QUERY_SHOULD_NOT_REPLAY", body)
+        self.assertEqual(body.count("OLD_QUERY_SHOULD_NOT_REPLAY"), 1)
         self.assertEqual(runtime["retrieval_ledger"]["previous_route_count"], 1)
         self.assertEqual(runtime["retrieval_ledger"]["frozen_route_count"], 1)
+        self.assertTrue(runtime["retrieval_ledger"]["route_history"][0]["frozen"])
         self.assertEqual(len(runtime["source_locators"]["sources"]), 3)
         self.assertIn(
             "ORIGINAL_BOUND_SPAN",
@@ -1246,7 +1311,7 @@ class AgentProductToolTests(unittest.TestCase):
         result = json.loads(
             ToolRegistry.execute(
                 "connector_lookup",
-                {"connector": "weather", "query": "Shanghai"},
+                {"operation": "weather_current", "query": "Shanghai"},
                 {"agentic_tool_loop": True},
                 phase="ALL",
             )
@@ -1264,9 +1329,8 @@ class AgentProductToolTests(unittest.TestCase):
             ToolRegistry.execute(
                 "connector_lookup",
                 {
-                    "connector": "weather_alerts",
+                    "operation": "weather_alerts",
                     "query": "上海市",
-                    "scope": "current",
                 },
                 {"agentic_tool_loop": True},
                 phase="ALL",
@@ -1282,7 +1346,7 @@ class AgentProductToolTests(unittest.TestCase):
         result = json.loads(
             ToolRegistry.execute(
                 "connector_lookup",
-                {"connector": "weather", "query": "Missing Place"},
+                {"operation": "weather_current", "query": "Missing Place"},
                 {"agentic_tool_loop": True},
                 phase="ALL",
             )

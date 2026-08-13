@@ -106,7 +106,7 @@ def test_candidate_record_is_stored_but_not_counted_as_exact_binding():
     assert point["candidate_record_count"] == 1
     assert (
         point["evidence_records"][0]["support_state"]
-        == "rwkv_candidate_other_record"
+        == "rwkv_candidate_record"
     )
 
 
@@ -245,3 +245,57 @@ def test_duplicate_source_merges_later_exact_grounded_span():
     assert len(source["grounded_spans"]) == 1
     assert source["grounded_spans"][0]["text"] == "Original fetched source text."
     assert source["grounded_spans"][0]["grounding_basis"] == "exact"
+
+
+def test_duplicate_evidence_record_preserves_later_object_and_route_observations():
+    ledger = ClaimLedger()
+    ledger.initialize(
+        {"atomic_points": [{"id": "P1", "task": "current release"}]},
+        "current release",
+    )
+
+    first = _result(claim_id="P1", record_key="v2")
+    first["results"][0].update(
+        {
+            "object_alignment": {"relation": "unresolved"},
+            "retrieval_request": {"request_id": "R-1"},
+            "retrieval_bindings": [{"request_id": "R-1", "task_record_id": "P1"}],
+        }
+    )
+    ledger.ingest("discovery", first, task_point_id="P1", step=1)
+
+    exact = _result(claim_id="P1", record_key="v2")
+    exact["results"][0].update(
+        {
+            "object_alignment": {"relation": "exact"},
+            "object_alignments": [
+                {"relation": "unresolved"},
+                {"relation": "exact"},
+            ],
+            "retrieval_request": {"request_id": "R-2"},
+            "retrieval_bindings": [{"request_id": "R-2", "task_record_id": "P1"}],
+        }
+    )
+    delta = ledger.ingest("focused exact route", exact, task_point_id="P1", step=2)
+
+    point = ledger.snapshot()["claims"][0]
+    record = point["evidence_records"][0]
+    source = point["sources"][0]
+    assert delta["added_evidence_records"] == 0
+    assert delta["updated_evidence_records"] == 1
+    assert {row["relation"] for row in record["object_alignments"]} == {
+        "unresolved",
+        "exact",
+    }
+    assert {row["request_id"] for row in record["retrieval_requests"]} == {
+        "R-1",
+        "R-2",
+    }
+    assert {row["request_id"] for row in source["retrieval_bindings"]} == {
+        "R-1",
+        "R-2",
+    }
+    assert {row["relation"] for row in source["object_alignments"]} == {
+        "unresolved",
+        "exact",
+    }

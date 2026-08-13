@@ -2,9 +2,10 @@
 
 RWKV owns task decomposition, tool choice, query, source target, replanning and
 the final answer. The controller executes calls, keeps shared state, blocks an
-already executed request and enforces resource limits. A stalled retrieval
-rebuilds the Planner from retained state; there is no second completion gate
-between RWKV's ``finish_task`` decision and the RWKV answer Writer.
+already executed request and enforces resource limits. Before synthesis, one
+revision-scoped RWKV binary review may either accept the retained evidence or
+request another planner session; deterministic code never makes that semantic
+decision and never edits the Writer's answer.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import json
 from typing import Any
 
 from retrieval_plugins import is_error, plugin_environment_snapshot
+from agent.retrieval_object_contract import attach_result_object_contract
 from tools.registry import ToolRegistry
 from utils.task_events import append_task_event
 from utils.task_manager import is_task_stopped
@@ -126,11 +128,10 @@ def run_unified_research_loop(
 ) -> str:
     """Execute one bounded RWKV-owned tool loop.
 
-    The Planner already sees retained evidence and owns the finish decision.
-    A second binary CV request was removed from this path after real-trace
-    ablation showed that G1i copied whichever decision literal appeared first
-    in the output contract, independent of evidence. Duplicate/no-progress
-    recovery still rebuilds the Planner session before the resource boundary.
+    The Planner already sees retained evidence and owns the first finish
+    decision. A minimal two-action RWKV review sees the same evidence context
+    as the Writer and may request one new planner session. Duplicate and
+    no-progress recovery also rebuild the Planner before a resource boundary.
     """
 
     state = owner.state
@@ -142,8 +143,10 @@ def run_unified_research_loop(
     phase = "DISCOVERY"
     consecutive_no_progress = 0
     duplicate_recovery_count = 0
+    planner_protocol_recovery_count = 0
     max_consecutive_no_progress = 4
     max_duplicate_recoveries = 2
+    max_planner_protocol_recoveries = 2
     append_task_event(
         state.task_id,
         "research_loop_started",
@@ -157,6 +160,70 @@ def run_unified_research_loop(
     )
 
     last_action = "rwkv_research"
+
+    def rwkv_requests_more_retrieval(*, step: int, trigger: str) -> bool:
+        """Run one revision-scoped RWKV binary review before synthesis."""
+
+        review = owner._cross_validate_if_evidence_changed(
+            user_query,
+            task_plan,
+            step=step,
+            trigger=trigger,
+        )
+        if not isinstance(review, dict) or str(review.get("decision") or "") != "replan":
+            return False
+        feedback = {
+            "status": "cross_validation_replan",
+            "error_class": "rwkv_requested_more_retrieval",
+            "evidence_review": review,
+            "retrieval_ledger": owner._retrieval_ledger.observation(limit=8),
+            "results": [],
+        }
+        _request_recovery_turn(
+            owner,
+            feedback,
+            user_query,
+            phase,
+            step=step,
+        )
+        return True
+
+    def review_new_evidence_revision(*, step: int) -> str:
+        """Let RWKV close or replan immediately after material evidence.
+
+        Waiting until the Planner happened to emit finish_task allowed a
+        successful search to be followed by several copied duplicate queries.
+        This review is still only the established RWKV binary decision: the
+        controller neither judges evidence sufficiency nor authors a query.
+        """
+
+        review = owner._cross_validate_if_evidence_changed(
+            user_query,
+            task_plan,
+            step=step,
+            trigger="evidence_revision",
+        )
+        if not isinstance(review, dict):
+            return ""
+        decision = str(review.get("decision") or "").casefold()
+        if decision != "replan":
+            return decision if decision == "finish" else ""
+        feedback = {
+            "status": "cross_validation_replan",
+            "error_class": "rwkv_requested_more_retrieval",
+            "evidence_review": review,
+            "retrieval_ledger": owner._retrieval_ledger.observation(limit=8),
+            "results": [],
+        }
+        _request_recovery_turn(
+            owner,
+            feedback,
+            user_query,
+            phase,
+            step=step,
+        )
+        return "replan"
+
     for step in range(1, max(1, int(max_steps)) + 1):
         check_time_budget(minimum_seconds=0.2)
         if is_task_stopped(state.task_id):
@@ -197,6 +264,25 @@ def run_unified_research_loop(
 
         if plan.get("planner_error"):
             owner._model_protocol_failure = True
+            planner_protocol_recovery_count += 1
+            if planner_protocol_recovery_count < max_planner_protocol_recoveries:
+                feedback = {
+                    "status": "protocol_error",
+                    "error_class": "planner_protocol_error",
+                    "message": str(plan.get("planner_error") or "")[:1000],
+                    "raw_model_output": str(plan.get("raw_model_output") or "")[:1000],
+                    "allowed_tools": ToolRegistry.model_visible_names(),
+                    "results": [],
+                }
+                state.last_feedback = json.dumps(feedback, ensure_ascii=False)
+                _request_recovery_turn(
+                    owner,
+                    feedback,
+                    user_query,
+                    phase,
+                    step=step,
+                )
+                continue
             return owner._complete_model_tool_loop(
                 user_query,
                 last_action,
@@ -206,6 +292,10 @@ def run_unified_research_loop(
             )
 
         if action == "finish_task":
+            if rwkv_requests_more_retrieval(step=step, trigger="planner_finish"):
+                consecutive_no_progress = 0
+                duplicate_recovery_count = 0
+                continue
             return owner._complete_model_tool_loop(
                 user_query,
                 action,
@@ -246,24 +336,23 @@ def run_unified_research_loop(
                 )
             continue
 
-        exact_duplicate = owner._retrieval_ledger.request_status(action, args)
-        equivalent_duplicate: dict[str, Any] | None = None
+        exact_duplicate = owner._retrieval_ledger.request_status(
+            action,
+            args,
+            task_point_id=task_point_id,
+        )
         if action == "web_search" and str(args.get("query") or "").strip():
-            equivalent_duplicate = owner._retrieval_ledger.query_status(
+            exact_query = owner._retrieval_ledger.query_status(
                 args.get("query"),
                 task_point_id=task_point_id,
-                threshold=0.88,
+                threshold=1.0,
             )
-            if not equivalent_duplicate.get("attempted"):
-                equivalent_duplicate = None
-        duplicate = exact_duplicate or equivalent_duplicate
+            if exact_query.get("exact_match"):
+                exact_duplicate = exact_duplicate or exact_query
+        duplicate = exact_duplicate
         if _is_retrieval_tool(action) and duplicate:
             duplicate_query = str(args.get("query") or args.get("url") or user_query)
-            duplicate_kind = (
-                "exact_duplicate_request"
-                if exact_duplicate
-                else "equivalent_duplicate_query"
-            )
+            duplicate_kind = "exact_duplicate_request"
             duplicate_record = owner._retrieval_ledger.record_duplicate_block(
                 duplicate_query,
                 step=step,
@@ -281,7 +370,7 @@ def run_unified_research_loop(
                 "status": "no_new_evidence",
                 "error_class": duplicate_kind,
                 "message": (
-                    "This exact or equivalent retrieval path already ran. "
+                    "This exact retrieval request already ran for this task record. "
                     "Choose a materially different query/source, use another tool, "
                     "or finish from the retained sources."
                 ),
@@ -309,6 +398,13 @@ def run_unified_research_loop(
                 duplicate_recovery_count >= max_duplicate_recoveries
                 or consecutive_no_progress >= max_consecutive_no_progress
             ):
+                if rwkv_requests_more_retrieval(
+                    step=step,
+                    trigger="duplicate_resource_boundary",
+                ):
+                    consecutive_no_progress = 0
+                    duplicate_recovery_count = 0
+                    continue
                 return owner._complete_model_tool_loop(
                     user_query,
                     action,
@@ -332,6 +428,13 @@ def run_unified_research_loop(
             tool_context = {**tool_context, "task_point_id": task_point_id}
         raw_result = ToolRegistry.execute(action, args, tool_context, phase=None)
         result = _as_dict(raw_result)
+        result = attach_result_object_contract(
+            result,
+            action=action,
+            arguments=args,
+            task_record_id=task_point_id,
+            task_plan=task_plan,
+        )
         owner._retrieval_ledger.record_request(
             action,
             args,
@@ -403,6 +506,12 @@ def run_unified_research_loop(
             phase=phase,
             action=action,
             result=raw_result,
+            retrieval_request=result.get("retrieval_request") or {},
+            source_objects=[
+                row.get("source_object") or {}
+                for row in result.get("results") or []
+                if isinstance(row, dict)
+            ],
             real_network=bool(
                 result.get("real_network", _is_retrieval_tool(action))
             ),
@@ -414,9 +523,30 @@ def run_unified_research_loop(
         if material_changed:
             consecutive_no_progress = 0
             duplicate_recovery_count = 0
+            planner_protocol_recovery_count = 0
+            owner.planner.mark_replan_progress(task_point_id)
+            if _is_retrieval_tool(action):
+                evidence_decision = review_new_evidence_revision(step=step)
+                if evidence_decision == "finish":
+                    return owner._complete_model_tool_loop(
+                        user_query,
+                        action,
+                        rounds,
+                        step,
+                        termination_reason="rwkv_cross_validation_finish",
+                    )
+                if evidence_decision == "replan":
+                    continue
         else:
             consecutive_no_progress += 1
             if consecutive_no_progress >= max_consecutive_no_progress:
+                if rwkv_requests_more_retrieval(
+                    step=step,
+                    trigger="no_progress_resource_boundary",
+                ):
+                    consecutive_no_progress = 0
+                    duplicate_recovery_count = 0
+                    continue
                 return owner._complete_model_tool_loop(
                     user_query,
                     action,

@@ -211,26 +211,26 @@ class Planner:
         self._task_plan: dict[str, Any] | None = None
         # ``_messages`` is an audit trace, not recurrent model context. Every
         # decision is an independent online-G1i request built from the current
-        # state projection and, after the first turn, only the latest compact
-        # Function output. Replaying Assistant calls anchors RWKV to old paths.
+        # state projection and the latest compact outcome. Replaying a prior
+        # Assistant function call anchors RWKV to the completed path.
         self._latest_routing_observation = ""
-        self._latest_tool_call: dict[str, Any] | None = None
         self._decision_count = 0
         self._next_decision_sampling_stage = "planner"
         self._next_decision_seed: int | None = None
         self._replan_generation = 0
         self._active_replan_review: dict[str, Any] | None = None
+        self._active_replan_focus: dict[str, Any] | None = None
 
     def reset(self) -> None:
         self._messages = []
         self._task_plan = None
         self._latest_routing_observation = ""
-        self._latest_tool_call = None
         self._decision_count = 0
         self._next_decision_sampling_stage = "planner"
         self._next_decision_seed = None
         self._replan_generation = 0
         self._active_replan_review = None
+        self._active_replan_focus = None
 
     def execution_transcript(self) -> str:
         """Return the visible routing transcript for final summarization."""
@@ -406,12 +406,12 @@ class Planner:
         self._task_plan = task_plan
         self._messages = []
         self._latest_routing_observation = ""
-        self._latest_tool_call = None
         self._decision_count = 0
         self._next_decision_sampling_stage = "planner"
         self._next_decision_seed = None
         self._replan_generation = 0
         self._active_replan_review = None
+        self._active_replan_focus = None
         point_ids = [
             str(point.get("id") or "").strip()
             for point in task_plan.get("atomic_points") or []
@@ -518,6 +518,7 @@ class Planner:
         user_query: str,
         task_plan: dict[str, Any],
         evidence_context: str,
+        routing_context: str = "",
     ) -> dict[str, Any]:
         """Ask RWKV for one binary review action in the online G1i grammar."""
 
@@ -539,7 +540,16 @@ class Planner:
             f"USER QUESTION:\n{str(user_query or '')}\n\n"
             f"POINTS TO REVIEW:\n{projected_target}\n\n"
             f"RETAINED SOURCE SPANS:\n{str(evidence_context or '')}\n\n"
-            "FINAL ACTION CONTRACT:\n"
+            + (
+                "RETRIEVAL ROUTING STATE (controller observations only; not factual evidence):\n"
+                f"{str(routing_context or '')}\n\n"
+                "A frozen route has already been executed and cannot be repeated. Choose "
+                "continue_retrieval only if a materially different route can still target a "
+                "central missing fact; otherwise choose write_answer from retained evidence.\n\n"
+                if str(routing_context or "").strip()
+                else ""
+            )
+            + "FINAL ACTION CONTRACT:\n"
             "Return exactly one complete JSON object now: "
             '{"name":"continue_retrieval","arguments":{}} or '
             '{"name":"write_answer","arguments":{}}. '
@@ -613,6 +623,167 @@ class Planner:
             "review_owner": "rwkv",
         }
 
+    def select_replan_focus(
+        self,
+        user_query: str,
+        task_plan: dict[str, Any],
+        evidence_context: str,
+    ) -> dict[str, Any]:
+        """Ask RWKV to identify one unresolved task field before replanning.
+
+        This is a separate low-temperature structured request. It does not
+        generate a query, select a source, or judge a fact; the following
+        exploratory Planner request remains responsible for the retrieval
+        action and exact arguments.
+        """
+
+        projected_plan = self._cross_validation_plan_projection(task_plan)
+        point_ids = [
+            str(point.get("id") or "").strip()
+            for point in projected_plan.get("atomic_points") or []
+            if isinstance(point, dict) and str(point.get("id") or "").strip()
+        ]
+        arguments_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "task_point_id": {
+                    "type": "string",
+                    **({"enum": point_ids} if point_ids else {}),
+                },
+                "missing_field": {"type": "string"},
+            },
+            "required": ["task_point_id", "missing_field"],
+            "additionalProperties": False,
+        }
+        tools = [
+            {
+                "name": "focus_retrieval",
+                "description": (
+                    "Select one central task point and one still-unresolved field "
+                    "that the next retrieval should target. This does not create "
+                    "a search query or decide the answer."
+                ),
+                "arguments": arguments_schema,
+            }
+        ]
+        user_prompt = (
+            "The binary RWKV evidence review selected continue_retrieval. From the "
+            "original task records and retained source spans, select exactly one "
+            "central unresolved field for the next independent Planner request. "
+            "Use an existing task_point_id. Keep missing_field short and factual. "
+            "Do not produce a query, URL, source, answer, explanation, or extra key.\n\n"
+            f"USER QUESTION:\n{str(user_query or '')}\n\n"
+            "TASK RECORDS:\n"
+            + json.dumps(projected_plan, ensure_ascii=False, separators=(",", ":"))
+            + "\n\nRETAINED SOURCE SPANS:\n"
+            + str(evidence_context or "")
+            + "\n\nReturn exactly one function call to focus_retrieval."
+        )
+        base_messages = [{"role": "user", "content": user_prompt}]
+        prompt = render_rwkv_transcript(base_messages, tools=tools)
+        temperature = get_model_stage_temperature("replan_focus")
+        raw = ""
+        last_error = ""
+        last_prompt = prompt
+        for attempt in range(2):
+            request_prompt = prompt
+            if attempt:
+                request_prompt = render_rwkv_transcript(
+                    [
+                        {
+                            "role": "user",
+                            "content": (
+                                user_prompt
+                                + "\n\nProtocol correction: return exactly "
+                                '{"name":"focus_retrieval","arguments":'
+                                '{"task_point_id":"P1","missing_field":"..."}}. '
+                                f"Previous error: {last_error[:300]}"
+                            ),
+                        }
+                    ],
+                    tools=tools,
+                )
+            last_prompt = request_prompt
+            try:
+                with model_sampling_parameters(
+                    temperature,
+                    stage="replan_focus",
+                    policy_reason="rwkv_selects_unresolved_task_field",
+                ):
+                    response = self.llm.text_completion(
+                        request_prompt,
+                        max_tokens=min(160, self._completion_budget(request_prompt)),
+                        stop=JSON_CALL_STOP_SUFFIXES,
+                    )
+                raw = str(response.content or "")
+                payload = _canonicalize_tool_payload(_extract_json_object(raw))
+                function_name = payload.get("function")
+                if isinstance(function_name, dict):
+                    function_name = function_name.get("name")
+                focus_name = str(
+                    payload.get("name") or function_name or ""
+                ).strip()
+                if focus_name != "focus_retrieval":
+                    raise ValueError("replan focus name must be focus_retrieval")
+                arguments = payload.get("arguments") or {}
+                if isinstance(arguments, str):
+                    arguments = json.loads(arguments)
+                if not isinstance(arguments, dict):
+                    raise ValueError("replan focus arguments must be an object")
+                task_point_id = str(arguments.get("task_point_id") or "").strip()
+                missing_field = " ".join(
+                    str(arguments.get("missing_field") or "").split()
+                )[:300]
+                if not task_point_id or (point_ids and task_point_id not in point_ids):
+                    raise ValueError("replan focus task_point_id is not in the task plan")
+                if not missing_field:
+                    raise ValueError("replan focus missing_field is empty")
+                focus = {
+                    "schema_version": "rwkv-replan-focus.v1",
+                    "task_point_id": task_point_id,
+                    "missing_field": missing_field,
+                    "focus_owner": "rwkv",
+                    "raw_model_output": raw,
+                    "prompt": request_prompt,
+                    "sampling_temperature": temperature,
+                    "sampling_seed": None,
+                    "focus_attempts": attempt + 1,
+                }
+                self._active_replan_focus = {
+                    key: focus[key]
+                    for key in (
+                        "schema_version",
+                        "task_point_id",
+                        "missing_field",
+                        "focus_owner",
+                    )
+                }
+                return focus
+            except Exception as exc:
+                if classify_error(exc) in {
+                    "timeout",
+                    "network",
+                    "auth",
+                    "quota",
+                    "rate_limit",
+                    "provider",
+                }:
+                    raise
+                last_error = f"{type(exc).__name__}: {exc}"
+        self._active_replan_focus = None
+        return {
+            "schema_version": "rwkv-replan-focus.v1",
+            "status": "protocol_error",
+            "error_class": "replan_focus_protocol",
+            "message": last_error[:1000],
+            "raw_model_output": raw,
+            "prompt": last_prompt,
+            "sampling_temperature": temperature,
+            "sampling_seed": None,
+            "focus_attempts": 2,
+            "focus_owner": "rwkv",
+        }
+
     def rebuild_session_after_review(
         self,
         user_query: str,
@@ -657,7 +828,6 @@ class Planner:
         # Keeping this pointer made the supposedly fresh G1i session start with
         # the exact duplicate query that triggered recovery, anchoring RWKV to
         # the frozen path even though the audit message history was cleared.
-        self._latest_tool_call = None
         self._latest_routing_observation = self._compact_rebuild_observation(
             observation
         )
@@ -737,6 +907,7 @@ class Planner:
         if not self._active_replan_review:
             return
         self._active_replan_review = None
+        self._active_replan_focus = None
         self._next_decision_sampling_stage = "planner"
 
     @staticmethod
@@ -796,7 +967,7 @@ class Planner:
             "invalidates an otherwise executable tool call.\n"
             "Use only the tool names and argument contracts in the catalog. Never emit an answer in tool arguments.\n"
             "Tool choice contract:\n"
-            "- connector_lookup: structured weather/current alerts, a specific GitHub repository/code/release, and scholarly arXiv/DOI paper records. Its scope is one enum value, never a comma-separated list.\n"
+            "- connector_lookup: structured weather, alerts, a specific GitHub repository/code/release, or scholarly record. Choose one complete operation from its enum; operation already includes both source and action, so there is no separate scope.\n"
             "- web_search: general Web research, exact URLs, documentation, and product or service status pages; also use it as connector fallback.\n"
             "- calculator/date_diff/current_time: deterministic calculation or clock observations after required operands are known.\n"
             "- finish_task: stop retrieval and ask RWKV to synthesize from all retained sources.\n"
@@ -804,8 +975,8 @@ class Planner:
             "Tool Output is context for your next decision. You decide whether to retrieve again, use another tool, or finish.\n"
             "Choose calculator for arithmetic, current_time for the clock, date_diff for exact date distance, connector_lookup for structured sources, and web_search for general web research when useful. "
             "When one connector exactly matches the request (weather, weather alerts, a named GitHub repository/code/release, or an arXiv/DOI/scholarly paper), use that structured connector before general-web fallback. A company's product or service status page is general web, not a repository lookup.\n"
-            "The shared ledger reports exact bound and candidate evidence-record counts for every factual point, including zero. These are RWKV extraction observations, not completion judgements. "
-            "Before repeating an already-covered route, compare all factual points and inspect candidate record identities; consider a materially different retrieval when exact evidence is still absent, while keeping the choice and query model-authored.\n"
+            "The shared ledger reports candidate evidence-record counts for every factual point, including zero. These are RWKV extraction observations, not completion judgements. "
+            "Before repeating an already-covered route, compare all factual points and inspect candidate record identities; consider a materially different retrieval when central evidence is still absent, while keeping the choice and query model-authored.\n"
             "For a current or latest request, use the current UTC date visible in Runtime state to disambiguate the search; do not assume that an older record is current.\n"
             "If the latest observation reports no new evidence or a frozen path, choose a materially different query, "
             "source, tool, or finish from retained sources. The controller never supplies a replacement query.\n"
@@ -903,12 +1074,12 @@ class Planner:
 
     @staticmethod
     def _replan_environment_projection(env_context: str) -> str:
-        """Build valid bounded state without replaying a stalled route.
+        """Build valid bounded state with explicit completed/frozen routes.
 
-        Replan is a fresh RWKV request.  Replaying exact query strings in both
-        the ledger and frozen paths copy-anchors the recurrent model to the
-        route that triggered recovery.  Keep observable progress counts and
-        original source spans, but leave the next query entirely to RWKV.
+        Replan is a fresh RWKV request. RWKV must see which exact requests ran
+        and which path was frozen; hiding their text made "choose a different
+        route" impossible to follow. The route history is bounded and clearly
+        labelled as completed/frozen, while the next query remains RWKV-owned.
 
         Every field is bounded before serialization.  Never slice serialized
         JSON: doing that produced malformed Runtime state in real traces.
@@ -922,6 +1093,9 @@ class Planner:
         labels = {
             "Question time/freshness policy": "freshness",
             "Shared retrieval ledger": "retrieval_ledger",
+            "RWKV-selected grounded candidate records": "evidence_records",
+            # Legacy trace label retained only so old saved runs remain
+            # inspectable after the object-contract migration.
             "RWKV-bound exact evidence records": "evidence_records",
             "Bounded original source locators": "source_locators",
             "Minimal original source locators": "source_locators",
@@ -999,8 +1173,10 @@ class Planner:
                 point_progress.append(
                     {
                         "id": str(row.get("id") or "")[:120],
-                        "bound_evidence_record_count": int(
-                            row.get("bound_evidence_record_count") or 0
+                        "task_bound_candidate_record_count": int(
+                            row.get("task_bound_candidate_record_count")
+                            or row.get("candidate_evidence_record_count")
+                            or 0
                         ),
                         "candidate_evidence_record_count": int(
                             row.get("candidate_evidence_record_count") or 0
@@ -1016,13 +1192,58 @@ class Planner:
             labelled["retrieval_ledger"]["unassigned_source_count"] = int(
                 ledger.get("unassigned_source_count") or 0
             )
+            # Present each route exactly once. Earlier projections repeated the
+            # same query in both recent_routes and recent_frozen_routes (and a
+            # third time in recovery state), which strongly anchored G1i to the
+            # path the controller had just rejected.
+            route_order: list[str] = []
+            route_by_key: dict[str, dict[str, Any]] = {}
+            for row in queries:
+                tool = str(row.get("action") or row.get("tool") or "web_search")[:120]
+                query = str(row.get("query") or "")[:500]
+                key = f"{tool.casefold()}:{normalize_query(query)}"
+                if key not in route_by_key:
+                    route_order.append(key)
+                route_by_key[key] = {
+                    "tool": tool,
+                    "query": query,
+                    "task_record_id": str(row.get("task_point_id") or "")[:120],
+                    "status": str(row.get("status") or "")[:80],
+                    "completed": True,
+                    "frozen": False,
+                    "step": row.get("step"),
+                }
+            for row in frozen_paths:
+                tool = str(row.get("action") or row.get("tool") or "web_search")[:120]
+                query = str(row.get("query") or "")[:500]
+                key = f"{tool.casefold()}:{normalize_query(query)}"
+                route = route_by_key.get(key)
+                if route is None:
+                    route_order.append(key)
+                    route = {
+                        "tool": tool,
+                        "query": query,
+                        "task_record_id": str(row.get("task_point_id") or "")[:120],
+                        "status": "",
+                        "completed": False,
+                        "step": row.get("step"),
+                    }
+                    route_by_key[key] = route
+                route["frozen"] = True
+                route["frozen_reason"] = str(row.get("reason") or "")[:120]
+                if not route.get("task_record_id"):
+                    route["task_record_id"] = str(
+                        row.get("task_point_id") or ""
+                    )[:120]
+            route_history = [route_by_key[key] for key in route_order[-8:]]
             labelled["retrieval_ledger"].update(
                 {
                     "previous_route_count": len(queries),
                     "frozen_route_count": len(frozen_paths),
+                    "visible_unique_route_count": len(route_history),
                     "route_status_counts": route_status_counts,
                     "frozen_reason_counts": frozen_reason_counts,
-                    "route_text_withheld_from_replan": bool(queries or frozen_paths),
+                    "route_history": route_history,
                 }
             )
             if compact_infrastructure:
@@ -1065,6 +1286,16 @@ class Planner:
                         )
                         if key in source_freshness
                     }
+                for metadata_key in ("source_object", "object_alignment"):
+                    if isinstance(source.get(metadata_key), dict):
+                        projected_source[metadata_key] = dict(source[metadata_key])
+                for metadata_key in ("object_alignments", "retrieval_bindings"):
+                    if isinstance(source.get(metadata_key), list):
+                        projected_source[metadata_key] = [
+                            dict(value)
+                            for value in source.get(metadata_key) or []
+                            if isinstance(value, dict)
+                        ][:4]
                 spans = [
                     span for span in source.get("spans") or [] if isinstance(span, dict)
                 ]
@@ -1104,6 +1335,23 @@ class Planner:
                         )[:80],
                         "subject_key": str(record.get("subject_key") or "")[:240],
                         "record_key": str(record.get("record_key") or "")[:240],
+                        "source_object": dict(record.get("source_object") or {}),
+                        "object_alignment": dict(
+                            record.get("object_alignment") or {}
+                        ),
+                        "object_alignments": [
+                            dict(value)
+                            for value in record.get("object_alignments") or []
+                            if isinstance(value, dict)
+                        ][:4],
+                        "rwkv_subject_alignment": dict(
+                            record.get("rwkv_subject_alignment") or {}
+                        ),
+                        "retrieval_bindings": [
+                            dict(value)
+                            for value in record.get("retrieval_bindings") or []
+                            if isinstance(value, dict)
+                        ][:4],
                         "field_keys": [
                             str(value)[:120]
                             for value in record.get("field_keys") or []
@@ -1180,7 +1428,8 @@ class Planner:
                     reason = str(value.get("reason") or "unknown")[:120]
                     reasons[reason] = reasons.get(reason, 0) + 1
                 compact["frozen_reason_counts"] = reasons
-                compact["route_text_withheld_from_replan"] = True
+                # Exact route text already appears once in the authoritative
+                # retrieval ledger. The review carries only its count/reason.
         return compact or None
 
     @staticmethod
@@ -1202,9 +1451,7 @@ class Planner:
         if not isinstance(value, dict):
             value = {"status": "recovery", "observation_type": type(value).__name__}
 
-        compact: dict[str, Any] = {
-            "route_text_withheld_from_rebuild": True,
-        }
+        compact: dict[str, Any] = {}
         for key in (
             "schema_version",
             "protocol_version",
@@ -1260,9 +1507,14 @@ class Planner:
                     or request.get("tool")
                     or ""
                 )[:120],
-                "argument_names": sorted(str(key)[:120] for key in arguments)[:12]
+                "arguments": {
+                    str(key)[:120]: (
+                        str(item)[:500] if isinstance(item, str) else item
+                    )
+                    for key, item in arguments.items()
+                }
                 if isinstance(arguments, dict)
-                else [],
+                else {},
             }
 
         frozen_rows = value.get("frozen_paths") or []
@@ -1271,9 +1523,20 @@ class Planner:
         if isinstance(frozen_rows, dict):
             frozen_rows = [frozen_rows]
         if isinstance(frozen_rows, list):
-            compact["frozen_route_count"] = len(
-                [row for row in frozen_rows if isinstance(row, dict)]
-            )
+            projected_frozen = [row for row in frozen_rows if isinstance(row, dict)][-8:]
+            compact["frozen_route_count"] = len(projected_frozen)
+            compact["frozen_routes"] = [
+                {
+                    "tool": str(row.get("action") or row.get("tool") or "")[:120],
+                    "query": str(row.get("query") or "")[:500],
+                    "arguments": dict(row.get("arguments") or {})
+                    if isinstance(row.get("arguments"), dict)
+                    else {},
+                    "task_record_id": str(row.get("task_point_id") or "")[:120],
+                    "reason": str(row.get("reason") or "")[:120],
+                }
+                for row in projected_frozen
+            ]
 
         ledger = value.get("retrieval_ledger")
         if isinstance(ledger, dict):
@@ -1300,6 +1563,16 @@ class Planner:
             compact["retrieval_ledger"]["frozen_route_count"] = len(
                 [row for row in ledger.get("frozen_paths") or [] if isinstance(row, dict)]
             )
+            compact["retrieval_ledger"]["recent_routes"] = [
+                {
+                    "tool": str(row.get("action") or row.get("tool") or "web_search")[:120],
+                    "query": str(row.get("query") or "")[:500],
+                    "task_record_id": str(row.get("task_point_id") or "")[:120],
+                    "status": str(row.get("status") or "")[:80],
+                }
+                for row in ledger.get("queries") or []
+                if isinstance(row, dict)
+            ][-8:]
 
         review = value.get("evidence_review") or value.get("pending_replan")
         if isinstance(review, dict):
@@ -1398,6 +1671,16 @@ class Planner:
                 for key in ("title", "url", "source", "scope", "path", "project", "connector")
                 if key in item
             }
+            for metadata_key in ("source_object", "object_alignment"):
+                if isinstance(item.get(metadata_key), dict):
+                    metadata[metadata_key] = dict(item[metadata_key])
+            for metadata_key in ("object_alignments", "retrieval_bindings"):
+                if isinstance(item.get(metadata_key), list):
+                    metadata[metadata_key] = [
+                        dict(value)
+                        for value in item.get(metadata_key) or []
+                        if isinstance(value, dict)
+                    ][:4]
             if metadata:
                 candidates.append(metadata)
         if candidates:
@@ -1440,6 +1723,13 @@ class Planner:
                         "title": str(item.get("title") or "")[:240],
                         "url": str(item.get("url") or "")[:360],
                         "evidence_status": str(item.get("evidence_status") or "")[:80],
+                        "source_object": dict(item.get("source_object") or {}),
+                        "object_alignment": dict(item.get("object_alignment") or {}),
+                        "object_alignments": [
+                            dict(value)
+                            for value in item.get("object_alignments") or []
+                            if isinstance(value, dict)
+                        ][:4],
                         "locators": locators,
                     }
                 )
@@ -1530,7 +1820,7 @@ class Planner:
         if self._next_decision_sampling_stage in {"planner_recovery", "planner_replan"}:
             recovery_instruction = (
                 "RECOVERY INSTRUCTION:\n"
-                "The previous exact or equivalent retrieval path already ran. Do not repeat its query. "
+                "The previous exact retrieval request already ran. Do not repeat that exact query. "
                 "From the original question and retained source locators, identify one entity, relation, value, "
                 "or date that is still not established. Search for that exact gap while retaining the original "
                 "subject. Treat page titles, snippets, login text, translation text, search pages, and navigation "
@@ -1546,7 +1836,20 @@ class Planner:
             if isinstance(self._active_replan_review, dict)
             else ""
         )
+        active_focus = (
+            json.dumps(
+                self._active_replan_focus,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if isinstance(self._active_replan_focus, dict)
+            else ""
+        )
         runtime_projection = self._replan_environment_projection(env_context)
+        latest_outcome = self._next_decision_observation_projection(
+            self._latest_routing_observation,
+            include_route='"route_history":' not in runtime_projection,
+        )
         return (
             "Current task state (authoritative controller projection):\n"
             f"Question: {str(user_query or '').strip()[:3000]}\n"
@@ -1554,10 +1857,102 @@ class Planner:
             f"Runtime state: {runtime_projection}\n"
             f"Decision number: {self._decision_count + 1}\n"
             f"Phase: {phase}\n\n"
-            f"{recovery_instruction}"
+            + (
+                "Latest completed tool outcome (observation only; not a conversation continuation):\n"
+                f"{latest_outcome}\n\n"
+                if latest_outcome
+                else ""
+            )
+            + f"{recovery_instruction}"
             + (f"Active RWKV evidence review: {active_review}\n" if active_review else "")
             + self._decision_guidance(phase, task_point_example)
+            + (
+                "\nFINAL REPLAN FOCUS (selected by RWKV in the preceding independent request):\n"
+                f"{active_focus}\n"
+                "If retrieval is still needed, target this one unresolved field. Do not copy a completed route."
+                if active_focus
+                else ""
+            )
         )
+
+    @staticmethod
+    def _next_decision_observation_projection(
+        observation: str,
+        *,
+        include_route: bool = False,
+    ) -> str:
+        """Remove a completed request echo from the next independent request.
+
+        The exact executed route remains visible in the authoritative retrieval
+        ledger and the audit trace.  Repeating it again inside the latest tool
+        outcome made the request look like a transcript continuation and caused
+        G1i to copy the same call.  This projection retains only outcome,
+        candidates, grounded locators, counters and errors.
+        """
+
+        text = str(observation or "").strip()
+        if not text:
+            return ""
+        try:
+            value, _ = json.JSONDecoder().raw_decode(text)
+        except (TypeError, json.JSONDecodeError):
+            return text[:1600]
+        if not isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))[:1600]
+
+        projected = dict(value)
+        route_fallback: dict[str, Any] | None = None
+        if include_route:
+            frozen = value.get("frozen_routes")
+            if isinstance(frozen, list):
+                route_fallback = next(
+                    (dict(row) for row in reversed(frozen) if isinstance(row, dict)),
+                    None,
+                )
+            if route_fallback is None and isinstance(value.get("previous_request"), dict):
+                request = dict(value["previous_request"])
+                arguments = request.get("arguments") or {}
+                route_fallback = {
+                    "tool": request.get("tool", ""),
+                    "query": (
+                        arguments.get("query") or arguments.get("url") or ""
+                        if isinstance(arguments, dict)
+                        else ""
+                    ),
+                }
+        for key in (
+            "query",
+            "request",
+            "previous_request",
+            "frozen_path",
+            "frozen_paths",
+            "frozen_routes",
+        ):
+            projected.pop(key, None)
+        if route_fallback:
+            projected["completed_or_frozen_route"] = {
+                key: route_fallback.get(key)
+                for key in (
+                    "tool",
+                    "query",
+                    "task_record_id",
+                    "reason",
+                )
+                if route_fallback.get(key) not in (None, "")
+            }
+        ledger = projected.get("retrieval_ledger")
+        if isinstance(ledger, dict):
+            projected["retrieval_ledger"] = {
+                key: item
+                for key, item in ledger.items()
+                if key not in {"queries", "recent_routes", "recent_frozen_routes"}
+            }
+        rendered = json.dumps(
+            projected,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return rendered[:2400]
 
     def _isolated_decision_messages(
         self,
@@ -1565,12 +1960,11 @@ class Planner:
         env_context: str,
         phase: str,
     ) -> list[dict[str, Any]]:
-        """Build one complete rolling G1i request without replaying history.
+        """Build one independent G1i request without replaying history.
 
-        The request always contains one authoritative User state.  A follow-up
-        additionally contains only the immediately preceding Assistant call
-        and its latest compact Function output.  This preserves the online
-        G1i turn grammar without accumulating older action/result pairs.
+        The request contains one authoritative User state and one fresh
+        Assistant JSON boundary. Completed routes live in the state ledger;
+        their prior Assistant calls are never placed before generation.
         """
 
         point_ids = [
@@ -1590,28 +1984,10 @@ class Planner:
             env_context,
             phase,
         )
-        messages: list[dict[str, Any]] = [
+        return [
             system_message,
             {"role": "user", "content": decision_body},
         ]
-        if self._latest_routing_observation:
-            if self._latest_tool_call:
-                messages.append(
-                    {"role": "assistant", "content": dict(self._latest_tool_call)}
-                )
-                messages.append(
-                    {"role": "tool", "content": self._latest_routing_observation}
-                )
-            else:
-                # Recovery can be reconstructed without an executable prior
-                # call.  In that case the observation belongs to the current
-                # User state rather than a syntactically orphaned Function
-                # output turn.
-                messages[1]["content"] = (
-                    f"{decision_body}\n\nRecovery observation:\n"
-                    f"{self._latest_routing_observation}"
-                )
-        return messages
 
     @staticmethod
     def _render_transcript(messages: list[dict[str, Any]]) -> str:
@@ -1654,7 +2030,15 @@ class Planner:
         candidate_urls = [
             {
                 key: item.get(key, "")
-                for key in ("candidate_rank", "title", "url", "source", "candidate_score")
+                for key in (
+                    "candidate_rank",
+                    "title",
+                    "url",
+                    "source",
+                    "candidate_score",
+                    "source_object",
+                    "object_alignment",
+                )
                 if key in item
             }
             for item in list(value.get("candidate_urls") or [])[:8]
@@ -1742,6 +2126,8 @@ class Planner:
                         "language",
                         "connector",
                         "freshness",
+                        "source_object",
+                        "object_alignment",
                     )
                     if key in item
                 },
@@ -1756,6 +2142,28 @@ class Planner:
                         "chunk_id": candidate.get("chunk_id", ""),
                         "facts": [],
                         "quote": str(candidate.get("quote") or "")[:400],
+                        "task_record_ids": list(
+                            candidate.get("task_record_ids")
+                            or candidate.get("claim_ids")
+                            or []
+                        )[:8],
+                        "field_keys": list(candidate.get("field_keys") or [])[:16],
+                        "source_subject": str(
+                            candidate.get("subject_key")
+                            or candidate.get("source_subject")
+                            or ""
+                        )[:240],
+                        "source_record_key": str(
+                            candidate.get("record_key")
+                            or candidate.get("source_record_key")
+                            or ""
+                        )[:240],
+                        "object_alignment": dict(
+                            candidate.get("object_alignment") or {}
+                        ),
+                        "rwkv_subject_alignment": dict(
+                            candidate.get("rwkv_subject_alignment") or {}
+                        ),
                     }
                     for candidate in candidates
                     if isinstance(candidate, dict)
@@ -1909,7 +2317,11 @@ class Planner:
         self._latest_routing_observation = self._compact_routing_observation(
             observation
         )
-        self._next_decision_sampling_stage = "planner_recovery"
+        self._next_decision_sampling_stage = (
+            "planner_replan"
+            if self._active_replan_review or self._active_replan_focus
+            else "planner_recovery"
+        )
         self._next_decision_seed = None
         if str(user_query or "").strip():
             value = observation if isinstance(observation, dict) else {
@@ -1917,7 +2329,11 @@ class Planner:
                 "message": str(observation or ""),
             }
             self.rebuild_session(user_query, env_context, value, phase)
-            self._next_decision_sampling_stage = "planner_recovery"
+            self._next_decision_sampling_stage = (
+                "planner_replan"
+                if self._active_replan_review or self._active_replan_focus
+                else "planner_recovery"
+            )
 
     @staticmethod
     def _completion_budget(prompt: str) -> int:
@@ -2085,7 +2501,6 @@ class Planner:
             call["task_point_id"] = task_point_id
         if call_id:
             call["call_id"] = call_id
-        self._latest_tool_call = dict(call)
         self._messages.append({"role": "assistant", "content": call})
         self._decision_count += 1
         return {

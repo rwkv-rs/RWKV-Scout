@@ -28,6 +28,7 @@ from utils.rwkv_prompt import (
     consume_final_prefill_boundary,
 )
 from agent.task_plan_contract import compact_task_plan, task_points
+from agent.retrieval_object_contract import merge_mapping_rows, task_record_contract
 
 
 def _clean_answer(value: Any) -> str:
@@ -60,11 +61,53 @@ def _source_body(item: dict[str, Any]) -> str:
 def _source_identity(item: dict[str, Any]) -> str:
     """Build a stable resource identity without judging source semantics."""
 
+    record_metadata = item.get("record_metadata")
+    if isinstance(record_metadata, dict):
+        source_object = record_metadata.get("source_object")
+        source_object_id = (
+            str(source_object.get("source_object_id") or "").strip().casefold()
+            if isinstance(source_object, dict)
+            else ""
+        )
+        record_key = str(
+            record_metadata.get("record_key")
+            or (
+                source_object.get("source_record_id")
+                if isinstance(source_object, dict)
+                else ""
+            )
+            or ""
+        ).strip().casefold()
+        if source_object_id and record_key:
+            # Multiple grounded spans may describe different requested fields
+            # of one observable source record. Keep them in one context block
+            # instead of making RWKV reconstruct the tuple across unrelated
+            # [S#] entries. Empty record keys intentionally do not merge.
+            return f"source-record:{source_object_id}:{record_key}"
+        task_record_ids = [
+            str(value).strip()
+            for value in (
+                record_metadata.get("task_record_ids")
+                or [record_metadata.get("task_record_id")]
+            )
+            if str(value or "").strip()
+        ]
+        if source_object_id and task_record_ids:
+            # When RWKV did not emit a literal record key, group the grounded
+            # spans only at the source-object + task-record boundary. The
+            # context block explicitly keeps record identity unresolved, so
+            # this removes duplicate page headers without claiming that all
+            # spans describe one version/date/advisory.
+            return (
+                "source-object-task:"
+                + source_object_id
+                + ":"
+                + ",".join(sorted(set(task_record_ids)))
+            )
     evidence_record_id = str(item.get("evidence_record_id") or "").strip()
     if evidence_record_id:
-        # Two exact records on the same page may refer to different versions,
-        # dates, advisories or rows. URL-level merging would destroy the
-        # identity boundary the evidence extractor established.
+        # Candidate records without an observable record key remain separate;
+        # URL-level merging could conflate versions, advisories or table rows.
         return f"record:{evidence_record_id}"
     url = str(item.get("url") or "").strip().casefold()
     if url:
@@ -79,7 +122,7 @@ def _source_identity(item: dict[str, Any]) -> str:
 
 
 def _has_grounded_locator(item: dict[str, Any]) -> bool:
-    """Return whether a source carries an exact RWKV-selected source span."""
+    """Return whether a source carries a grounded RWKV-selected source span."""
 
     return any(
         isinstance(row, dict)
@@ -178,7 +221,7 @@ def _source_chunks(
         if any(abs(int(row.get("index") or 0) - focus) <= 1 for focus in focus_indexes)
     ]
     preferred_rows = [*selected_rows, *grounded_rows, *neighbour_rows]
-    # Once RWKV has located exact evidence, the final writer needs that span
+    # Once RWKV has located grounded candidate evidence, the final writer needs that span
     # and its immediate source neighbourhood, not an unrelated page preamble
     # or every historical table row from the same document.  The complete
     # source_chunks record remains in state for recovery and later replans.
@@ -429,15 +472,7 @@ def _claim_grounded_source_items(
         if evidence_records:
             for record in evidence_records[: max(2, int(grounded_span_limit) * 3)]:
                 quote = str(record.get("quote") or "").strip()
-                support_state = str(record.get("support_state") or "")
-                context_role = (
-                    "exact_evidence_record"
-                    if support_state in {
-                        "rwkv_exact_requested_record",
-                        "rwkv_supported_exact_span",
-                    }
-                    else "candidate_evidence_record"
-                )
+                context_role = "candidate_evidence_record"
                 item: dict[str, Any] = {
                     "evidence_record_id": str(
                         record.get("evidence_record_id") or ""
@@ -454,6 +489,11 @@ def _claim_grounded_source_items(
                     "content": quote,
                     "record_metadata": {
                         "task_record_id": claim_id,
+                        "task_record_ids": [claim_id] if claim_id else [],
+                        "task_record_relation": str(claim.get("relation") or ""),
+                        "task_record_time_scope": str(
+                            claim.get("time_scope") or "unspecified"
+                        ),
                         "subject_key": str(record.get("subject_key") or ""),
                         "record_key": str(record.get("record_key") or ""),
                         "field_keys": list(record.get("field_keys") or [])[:16],
@@ -463,6 +503,30 @@ def _claim_grounded_source_items(
                             record.get("field_contract_valid", True)
                         ),
                         "binding_origin": str(record.get("binding_origin") or ""),
+                        "source_object": dict(record.get("source_object") or {}),
+                        "object_alignment": dict(
+                            record.get("object_alignment") or {}
+                        ),
+                        "object_alignments": merge_mapping_rows(
+                            record.get("object_alignments"),
+                            record.get("object_alignment"),
+                        )[:8],
+                        "rwkv_subject_alignment": dict(
+                            record.get("rwkv_subject_alignment") or {}
+                        ),
+                        "task_object_alignments": [
+                            dict(value)
+                            for value in record.get("task_object_alignments") or []
+                            if isinstance(value, dict)
+                        ][:8],
+                        "retrieval_request": dict(record.get("retrieval_request") or {}),
+                        "retrieval_requests": merge_mapping_rows(
+                            record.get("retrieval_requests"),
+                            record.get("retrieval_request"),
+                        )[:8],
+                        "retrieval_bindings": merge_mapping_rows(
+                            record.get("retrieval_bindings")
+                        )[:8],
                     },
                     "chunk_candidates": [
                         {
@@ -491,6 +555,15 @@ def _claim_grounded_source_items(
                     "date",
                     "retrieved_at",
                     "freshness",
+                    "source_kind",
+                    "authority",
+                    "connector",
+                    "operation",
+                    "source_object",
+                    "retrieval_request",
+                    "object_alignments",
+                    "retrieval_requests",
+                    "retrieval_bindings",
                 ):
                     if record.get(key) not in (None, "", [], {}):
                         item[key] = record[key]
@@ -597,7 +670,7 @@ def _unbound_fallback_items(
 
 
 def _merge_source_records(items: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
-    """Merge duplicate URLs while preserving all model-routed source spans."""
+    """Merge only identical observable records and exact duplicate resources."""
 
     merged: list[dict[str, Any]] = []
     index_by_identity: dict[str, int] = {}
@@ -614,6 +687,12 @@ def _merge_source_records(items: Iterable[dict[str, Any]]) -> tuple[list[dict[st
         current = merged[index_by_identity[identity]]
         for key, value in item.items():
             if key in {
+                "object_alignments",
+                "retrieval_requests",
+                "retrieval_bindings",
+            }:
+                current[key] = merge_mapping_rows(current.get(key), value)
+            elif key in {
                 "claim_ids",
                 "source_chunks",
                 "selected_source_chunks",
@@ -630,6 +709,38 @@ def _merge_source_records(items: Iterable[dict[str, Any]]) -> tuple[list[dict[st
                     seen_rows.add(marker)
                     combined.append(row)
                 current[key] = combined
+            elif key == "record_metadata" and isinstance(value, dict):
+                existing_metadata = current.get("record_metadata")
+                if not isinstance(existing_metadata, dict):
+                    current["record_metadata"] = dict(value)
+                    continue
+                for metadata_key, metadata_value in value.items():
+                    if metadata_key in {"field_keys", "task_record_ids"}:
+                        existing_values = list(existing_metadata.get(metadata_key) or [])
+                        incoming_values = (
+                            list(metadata_value or [])
+                            if isinstance(metadata_value, list)
+                            else [metadata_value]
+                        )
+                        existing_metadata[metadata_key] = list(
+                            dict.fromkeys(
+                                str(row)
+                                for row in [*existing_values, *incoming_values]
+                                if str(row).strip()
+                            )
+                        )[:16]
+                    elif metadata_key in {
+                        "object_alignments",
+                        "retrieval_requests",
+                        "retrieval_bindings",
+                        "task_object_alignments",
+                    }:
+                        existing_metadata[metadata_key] = merge_mapping_rows(
+                            existing_metadata.get(metadata_key),
+                            metadata_value,
+                        )
+                    elif existing_metadata.get(metadata_key) in (None, "", [], {}):
+                        existing_metadata[metadata_key] = metadata_value
             elif current.get(key) in (None, "", [], {}):
                 current[key] = value
     return merged, duplicate_count
@@ -659,6 +770,7 @@ def _citation_refs(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 ),
                 "context_role": str(item.get("context_role") or ""),
                 "record_metadata": dict(item.get("record_metadata") or {}),
+                "source_object": dict(item.get("source_object") or {}),
                 "task_point_ids": [
                     str(value)
                     for value in item.get("claim_ids") or []
@@ -753,6 +865,59 @@ def _source_selection_metadata(
     if str(item.get("source_kind") or "").casefold() == "official":
         authority_rank = max(authority_rank, 3)
     grounded = _has_grounded_locator(item)
+    record_metadata = (
+        item.get("record_metadata")
+        if isinstance(item.get("record_metadata"), dict)
+        else {}
+    )
+    alignment = (
+        record_metadata.get("object_alignment")
+        if isinstance(record_metadata.get("object_alignment"), dict)
+        else item.get("object_alignment")
+        if isinstance(item.get("object_alignment"), dict)
+        else {}
+    )
+    alignment_candidates = [
+        row
+        for row in (
+            record_metadata.get("object_alignments")
+            or item.get("object_alignments")
+            or []
+        )
+        if isinstance(row, dict)
+    ]
+    if alignment:
+        alignment_candidates.insert(0, alignment)
+    alignment_priority = {
+        "exact": 4,
+        "not_explicitly_scoped": 3,
+        "source_identity_unavailable": 2,
+        "unresolved": 1,
+        "conflict": 0,
+    }
+    if alignment_candidates:
+        alignment = max(
+            alignment_candidates,
+            key=lambda row: alignment_priority.get(
+                str(row.get("relation") or "").casefold(),
+                1,
+            ),
+        )
+    alignment_relation = str(alignment.get("relation") or "").casefold()
+    object_alignment_rank = alignment_priority.get(alignment_relation, 1)
+    subject_alignment = (
+        record_metadata.get("rwkv_subject_alignment")
+        if isinstance(record_metadata.get("rwkv_subject_alignment"), dict)
+        else {}
+    )
+    subject_alignment_relation = str(
+        subject_alignment.get("relation") or ""
+    ).casefold()
+    subject_alignment_rank = {
+        "exact": 2,
+        "unresolved": 1,
+        "conflict": 0,
+    }.get(subject_alignment_relation, 1)
     source_date = ""
     source_date_origin = ""
     freshness = item.get("freshness") if isinstance(item.get("freshness"), dict) else {}
@@ -782,12 +947,18 @@ def _source_selection_metadata(
         "structured_record": structured,
         "authority_rank": authority_rank,
         "grounded_locator": grounded,
+        "object_alignment_relation": alignment_relation or None,
+        "object_alignment_rank": object_alignment_rank,
+        "rwkv_subject_alignment_relation": subject_alignment_relation or None,
+        "rwkv_subject_alignment_rank": subject_alignment_rank,
         "source_date": source_date or None,
         "source_date_origin": source_date_origin or None,
         "date_priority_active": prefer_recent,
         "original_index": original_index,
         "sort_key": (
             int(direct),
+            object_alignment_rank,
+            subject_alignment_rank,
             int(structured),
             authority_rank,
             int(grounded),
@@ -961,9 +1132,10 @@ def build_evidence_context(
             int(DATA_PIPELINE.get("final_context_max_grounded_spans_per_source", 3) or 3),
         ),
     )
-    # RWKV-authored exact records are the primary semantic context. Raw fetched
-    # pages remain available only through a small, explicitly unbound fallback
-    # lane so an extraction miss does not become an empty answer.
+    # RWKV-selected grounded candidate records are the primary semantic
+    # context. Raw fetched pages remain available only through a small,
+    # explicitly unbound fallback lane so an extraction miss does not become
+    # an empty answer.
     fetched_items = [
         item for item in data.get("results") or [] if isinstance(item, dict)
     ]
@@ -1022,7 +1194,13 @@ def build_evidence_context(
     )
     factual_plan = compact_task_plan(task_plan)
     factual_points = [
-        point
+        {
+            **point,
+            "object_contract": task_record_contract(
+                task_plan,
+                str(point.get("id") or ""),
+            ),
+        }
         for point in factual_plan.get("atomic_points") or []
         if isinstance(point, dict)
     ]
@@ -1106,24 +1284,70 @@ def build_evidence_context(
         url = str(item.get("url") or "")
         context_role = str(item.get("context_role") or "")
         if context_role in {"exact_evidence_record", "candidate_evidence_record"}:
+            # Old traces may still carry exact_evidence_record.  At the live
+            # context boundary all chunk-local observations are candidates;
+            # only RWKV may compare the full record set and decide currentness.
+            record_metadata = dict(item.get("record_metadata") or {})
+            unresolved_record_identity = not str(
+                record_metadata.get("record_key") or ""
+            ).strip()
             role_label = (
-                "RWKV-EXACT EVIDENCE RECORD"
-                if context_role == "exact_evidence_record"
-                else "RWKV-CANDIDATE RECORD"
+                "RWKV-CANDIDATE SOURCE OBJECT SPANS (record identity unresolved)"
+                if unresolved_record_identity
+                else "RWKV-CANDIDATE SOURCE RECORD"
             )
             lines = [
                 f"[S{ref_index}] {role_label}: {title}",
                 f"URL: {url}",
             ]
-            record_metadata = dict(item.get("record_metadata") or {})
+            visible_record_metadata = {
+                key: value
+                for key, value in record_metadata.items()
+                if key != "retrieval_request"
+            }
             lines.append(
                 "Record grouping metadata (RWKV routing labels, not extra facts): "
                 + json.dumps(
-                    record_metadata,
+                    visible_record_metadata,
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
             )
+            source_object = record_metadata.get("source_object")
+            if isinstance(source_object, dict) and source_object:
+                lines.append(
+                    "Observable source object identity (transport metadata): "
+                    + json.dumps(
+                        source_object,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+            alignment = record_metadata.get("object_alignment")
+            if isinstance(alignment, dict) and alignment:
+                lines.append(
+                    "Literal object-identifier alignment (transport comparison only): "
+                    + json.dumps(
+                        alignment,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+            subject_alignment = record_metadata.get("rwkv_subject_alignment")
+            if isinstance(subject_alignment, dict) and subject_alignment:
+                lines.append(
+                    "RWKV-authored subject-label alignment: "
+                    + json.dumps(
+                        subject_alignment,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+            if unresolved_record_identity:
+                lines.append(
+                    "Record identity note: these grounded spans share one source object and task record, "
+                    "but may describe different rows, dates or versions. Compare each <chunk-id> literally."
+                )
         elif context_role == "unbound_source_fallback":
             lines = [
                 f"[S{ref_index}] UNBOUND SOURCE EXCERPT: {title}",
@@ -1302,13 +1526,17 @@ def _writer_prompt(
         "values explicitly present in the material; do not substitute a plausible value or invent an example. "
         "Source labels, page titles, provider names and URLs identify records but are not factual evidence; bind "
         "the answer to the original text inside each <chunk-id> block. "
-        "Treat each RWKV-EXACT EVIDENCE RECORD and RWKV-CANDIDATE RECORD as an independent subject/version/time record. "
-        "A candidate is relevant source text whose exact current/latest/requested identity was not established by the extractor; compare its literal identity and date yourself rather than treating it as already current. Do not take a field "
+        "Treat each RWKV-CANDIDATE SOURCE RECORD as an independent subject/version/time record. "
+        "A RWKV-CANDIDATE SOURCE OBJECT SPANS block only groups quotes from one page/object; when its record identity is unresolved, its chunks may still describe different versions, dates or rows. "
+        "No candidate has been declared correct, current, latest, or authoritative by the controller. Compare its literal source-object identity, record identity and date yourself. Do not take a field "
         "from one record and attach it to another record unless the source text explicitly establishes that identity. "
         "UNBOUND SOURCE EXCERPT blocks are fallback material, not pre-established support. "
         "For a current/latest request, do not present a future-dated or explicitly historical record as current; "
         "state the time conflict or uncertainty instead. For a repository-specific request, bind claims to the "
-        "exact owner/repository rather than another project on the same host. Satisfy every requested field when "
+        "exact owner/repository rather than another project on the same host. When a literal object-identifier "
+        "alignment is conflict, that source is about a different explicitly named object and cannot supply that "
+        "object's fields. This metadata compares identifiers only; it does not decide which version or fact is "
+        "correct. Satisfy every requested field when "
         "the material supports it, and explicitly identify any requested field that remains unsupported. "
         "Answer only the fields the user requested. Do not append adjacent limitations, examples, commands, or "
         "background merely because they occur near the supporting span. Use one clean answer path and keep it concise. "
@@ -1319,7 +1547,6 @@ def _writer_prompt(
         + runtime_section
         + f"USER QUESTION:\n{query}\n\n"
         + f"RESEARCH MATERIAL:\n{context['text']}\n\n"
-        + f"USER QUESTION:\n{query}\n\n"
         + "Write the final answer now."
     )
 

@@ -19,6 +19,12 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 from agent.page_evidence import build_page_chunks, extract_single_page_evidence, select_grounded_source_chunks
+from agent.retrieval_object_contract import (
+    explicit_object_targets,
+    object_alignment,
+    source_object_contract,
+    task_record_contract,
+)
 from agent.task_plan_contract import point_question, task_points
 from clients.llm_client import LLMClient
 from config import DATA_PIPELINE, get_llm_context_length
@@ -44,7 +50,7 @@ from utils.source_authority import (
 from utils.web_retrieval import candidate_score, normalize_url, retrieval_url_identity
 from utils.freshness import annotate_freshness, build_freshness_policy
 from utils.query_constraints import candidate_relevance, meaningful_query_terms
-from utils.retrieval_ranking import rrf_fuse
+from utils.retrieval_ranking import rrf_fuse, select_domain_diverse
 
 
 _HOST_FETCH_GATE_LOCK = threading.Lock()
@@ -298,6 +304,27 @@ def _merge_candidates(
         authority_query,
         {"task_plan": task_plan or {}},
     )
+    requested_targets = explicit_object_targets(
+        "\n".join(
+            value
+            for value in (
+                str(constraint_query or ""),
+                str((task_plan or {}).get("goal") or ""),
+            )
+            if value
+        )
+    )
+    for point in task_points(task_plan or {}, fallback_query=constraint_query or query):
+        task_contract = task_record_contract(task_plan or {}, str(point.get("id") or ""))
+        for target in task_contract.get("requested_object_targets") or []:
+            if not isinstance(target, dict):
+                continue
+            object_id = str(target.get("object_id") or "").casefold()
+            if object_id and not any(
+                str(row.get("object_id") or "").casefold() == object_id
+                for row in requested_targets
+            ):
+                requested_targets.append(dict(target))
     merged: dict[str, dict[str, Any]] = {}
     for result in provider_results:
         for item in result.get("results") or []:
@@ -320,6 +347,11 @@ def _merge_candidates(
                     "snippet": snippet[:1000],
                     "source": str(item.get("source") or result.get("provider") or "web"),
                 }
+            )
+            row["source_object"] = source_object_contract(row)
+            row["object_alignment"] = object_alignment(
+                requested_targets,
+                row["source_object"],
             )
             row = annotate_source(
                 row,
@@ -346,6 +378,13 @@ def _merge_candidates(
             row["query_relevance"] = relevance
             row["candidate_score"] = candidate_score(query, row)
             row["discovery_score"] = float(item.get("discovery_score") or 0.0)
+            row["provider_ranks"] = {
+                str(key): int(value)
+                for key, value in (item.get("provider_ranks") or {}).items()
+                if str(key).strip()
+            }
+            row["rrf_score"] = float(item.get("rrf_score") or 0.0)
+            row["rrf_rank"] = item.get("rrf_rank")
             row["discovery_providers"] = list(
                 dict.fromkeys(
                     [
@@ -371,6 +410,19 @@ def _merge_candidates(
                 float(existing.get("discovery_score") or 0),
                 float(row.get("discovery_score") or 0),
             )
+            for provider, provider_rank in (row.get("provider_ranks") or {}).items():
+                previous_rank = (existing.get("provider_ranks") or {}).get(provider)
+                if previous_rank is None or int(provider_rank) < int(previous_rank):
+                    existing.setdefault("provider_ranks", {})[provider] = int(provider_rank)
+            existing["rrf_score"] = max(
+                float(existing.get("rrf_score") or 0.0),
+                float(row.get("rrf_score") or 0.0),
+            )
+            if row.get("rrf_rank") is not None and (
+                existing.get("rrf_rank") is None
+                or int(row["rrf_rank"]) < int(existing["rrf_rank"])
+            ):
+                existing["rrf_rank"] = int(row["rrf_rank"])
             sources = list(existing.get("discovery_providers") or [])
             source = str(row.get("source") or "")
             if source and source not in sources:
@@ -533,6 +585,16 @@ def _merge_candidates(
     ranked = sorted(
         merged.values(),
         key=lambda item: (
+            {
+                "exact": 3,
+                "not_explicitly_scoped": 2,
+                "source_identity_unavailable": 1,
+                "unresolved": 1,
+                "conflict": 0,
+            }.get(
+                str((item.get("object_alignment") or {}).get("relation") or ""),
+                1,
+            ),
             int(bool((item.get("authority") or {}).get("satisfied"))),
             int((item.get("authority") or {}).get("rank") or 0),
             int(_is_community_detail_url(item.get("url"))) if community_required else 0,
@@ -547,6 +609,10 @@ def _merge_candidates(
             len((item.get("query_relevance") or {}).get("constraint_topic_hits") or []),
             common_relevance_rank(item)[1],
             common_relevance_rank(item)[2],
+            # RRF is a provider-neutral consensus tie-break after every
+            # request/object/authority/topic feature. It cannot promote a
+            # generic high-frequency page over a materially better match.
+            float(item.get("rrf_score") or 0.0),
             # If no common topical threshold was met, retain the adapter's
             # own ordering as a bounded fallback (for example release notes
             # ahead of a generic guide in the same official sitemap).
@@ -1022,6 +1088,8 @@ def _compact_page(
     page_evidence = {
         "url": url,
         "title": str(page.get("title") or candidate.get("title") or url),
+        "source_object": dict(evidence.get("source_object") or {}),
+        "object_alignment": dict(candidate.get("object_alignment") or {}),
         "content_resolver": str(page.get("content_resolver") or "direct_http"),
         "content_transport": str(page.get("content_transport") or "direct_fetch"),
         "status": str(evidence.get("status") or "no_evidence"),
@@ -1109,6 +1177,8 @@ def _compact_page(
     record = {
         "title": page_evidence["title"],
         "url": url,
+        "source_object": dict(page_evidence.get("source_object") or {}),
+        "object_alignment": dict(page_evidence.get("object_alignment") or {}),
         "snippet": str(candidate.get("snippet") or "")[:800],
         "source": str(candidate.get("source") or "web"),
         "candidate_score": candidate.get("candidate_score", 0.0),
@@ -1256,7 +1326,7 @@ def _model_extraction_diagnostics(pages: list[dict[str, Any]]) -> dict[str, Any]
     description="Search/fetch an exact URL, documentation, product or service status page, or the general web; also use it when no structured connector matches or connector evidence is insufficient.",
     signature="""[Tool] web_search
 - Function: perform one bounded general-web retrieval transaction.
-- Parameters: query (one concise search query or one complete http/https URL), max_results (optional, capped at 8).
+- Parameters: query (one concise search query or one complete http/https URL), max_results (optional output-size hint). The backend independently over-recalls provider candidates and may fetch up to its configured evidence budget.
 - Pipeline: discovery, candidate admission/ranking, bounded page fetch, Markdown extraction, adaptive evidence extraction (cleaned pages up to the configured threshold stay single-pass; longer pages are chunked).
 - Provider selection, URL fetching, page cleaning and chunk aggregation are internal backend steps; do not invent a provider-specific tool name.
 - The result is evidence only. It is not a final answer and does not decide whether the user's task is complete.""",
@@ -1346,7 +1416,11 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     except (TypeError, ValueError):
         requested_candidates = 8
     fetch_limit = _pipeline_concurrency("web_fetch_limit", 8, maximum=32)
-    max_candidates = min(requested_candidates, fetch_limit)
+    # Provider recall, fused candidate-pool size and fetched-page count are
+    # separate resource budgets.  A model-authored max_results=1 must not
+    # discard the correct page before body retrieval; it remains an audit and
+    # output-size hint rather than a provider-admission gate.
+    max_candidates = fetch_limit
     provider_result_limit = max(
         max_candidates,
         _pipeline_concurrency("web_provider_result_limit", 20, maximum=50),
@@ -1356,6 +1430,9 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     )
     rrf_k = _pipeline_concurrency("web_rrf_k", 60, maximum=1000)
     rrf_shadow_enabled = bool(DATA_PIPELINE.get("web_enable_rrf_shadow", True))
+    candidate_ranking_mode = str(
+        DATA_PIPELINE.get("web_candidate_ranking_mode", "legacy") or "legacy"
+    ).strip().casefold()
     max_pages = min(
         _pipeline_concurrency("web_search_max_pages", 8, maximum=16),
         fetch_limit,
@@ -1369,11 +1446,13 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         query=query,
         budget={
             "max_candidates": max_candidates,
+            "model_requested_result_limit": requested_candidates,
             "provider_result_limit": provider_result_limit,
             "candidate_pool_limit": candidate_pool_limit,
             "fetch_limit": fetch_limit,
             "rrf_k": rrf_k,
-            "rrf_shadow_only": rrf_shadow_enabled,
+            "candidate_ranking_mode": candidate_ranking_mode,
+            "rrf_shadow_only": candidate_ranking_mode != "hybrid_rrf",
             "max_pages": max_pages,
             "context_length": get_llm_context_length(),
             "chunk_mode": DATA_PIPELINE.get("web_chunk_mode", "adaptive"),
@@ -1491,11 +1570,11 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         finally:
             shutdown_pool(pool, list(futures), cancelled=cancelled)
 
-        # Preserve Round 19's active per-provider admission slice while
-        # retaining the wider raw lists for offline recall/RRF analysis.  The
-        # shadow pool cannot affect authority inference, fetching or RWKV.
+        # Preserve a narrow legacy slice for audit comparison, while the live
+        # hybrid path keeps the full provider recall until after fusion and
+        # task-aware ranking.
         shadow_provider_results = [dict(result) for result in provider_results]
-        provider_results = [
+        legacy_provider_results = [
             {
                 **dict(result),
                 "results": list(result.get("results") or [])[:max_candidates],
@@ -1521,7 +1600,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         ):
             authority_candidates = infer_candidate_authority_domains(
                 constraint_query or query,
-                provider_results,
+                legacy_provider_results,
             )
             if authority_candidates:
                 append_task_event(
@@ -1625,30 +1704,81 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                 "count": int(result.get("count") or len(result.get("results") or [])),
                 "errors": result.get("provider_errors") or [],
             }
-            for result in provider_results
+            for result in shadow_provider_results
         ]
-        candidates = _merge_candidates(
+        legacy_candidates = _merge_candidates(
             query,
-            provider_results,
+            legacy_provider_results,
             limit=max_candidates,
             task_plan=effective_task_plan,
             constraint_query=constraint_query,
             policy_query=original_goal,
         )
+        # Hybrid ranking is a live retrieval stage, not a side effect of trace
+        # logging. Disabling the shadow/audit payload must never silently turn
+        # RRF off while the configured active ranking mode still requires it.
+        rrf_required = rrf_shadow_enabled or candidate_ranking_mode == "hybrid_rrf"
         candidate_pool_shadow = (
             rrf_fuse(
                 shadow_provider_results,
                 rrf_k=rrf_k,
                 pool_limit=candidate_pool_limit,
             )
-            if rrf_shadow_enabled
+            if rrf_required
             else []
         )
+        rrf_by_identity = {
+            retrieval_url_identity(str(item.get("url") or "")): item
+            for item in candidate_pool_shadow
+        }
+        fused_provider_results = []
+        for result in shadow_provider_results:
+            fused_rows = []
+            for raw in result.get("results") or []:
+                if not isinstance(raw, dict):
+                    continue
+                item = dict(raw)
+                fused = rrf_by_identity.get(
+                    retrieval_url_identity(str(item.get("url") or "")),
+                    {},
+                )
+                if fused:
+                    item.update(
+                        {
+                            "provider_ranks": dict(fused.get("provider_ranks") or {}),
+                            "rrf_score": float(fused.get("rrf_score") or 0.0),
+                            "rrf_rank": fused.get("rrf_rank"),
+                        }
+                    )
+                fused_rows.append(item)
+            fused_provider_results.append({**dict(result), "results": fused_rows})
+
+        if candidate_ranking_mode == "hybrid_rrf":
+            candidate_pool = _merge_candidates(
+                query,
+                fused_provider_results,
+                limit=candidate_pool_limit,
+                task_plan=effective_task_plan,
+                constraint_query=constraint_query,
+                policy_query=original_goal,
+            )
+            candidates = select_domain_diverse(
+                candidate_pool,
+                limit=max_pages,
+                per_domain_limit=_pipeline_concurrency(
+                    "web_per_domain_fetch_limit", 3, maximum=16
+                ),
+            )
+            for rank, item in enumerate(candidates, start=1):
+                item["candidate_rank"] = rank
+        else:
+            candidate_pool = list(legacy_candidates)
+            candidates = list(legacy_candidates)
         legacy_rank_by_url = {
             retrieval_url_identity(str(item.get("url") or "")): int(
                 item.get("candidate_rank") or index
             )
-            for index, item in enumerate(candidates, start=1)
+            for index, item in enumerate(legacy_candidates, start=1)
         }
         for item in candidate_pool_shadow:
             item["legacy_rank"] = legacy_rank_by_url.get(
@@ -1663,9 +1793,13 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             phase="DISCOVERY",
             action="web_search",
             query=query,
-            active_ranking="legacy",
+            active_ranking=candidate_ranking_mode,
             provider_result_limit=provider_result_limit,
-            active_provider_slice=max_candidates,
+            active_provider_slice=(
+                provider_result_limit
+                if candidate_ranking_mode == "hybrid_rrf"
+                else max_candidates
+            ),
             candidate_pool_limit=candidate_pool_limit,
             fetch_limit=max_pages,
             rrf_k=rrf_k,
@@ -1683,11 +1817,22 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                     "url": item.get("url"),
                     "title": item.get("title"),
                 }
-                for item in candidates
+                for item in legacy_candidates
             ],
             rrf_candidates=candidate_pool_shadow,
-            affects_fetch=False,
-            affects_rwkv=False,
+            hybrid_candidates=[
+                {
+                    "rank": item.get("candidate_rank"),
+                    "url": item.get("url"),
+                    "title": item.get("title"),
+                    "rrf_rank": item.get("rrf_rank"),
+                    "rrf_score": item.get("rrf_score"),
+                    "provider_ranks": item.get("provider_ranks") or {},
+                }
+                for item in candidates
+            ],
+            affects_fetch=candidate_ranking_mode == "hybrid_rrf",
+            affects_rwkv=candidate_ranking_mode == "hybrid_rrf",
         )
 
     # Authority remains auditable metadata and a soft ranking signal.  A
@@ -1772,10 +1917,15 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                     "snippet",
                     "source",
                     "candidate_score",
+                    "provider_ranks",
+                    "rrf_rank",
+                    "rrf_score",
                     "discovery_score",
                     "query_relevance",
                     "discovery_providers",
                     "authority",
+                    "source_object",
+                    "object_alignment",
                 )
             }
             for item in candidates
@@ -2078,15 +2228,25 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         "candidate_urls": [
             {
                 key: item.get(key)
-                for key in ("candidate_rank", "title", "url", "source", "candidate_score", "discovery_providers")
+                for key in (
+                    "candidate_rank",
+                    "title",
+                    "url",
+                    "source",
+                    "candidate_score",
+                    "discovery_providers",
+                    "source_object",
+                    "object_alignment",
+                )
             }
             for item in candidates
         ],
         "candidate_pool_shadow": {
             "enabled": rrf_shadow_enabled,
-            "active_ranking": "legacy",
-            "affects_fetch": False,
-            "affects_rwkv": False,
+            "active_ranking": candidate_ranking_mode,
+            "affects_fetch": candidate_ranking_mode == "hybrid_rrf",
+            "affects_rwkv": candidate_ranking_mode == "hybrid_rrf",
+            "model_requested_result_limit": requested_candidates,
             "provider_result_limit": provider_result_limit,
             "active_provider_slice": max_candidates,
             "candidate_pool_limit": candidate_pool_limit,

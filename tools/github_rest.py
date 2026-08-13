@@ -336,6 +336,12 @@ def fetch_github_rest(
                     "page_excerpt": page_text,
                     "content": page_text,
                     "source": "GitHub REST API",
+                    "full_name": f"{owner}/{repo}",
+                    "tag_name": (
+                        str(payload.get("tag_name") or "")
+                        if content_type == "release" and isinstance(payload, dict)
+                        else ""
+                    ),
                     "content_type": content_type,
                     "published": (
                         str(payload.get("published_at") or "")

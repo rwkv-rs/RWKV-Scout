@@ -590,12 +590,13 @@ def test_evidence_records_on_same_url_keep_version_identity_separate():
         constraints={"context_source_count": 4},
     )
 
-    assert context["context_stats"]["bound_evidence_record_count"] == 2
+    assert context["context_stats"]["bound_evidence_record_count"] == 0
+    assert context["context_stats"]["candidate_evidence_record_count"] == 2
     assert [row["evidence_record_id"] for row in context["selected_evidence"]] == [
         "E-current",
         "E-old",
     ]
-    assert context["text"].count("RWKV-EXACT EVIDENCE RECORD") == 2
+    assert context["text"].count("RWKV-CANDIDATE SOURCE RECORD") == 2
     assert '"record_key":"Version 4.4"' in context["text"]
     assert '"record_key":"Version 4.0"' in context["text"]
 
@@ -955,16 +956,16 @@ def test_writer_is_told_not_to_expand_into_adjacent_unrequested_material():
     assert "Do not append adjacent limitations" in prompt
 
 
-def test_writer_repeats_the_verbatim_user_question_after_research_material():
+def test_writer_includes_the_verbatim_user_question_once():
     question = "Which exact version, title, and release date are requested?"
     evidence = "<chunk-1>The exact record is preserved here.</chunk-1>"
 
     prompt = _writer_prompt(question, {"text": evidence})
 
     question_block = f"USER QUESTION:\n{question}"
-    assert prompt.count(question_block) == 2
-    assert prompt.rindex(question_block) > prompt.index(evidence)
-    assert prompt.endswith(f"{question_block}\n\nWrite the final answer now.")
+    assert prompt.count(question_block) == 1
+    assert prompt.index(question_block) < prompt.index(evidence)
+    assert prompt.endswith("Write the final answer now.")
 
 
 def test_claim_ledger_is_advisory_context_not_a_gate():

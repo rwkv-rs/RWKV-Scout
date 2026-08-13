@@ -14,6 +14,7 @@ from typing import Any, Iterable
 from urllib.parse import parse_qs, urldefrag, urlencode, urljoin, urlparse
 
 from utils.network_fetch import NetworkFetchError, fetch_text
+from utils.html_markdown import html_to_markdown
 
 
 _SKIP_TAGS = {"script", "style", "noscript", "svg", "canvas", "template"}
@@ -196,7 +197,7 @@ def extract_page(url: str, *, max_chars: int = 14000, timeout: int = 15) -> dict
     html = fetch_text(url, timeout=timeout)
     parser = _PageParser()
     parser.feed(html[:300_000])
-    text = " ".join(parser.text_parts)
+    text = html_to_markdown(html[:300_000], max_chars=max_chars)
     title = " ".join(parser.title_parts).strip()
     meta = parser.meta
     links: list[dict[str, str]] = []

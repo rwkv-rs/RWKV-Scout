@@ -1283,6 +1283,74 @@ class SourceAuthorityTests(unittest.TestCase):
         self.assertTrue(result["evidence_ready"])
         self.assertEqual(compact.call_args.args[0], original_goal)
 
+    def test_model_max_results_one_does_not_truncate_provider_recall_before_fetch(self):
+        rows = [
+            {
+                "title": f"Widget release source {index}",
+                "url": f"https://source{index}.example/releases/widget",
+                "snippet": "Widget current release version date official record",
+            }
+            for index in range(1, 6)
+        ]
+        provider = {"status": "ok", "provider": "provider-a", "results": rows}
+        body = "Widget current release version date official record. " * 20
+
+        def fetch(candidate, _task_id):
+            return {
+                "status": "ok",
+                "results": [
+                    {
+                        "title": candidate["title"],
+                        "url": candidate["url"],
+                        "page_excerpt": body,
+                        "body_verified": True,
+                    }
+                ],
+            }
+
+        def compact(_query, candidate, _fetched, *_args, **_kwargs):
+            return (
+                {
+                    "title": candidate["title"],
+                    "url": candidate["url"],
+                    "content": body,
+                    "source_excerpt": body,
+                    "body_verified": True,
+                    "evidence_origin": "fetched_page_body",
+                },
+                {"status": "ok", "url": candidate["url"]},
+            )
+
+        with (
+            patch.dict(
+                "tools.web_search_generic.DATA_PIPELINE",
+                {
+                    "web_enable_rrf_shadow": False,
+                    "web_candidate_ranking_mode": "hybrid_rrf",
+                },
+                clear=False,
+            ),
+            patch("tools.web_search_generic.search_web_keyless", return_value=provider),
+            patch("tools.web_search_generic.search_web_tavily", return_value=provider),
+            patch("tools.web_search_generic._fetch_candidate", side_effect=fetch) as fetch_mock,
+            patch("tools.web_search_generic._compact_page", side_effect=compact),
+            patch("tools.web_search_generic.append_task_event"),
+        ):
+            result = json.loads(
+                web_search(
+                    "Widget current release version date",
+                    max_results=1,
+                    original_goal="Widget current release version date",
+                    task_id="OVER_RECALL_SEPARATE_BUDGETS",
+                )
+            )
+
+        self.assertEqual(fetch_mock.call_count, 5)
+        self.assertEqual(result["candidate_pool_shadow"]["model_requested_result_limit"], 1)
+        self.assertEqual(result["candidate_pool_shadow"]["active_ranking"], "hybrid_rrf")
+        self.assertFalse(result["candidate_pool_shadow"]["enabled"])
+        self.assertTrue(result["candidate_pool_shadow"]["affects_fetch"])
+
 
 def llm_prompt_text(llm):
     # Keep the helper outside the test class so the assertion remains readable

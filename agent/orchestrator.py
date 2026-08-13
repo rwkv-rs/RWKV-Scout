@@ -181,17 +181,35 @@ class Orchestrator:
             # task before the evidence later shown to Writer was reviewed.
         )
         review_context = str(context["text"])
+        routing_context = ""
+        if "resource_boundary" in str(trigger or "") or self.state.retrieval.frozen_paths:
+            routing_context = json.dumps(
+                self.state.retrieval.planner_routing_snapshot(
+                    max_sources=4,
+                    max_queries=6,
+                    max_frozen_paths=6,
+                ),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         validation_context_stats = {
             **context["context_stats"],
             "review_context_tokens": get_token_count(review_context),
+            "routing_context_tokens": get_token_count(routing_context),
         }
         review = self.planner.cross_validate_research(
             user_query,
             task_plan,
             review_context,
+            routing_context,
         )
         evidence_revision = int(self.state.retrieval.evidence_revision or 0)
+        validation_state_signature = (
+            f"evidence:{evidence_revision}:"
+            f"frozen-routes:{len(self.state.retrieval.frozen_paths)}"
+        )
         review["evidence_revision"] = evidence_revision
+        review["validation_state_signature"] = validation_state_signature
         review["trigger"] = str(trigger or "planner_finish")[:120]
 
         # The review is audit/routing state only.  It never supplies facts,
@@ -210,6 +228,9 @@ class Orchestrator:
             self.state.run_metadata["last_cross_validation_evidence_revision"] = (
                 evidence_revision
             )
+            self.state.run_metadata["last_cross_validation_state_signature"] = (
+                validation_state_signature
+            )
         append_task_event(
             self.state.task_id,
             "cross_validation",
@@ -225,11 +246,52 @@ class Orchestrator:
             raw_model_output=review.get("raw_model_output", ""),
             prompt=review.get("prompt", ""),
             context_text=review_context,
+            routing_context=routing_context,
             context_stats=validation_context_stats,
             evidence_revision=evidence_revision,
+            validation_state_signature=validation_state_signature,
             claim_ledger=claim_snapshot,
             decision_owner="rwkv",
         )
+        if str(review.get("decision") or "").casefold() == "replan":
+            focus = self.planner.select_replan_focus(
+                user_query,
+                task_plan,
+                review_context,
+            )
+            review["replan_focus"] = {
+                key: focus.get(key)
+                for key in (
+                    "schema_version",
+                    "status",
+                    "error_class",
+                    "message",
+                    "task_point_id",
+                    "missing_field",
+                    "focus_owner",
+                    "sampling_temperature",
+                    "sampling_seed",
+                    "focus_attempts",
+                )
+                if focus.get(key) not in (None, "")
+            }
+            append_task_event(
+                self.state.task_id,
+                "replan_focus",
+                step=step,
+                phase="REPLAN",
+                task_point_id=focus.get("task_point_id", ""),
+                missing_field=focus.get("missing_field", ""),
+                error_class=focus.get("error_class", ""),
+                message=focus.get("message", ""),
+                sampling_temperature=focus.get("sampling_temperature"),
+                sampling_seed=focus.get("sampling_seed"),
+                focus_attempts=focus.get("focus_attempts"),
+                raw_model_output=focus.get("raw_model_output", ""),
+                prompt=focus.get("prompt", ""),
+                evidence_revision=evidence_revision,
+                decision_owner="rwkv",
+            )
         return review
 
     def _cross_validate_if_evidence_changed(
@@ -240,19 +302,31 @@ class Orchestrator:
         step: int,
         trigger: str = "planner_finish",
     ) -> dict[str, Any] | None:
-        """Review one material evidence revision at most once before synthesis."""
+        """Review one materially distinct evidence/routing state at most once."""
 
         current_revision = int(self.state.retrieval.evidence_revision or 0)
-        reviewed_revision_value = self.state.run_metadata.get(
-            "last_cross_validation_evidence_revision"
+        current_signature = (
+            f"evidence:{current_revision}:"
+            f"frozen-routes:{len(self.state.retrieval.frozen_paths)}"
         )
-        reviewed_revision = (
-            int(reviewed_revision_value)
-            if reviewed_revision_value is not None
-            else -1
+        reviewed_signature = str(
+            self.state.run_metadata.get("last_cross_validation_state_signature")
+            or ""
         )
-        if current_revision <= reviewed_revision:
+        if current_signature == reviewed_signature:
             return None
+        # Compatibility with resumed traces produced before the routing-state
+        # signature existed. An unchanged evidence revision with no frozen
+        # route was already reviewed under the historical revision key.
+        if not reviewed_signature and not self.state.retrieval.frozen_paths:
+            reviewed_revision_value = self.state.run_metadata.get(
+                "last_cross_validation_evidence_revision"
+            )
+            if (
+                reviewed_revision_value is not None
+                and current_revision <= int(reviewed_revision_value)
+            ):
+                return None
         return self._cross_validate_research(
             user_query,
             task_plan,

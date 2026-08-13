@@ -13,6 +13,7 @@ import threading
 from copy import deepcopy
 from typing import Any, Mapping
 
+from agent.retrieval_object_contract import merge_mapping_rows
 from agent.task_plan_contract import task_points
 
 
@@ -235,6 +236,16 @@ def _source_record(item: Mapping[str, Any]) -> dict[str, Any]:
         "updated_at",
         "date",
         "retrieved_at",
+        "source_kind",
+        "authority",
+        "connector",
+        "operation",
+        "source_object",
+        "object_alignment",
+        "retrieval_request",
+        "retrieval_bindings",
+        "object_alignments",
+        "retrieval_requests",
     ):
         value = item.get(key)
         if value not in (None, "", [], {}):
@@ -260,7 +271,7 @@ def _candidate_task_record_ids(candidate: Mapping[str, Any]) -> list[str]:
 
 
 def _grounded_candidates(item: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Return exact RWKV-selected spans without page-level route bindings."""
+    """Return grounded RWKV-selected spans without page-level route bindings."""
 
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -290,7 +301,7 @@ def _evidence_record(
     *,
     binding_origin: str = "rwkv_chunk_extractor",
 ) -> dict[str, Any]:
-    """Build one immutable exact-span record for a model-selected task record."""
+    """Build one immutable grounded candidate for a model-selected task record."""
 
     quote = str(candidate.get("quote") or "").strip()
     url = str(item.get("url") or "")
@@ -300,15 +311,20 @@ def _evidence_record(
         digest_input.encode("utf-8")
     ).hexdigest()[:20]
     record_match = str(
-        candidate.get("record_match") or "exact_requested_record"
+        candidate.get("record_match") or "candidate_record"
     ).strip().casefold()
     field_contract_valid = bool(candidate.get("field_contract_valid", True))
-    if record_match == "exact_requested_record" and field_contract_valid:
-        support_state = "rwkv_exact_requested_record"
-    elif record_match == "same_subject_other_record":
-        support_state = "rwkv_candidate_other_record"
-    else:
-        support_state = "rwkv_unmapped_candidate_record"
+    # A chunk-local extractor observes one source record but cannot decide
+    # whether it is globally current/latest or the unique requested record.
+    # Preserve it as a candidate for the later full-set RWKV comparison.
+    support_state = "rwkv_candidate_record"
+    primary_alignment = deepcopy(
+        dict(
+            candidate.get("object_alignment")
+            or item.get("object_alignment")
+            or {}
+        )
+    )
     record = {
         "evidence_record_id": evidence_record_id,
         "task_record_id": task_record_id,
@@ -331,7 +347,33 @@ def _evidence_record(
         "record_match": record_match,
         "field_contract_valid": field_contract_valid,
         "binding_origin": binding_origin,
+        "object_alignment": primary_alignment,
+        "object_alignments": merge_mapping_rows(
+            candidate.get("object_alignments"),
+            candidate.get("object_alignment"),
+            item.get("object_alignments"),
+            item.get("object_alignment"),
+        ),
+        "rwkv_subject_alignment": deepcopy(
+            dict(candidate.get("rwkv_subject_alignment") or {})
+        ),
+        "task_object_alignments": [
+            deepcopy(dict(value))
+            for value in candidate.get("task_object_alignments") or []
+            if isinstance(value, Mapping)
+        ][:8],
     }
+    record["retrieval_bindings"] = merge_mapping_rows(
+        item.get("retrieval_bindings")
+    )
+    record["retrieval_requests"] = merge_mapping_rows(
+        item.get("retrieval_requests"),
+        item.get("retrieval_request"),
+    )
+    for key in ("source_object", "retrieval_request"):
+        value = item.get(key)
+        if isinstance(value, Mapping):
+            record[key] = deepcopy(dict(value))
     for key in (
         "source",
         "provider",
@@ -342,6 +384,10 @@ def _evidence_record(
         "updated_at",
         "date",
         "retrieved_at",
+        "source_kind",
+        "authority",
+        "connector",
+        "operation",
     ):
         value = item.get(key)
         if value not in (None, "", [], {}):
@@ -352,8 +398,107 @@ def _evidence_record(
     return record
 
 
+def _merge_evidence_record(
+    current: dict[str, Any],
+    incoming: Mapping[str, Any],
+) -> bool:
+    """Merge later transport observations into one immutable source span."""
+
+    changed = False
+    for key, singular_key in (
+        ("object_alignments", "object_alignment"),
+        ("retrieval_requests", "retrieval_request"),
+        ("retrieval_bindings", ""),
+        ("task_object_alignments", ""),
+    ):
+        merged = merge_mapping_rows(
+            current.get(key),
+            current.get(singular_key) if singular_key else None,
+            incoming.get(key),
+            incoming.get(singular_key) if singular_key else None,
+        )
+        if merged and merged != list(current.get(key) or []):
+            current[key] = merged
+            changed = True
+    for key, value in incoming.items():
+        if current.get(key) in (None, "", [], {}) and value not in (
+            None,
+            "",
+            [],
+            {},
+        ):
+            current[key] = deepcopy(value)
+            changed = True
+    return changed
+
+
+def _merge_claim_source(
+    current: dict[str, Any],
+    incoming: Mapping[str, Any],
+) -> bool:
+    """Keep one source view synchronized with its evidence records."""
+
+    changed = False
+    for key in ("grounded_spans", "evidence_records"):
+        existing_rows = list(current.get(key) or [])
+        incoming_rows = list(incoming.get(key) or [])
+        combined: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        # The incoming evidence-record view was rebuilt from the canonical
+        # ledger record and therefore carries any newly observed route/object
+        # metadata. Grounded text spans retain their stable first-seen order.
+        ordered_rows = (
+            [*incoming_rows, *existing_rows]
+            if key == "evidence_records"
+            else [*existing_rows, *incoming_rows]
+        )
+        for row in ordered_rows:
+            if not isinstance(row, Mapping):
+                continue
+            marker = str(
+                row.get("evidence_record_id")
+                or "\n".join(
+                    (
+                        str(row.get("chunk_id") or ""),
+                        str(row.get("text") or row.get("quote") or ""),
+                    )
+                )
+            )
+            if not marker or marker in seen:
+                continue
+            seen.add(marker)
+            combined.append(deepcopy(dict(row)))
+        if combined != existing_rows:
+            current[key] = combined[:16]
+            changed = True
+    for key, singular_key in (
+        ("object_alignments", "object_alignment"),
+        ("retrieval_requests", "retrieval_request"),
+        ("retrieval_bindings", ""),
+    ):
+        merged = merge_mapping_rows(
+            current.get(key),
+            current.get(singular_key) if singular_key else None,
+            incoming.get(key),
+            incoming.get(singular_key) if singular_key else None,
+        )
+        if merged and merged != list(current.get(key) or []):
+            current[key] = merged
+            changed = True
+    for key, value in incoming.items():
+        if current.get(key) in (None, "", [], {}) and value not in (
+            None,
+            "",
+            [],
+            {},
+        ):
+            current[key] = deepcopy(value)
+            changed = True
+    return changed
+
+
 def _source_from_evidence_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Compatibility source view containing only the exact bound record."""
+    """Compatibility source view containing one grounded candidate record."""
 
     source = {
         "title": str(record.get("title") or ""),
@@ -369,6 +514,12 @@ def _source_from_evidence_record(record: Mapping[str, Any]) -> dict[str, Any]:
                 "field_keys": list(record.get("field_keys") or []),
                 "subject_key": str(record.get("subject_key") or ""),
                 "record_key": str(record.get("record_key") or ""),
+                "object_alignment": deepcopy(
+                    dict(record.get("object_alignment") or {})
+                ),
+                "rwkv_subject_alignment": deepcopy(
+                    dict(record.get("rwkv_subject_alignment") or {})
+                ),
                 "source_locator": deepcopy(dict(record.get("source_locator") or {})),
                 "grounding_basis": str(record.get("grounding_basis") or ""),
             }
@@ -386,6 +537,16 @@ def _source_from_evidence_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "date",
         "retrieved_at",
         "freshness",
+        "source_kind",
+        "authority",
+        "connector",
+        "operation",
+        "source_object",
+        "object_alignment",
+        "retrieval_request",
+        "retrieval_bindings",
+        "object_alignments",
+        "retrieval_requests",
     ):
         if record.get(key) not in (None, "", [], {}):
             source[key] = deepcopy(record[key])
@@ -393,7 +554,7 @@ def _source_from_evidence_record(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class ClaimLedger:
-    """Record exact evidence spans per RWKV-planned factual record.
+    """Record grounded candidate spans per RWKV-planned factual record.
 
     The historical class name is retained for API compatibility. Search-route
     metadata never binds a whole page to a factual record. A web span is bound
@@ -488,6 +649,7 @@ class ClaimLedger:
             route_target = task_point_id if task_point_id in self._claims else ""
             added = 0
             added_records = 0
+            updated_records = 0
             added_unassigned = 0
             touched: set[str] = set()
 
@@ -540,6 +702,7 @@ class ClaimLedger:
                                 "source_locator": dict(item.get("source_locator") or {}),
                                 "grounding_basis": "structured_record",
                                 "field_keys": [],
+                                "record_match": "candidate_record",
                             },
                             route_target,
                             binding_origin="rwkv_structured_tool_route",
@@ -577,13 +740,24 @@ class ClaimLedger:
                     claim_id = str(evidence_record["task_record_id"])
                     claim = self._claims[claim_id]
                     record_id = str(evidence_record["evidence_record_id"])
-                    if any(
-                        str(row.get("evidence_record_id") or "") == record_id
-                        for row in claim["evidence_records"]
-                    ):
-                        continue
-                    claim["evidence_records"].append(deepcopy(evidence_record))
-                    source = _source_from_evidence_record(evidence_record)
+                    existing_record = next(
+                        (
+                            row
+                            for row in claim["evidence_records"]
+                            if str(row.get("evidence_record_id") or "") == record_id
+                        ),
+                        None,
+                    )
+                    if existing_record is None:
+                        claim["evidence_records"].append(deepcopy(evidence_record))
+                        canonical_record = evidence_record
+                        added_records += 1
+                    else:
+                        if _merge_evidence_record(existing_record, evidence_record):
+                            updated_records += 1
+                            touched.add(claim_id)
+                        canonical_record = existing_record
+                    source = _source_from_evidence_record(canonical_record)
                     identity = source["url"] or source["title"]
                     existing_source = next(
                         (
@@ -598,20 +772,14 @@ class ClaimLedger:
                         claim["sources"].append(source)
                         added += 1
                     else:
-                        existing_source["grounded_spans"] = [
-                            *list(existing_source.get("grounded_spans") or []),
-                            *list(source.get("grounded_spans") or []),
-                        ][:16]
-                        existing_source["evidence_records"] = [
-                            *list(existing_source.get("evidence_records") or []),
-                            deepcopy(evidence_record),
-                        ][:16]
-                    added_records += 1
+                        if _merge_claim_source(existing_source, source):
+                            touched.add(claim_id)
                     touched.add(claim_id)
 
             return {
                 "added_source_bindings": added,
                 "added_evidence_records": added_records,
+                "updated_evidence_records": updated_records,
                 "added_unassigned_sources": added_unassigned,
                 "touched_claim_ids": sorted(touched),
                 "claim_count": len(self._claims),
@@ -674,17 +842,12 @@ class ClaimLedger:
                         "evidence_record_count": len(
                             claim.get("evidence_records") or []
                         ),
-                        "exact_record_count": sum(
-                            str(row.get("support_state") or "")
-                            == "rwkv_exact_requested_record"
-                            for row in claim.get("evidence_records") or []
-                            if isinstance(row, Mapping)
-                        ),
-                        "candidate_record_count": sum(
-                            str(row.get("support_state") or "")
-                            != "rwkv_exact_requested_record"
-                            for row in claim.get("evidence_records") or []
-                            if isinstance(row, Mapping)
+                        # All page/structured records are candidates until a
+                        # full-set RWKV comparison.  The legacy exact count is
+                        # retained as zero for old audit readers only.
+                        "exact_record_count": 0,
+                        "candidate_record_count": len(
+                            claim.get("evidence_records") or []
                         ),
                         "evidence_records": deepcopy(
                             claim.get("evidence_records") or []

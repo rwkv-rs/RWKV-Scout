@@ -11,6 +11,10 @@ from datetime import datetime
 from typing import Any, Dict, Set
 
 from agent.claim_ledger import ClaimLedger
+from agent.retrieval_object_contract import (
+    merge_candidate_observations,
+    merge_mapping_rows,
+)
 from config import get_llm_context_length
 from utils.chunker import get_token_count
 from utils.context_budget import routing_observation_tokens
@@ -141,6 +145,7 @@ class RetrievalEpisodeState:
         query_text = " ".join(str(query or "").split()).strip()
         added: list[str] = []
         material_changed = False
+        canonical_result_items: dict[str, dict[str, Any]] = {}
         with self._lock:
             self.query_history.append(
                 {
@@ -202,6 +207,40 @@ class RetrievalEpisodeState:
                 item.setdefault("attempt_task_point_id", str(task_point_id or ""))
                 item.setdefault("retrieval_query", query_text)
                 item.setdefault("retrieval_strategy", str(strategy or ""))
+                request = (
+                    dict(item.get("retrieval_request") or {})
+                    if isinstance(item.get("retrieval_request"), dict)
+                    else {}
+                )
+                alignment = (
+                    dict(item.get("object_alignment") or {})
+                    if isinstance(item.get("object_alignment"), dict)
+                    else {}
+                )
+                binding = {
+                    "task_record_id": str(
+                        request.get("task_record_id") or task_point_id or ""
+                    ),
+                    "request_id": str(request.get("request_id") or ""),
+                    "object_alignment": alignment,
+                }
+                item["retrieval_bindings"] = merge_mapping_rows(
+                    item.get("retrieval_bindings"),
+                    binding
+                    if any(
+                        value not in (None, "", {}, [])
+                        for value in binding.values()
+                    )
+                    else None,
+                )
+                item["object_alignments"] = merge_mapping_rows(
+                    item.get("object_alignments"),
+                    alignment,
+                )
+                item["retrieval_requests"] = merge_mapping_rows(
+                    item.get("retrieval_requests"),
+                    request,
+                )
                 key = self.source_key(item)
                 if key not in self.sources:
                     self.sources[key] = dict(item)
@@ -211,7 +250,19 @@ class RetrievalEpisodeState:
                     # Keep the richest representation when the same URL is
                     # encountered by a focused follow-up search.
                     current = self.sources[key]
+                    prior_claim_ids = list(current.get("claim_ids") or [])
                     prior_selected = list(current.get("selected_source_chunks") or [])
+                    prior_candidates = list(current.get("chunk_candidates") or [])
+                    prior_bindings = list(current.get("retrieval_bindings") or [])
+                    prior_requests = list(current.get("retrieval_requests") or [])
+                    prior_alignments = [
+                        dict(value)
+                        for value in [
+                            *list(current.get("object_alignments") or []),
+                            current.get("object_alignment"),
+                        ]
+                        if isinstance(value, dict) and value
+                    ]
                     if len(str(item.get("content") or "")) > len(str(current.get("content") or "")):
                         self.sources[key] = {**current, **item}
                         material_changed = True
@@ -219,7 +270,7 @@ class RetrievalEpisodeState:
                     current["claim_ids"] = list(dict.fromkeys([
                         *[
                             str(value)
-                            for value in current.get("claim_ids") or []
+                            for value in prior_claim_ids
                             if str(value).strip()
                         ],
                         *[
@@ -245,49 +296,170 @@ class RetrievalEpisodeState:
                         selected_seen.add(identity)
                         selected_chunks.append(dict(selected))
                     if selected_chunks:
-                        if selected_chunks != list(current.get("selected_source_chunks") or []):
+                        prior_selected_identities = {
+                            (
+                                str(value.get("chunk_id") or ""),
+                                str(value.get("text") or "").strip(),
+                            )
+                            for value in prior_selected
+                            if isinstance(value, dict)
+                            and str(value.get("text") or "").strip()
+                        }
+                        selected_identities = {
+                            (
+                                str(value.get("chunk_id") or ""),
+                                str(value.get("text") or "").strip(),
+                            )
+                            for value in selected_chunks
+                        }
+                        if selected_identities != prior_selected_identities:
                             material_changed = True
-                        current["selected_source_chunks"] = selected_chunks[:12]
-                    locator_candidates: list[dict[str, Any]] = []
-                    locator_seen: set[tuple[str, str]] = set()
-                    for candidate in [
-                        *list(item.get("chunk_candidates") or []),
-                        *list(current.get("chunk_candidates") or []),
-                    ]:
-                        if not isinstance(candidate, dict):
-                            continue
-                        identity = (
-                            str(candidate.get("chunk_id") or ""),
-                            str(candidate.get("quote") or ""),
-                        )
-                        if not identity[1] or identity in locator_seen:
-                            continue
-                        locator_seen.add(identity)
-                        locator_candidates.append(dict(candidate))
+                            current["selected_source_chunks"] = selected_chunks[:12]
+                        elif prior_selected:
+                            # Provider/model completion order may vary. Keep
+                            # stable state when the observable spans are the
+                            # same so no false evidence revision is emitted.
+                            current["selected_source_chunks"] = prior_selected[:12]
+                    locator_candidates = merge_candidate_observations(
+                        item.get("chunk_candidates"),
+                        prior_candidates,
+                    )
                     if locator_candidates:
-                        if locator_candidates != list(current.get("chunk_candidates") or []):
+                        def candidate_map(values: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
+                            return {
+                                (
+                                    str(value.get("chunk_id") or ""),
+                                    str(value.get("quote") or "").strip(),
+                                ): json.dumps(
+                                    value,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                    default=str,
+                                )
+                                for value in values
+                                if isinstance(value, dict)
+                                and str(value.get("quote") or "").strip()
+                            }
+
+                        if candidate_map(locator_candidates) != candidate_map(
+                            prior_candidates
+                        ):
                             material_changed = True
-                        current["chunk_candidates"] = locator_candidates[:64]
+                            current["chunk_candidates"] = locator_candidates[:64]
+                        elif prior_candidates:
+                            current["chunk_candidates"] = prior_candidates[:64]
                     locator_text = str(item.get("model_locator_facts") or "").strip()
                     if locator_text and locator_text != str(current.get("model_locator_facts") or ""):
                         current["model_locator_facts"] = locator_text
                         material_changed = True
+                    bindings = merge_mapping_rows(
+                        item.get("retrieval_bindings"),
+                        prior_bindings,
+                    )
+                    if bindings:
+                        prior_binding_markers = {
+                            json.dumps(
+                                value,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            )
+                            for value in prior_bindings
+                            if isinstance(value, dict)
+                        }
+                        binding_markers = {
+                            json.dumps(
+                                value,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            )
+                            for value in bindings
+                        }
+                        if binding_markers != prior_binding_markers:
+                            material_changed = True
+                            current["retrieval_bindings"] = bindings[:16]
+                        elif prior_bindings:
+                            current["retrieval_bindings"] = prior_bindings[:16]
+
+                    alignments = merge_mapping_rows(
+                        item.get("object_alignments"),
+                        item.get("object_alignment"),
+                        prior_alignments,
+                    )
+                    prior_alignment_markers = {
+                        json.dumps(
+                            value,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            default=str,
+                        )
+                        for value in prior_alignments
+                    }
+                    if alignments:
+                        alignment_markers = {
+                            json.dumps(
+                                value,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            )
+                            for value in alignments
+                        }
+                        if alignment_markers != prior_alignment_markers:
+                            material_changed = True
+                            current["object_alignments"] = alignments[:16]
+                        elif prior_alignments:
+                            current["object_alignments"] = prior_alignments[:16]
+                    requests = merge_mapping_rows(
+                        item.get("retrieval_requests"),
+                        item.get("retrieval_request"),
+                        prior_requests,
+                    )
+                    request_markers = {
+                        json.dumps(
+                            value,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            default=str,
+                        )
+                        for value in requests
+                    }
+                    prior_request_markers = {
+                        json.dumps(
+                            value,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            default=str,
+                        )
+                        for value in prior_requests
+                        if isinstance(value, dict)
+                    }
+                    if request_markers != prior_request_markers:
+                        current["retrieval_requests"] = requests[:16]
+                        material_changed = True
+                    elif prior_requests:
+                        current["retrieval_requests"] = prior_requests[:16]
+                canonical_source = dict(self.sources[key])
+                canonical_result_items[key] = canonical_source
                 bound_claim_ids = [
                     str(value).strip()
-                    for value in item.get("claim_ids") or []
+                    for value in canonical_source.get("claim_ids") or []
                     if str(value).strip()
                 ]
                 for claim_id in bound_claim_ids:
                     point_sources = self.sources_by_claim.setdefault(claim_id, {})
                     current_point_source = point_sources.get(key)
-                    if (
-                        current_point_source is None
-                        or len(str(item.get("content") or ""))
-                        >= len(str(current_point_source.get("content") or ""))
-                    ):
-                        if current_point_source != item:
-                            material_changed = True
-                        point_sources[key] = dict(item)
+                    if current_point_source != canonical_source:
+                        material_changed = True
+                        point_sources[key] = canonical_source
             self.query_history[-1]["new_source_count"] = len(added)
             self.rounds.append((query_text, result))
             self.last_discovery_results[:] = [
@@ -296,9 +468,13 @@ class RetrievalEpisodeState:
         source_resolution = result.get("source_resolution") or {}
         if isinstance(source_resolution, dict):
             self.claims.update_required_domains(source_resolution.get("required_domains") or [])
+        claim_result = {
+            **result,
+            "results": list(canonical_result_items.values()),
+        }
         claim_delta = self.claims.ingest(
             query_text,
-            result,
+            claim_result,
             task_point_id=task_point_id,
             strategy=strategy,
             step=step,
@@ -307,7 +483,7 @@ class RetrievalEpisodeState:
             claim_delta.get("added_source_bindings") or 0
         ) > 0 or int(claim_delta.get("added_evidence_records") or 0) > 0 or int(
             claim_delta.get("added_unassigned_sources") or 0
-        ) > 0
+        ) > 0 or int(claim_delta.get("updated_evidence_records") or 0) > 0
         with self._lock:
             if material_changed:
                 self.evidence_revision += 1
@@ -447,6 +623,17 @@ class RetrievalEpisodeState:
                     "freshness": dict(item.get("freshness") or {})
                     if isinstance(item.get("freshness"), dict)
                     else {},
+                    "source_object": dict(item.get("source_object") or {}),
+                    "object_alignment": dict(item.get("object_alignment") or {}),
+                    "object_alignments": merge_mapping_rows(
+                        item.get("object_alignments"),
+                        item.get("object_alignment"),
+                    )[:8],
+                    "retrieval_bindings": [
+                        dict(value)
+                        for value in item.get("retrieval_bindings") or []
+                        if isinstance(value, dict)
+                    ][:8],
                     "spans": spans,
                     "source_chars": source_chars,
                     "visible_chars": included_chars,
@@ -471,7 +658,7 @@ class RetrievalEpisodeState:
         max_quote_chars: int = 600,
         max_total_chars: int = 3200,
     ) -> dict[str, Any]:
-        """Project exact RWKV-bound records for the next RWKV decision.
+        """Project grounded RWKV-selected candidate records for the next decision.
 
         Records are interleaved across task points. This is persistent working
         memory, not a deterministic finish decision: RWKV still decides
@@ -505,6 +692,25 @@ class RetrievalEpisodeState:
                     "field_contract_valid": bool(
                         record.get("field_contract_valid", True)
                     ),
+                    "source_object": dict(record.get("source_object") or {}),
+                    "object_alignment": dict(
+                        record.get("object_alignment") or {}
+                    ),
+                    "object_alignments": merge_mapping_rows(
+                        record.get("object_alignments"),
+                        record.get("object_alignment"),
+                    )[:8],
+                    "rwkv_subject_alignment": dict(
+                        record.get("rwkv_subject_alignment") or {}
+                    ),
+                    "retrieval_request": dict(record.get("retrieval_request") or {}),
+                    "retrieval_requests": merge_mapping_rows(
+                        record.get("retrieval_requests"),
+                        record.get("retrieval_request"),
+                    )[:8],
+                    "retrieval_bindings": merge_mapping_rows(
+                        record.get("retrieval_bindings")
+                    )[:8],
                     "title": str(record.get("title") or "")[:240],
                     "url": str(record.get("url") or "")[:500],
                     "published": str(
@@ -646,11 +852,11 @@ class RetrievalEpisodeState:
             factual_point_progress = [
                 {
                     "id": str(row.get("claim_id") or "")[:120],
-                    "bound_evidence_record_count": int(
-                        row.get("exact_record_count") or 0
+                    "task_bound_candidate_record_count": int(
+                        row.get("evidence_record_count") or 0
                     ),
                     "candidate_evidence_record_count": int(
-                        row.get("candidate_record_count") or 0
+                        row.get("evidence_record_count") or 0
                     ),
                     "total_evidence_record_count": int(
                         row.get("evidence_record_count") or 0
@@ -666,9 +872,8 @@ class RetrievalEpisodeState:
                 "evidence_revision": self.evidence_revision,
                 "round_count": len(self.query_history),
                 "source_count": len(self.sources),
-                # Observable exact-span counts only. Zero means that RWKV has
-                # not yet bound a grounded record to this factual point; it is
-                # not a truth, sufficiency, or completion decision.
+                # Observable grounded candidate-span counts only. Zero is not
+                # a truth, sufficiency, or completion decision.
                 "factual_point_progress": factual_point_progress,
                 "unassigned_source_count": int(
                     claim_snapshot.get("unassigned_source_count") or 0
@@ -697,6 +902,19 @@ class RetrievalEpisodeState:
                         "updated": str(
                             item.get("updated") or item.get("updated_at") or ""
                         )[:120],
+                        "source_object": dict(item.get("source_object") or {}),
+                        "object_alignment": dict(
+                            item.get("object_alignment") or {}
+                        ),
+                        "object_alignments": merge_mapping_rows(
+                            item.get("object_alignments"),
+                            item.get("object_alignment"),
+                        )[:8],
+                        "retrieval_bindings": [
+                            dict(value)
+                            for value in item.get("retrieval_bindings") or []
+                            if isinstance(value, dict)
+                        ][:8],
                     }
                     for item in list(self.sources.values())[
                         -max(1, int(max_sources or 1)) :
@@ -705,10 +923,14 @@ class RetrievalEpisodeState:
                 "attempted_url_count": len(self.attempted_urls),
                 "frozen_paths": [
                     {
+                        "route_id": str(item.get("route_id") or "")[:40],
                         "query": str(item.get("query") or "")[:500],
                         "action": str(item.get("action") or "")[:120],
                         "task_point_id": str(item.get("task_point_id") or "")[:120],
                         "step": int(item.get("step") or 0),
+                        "first_step": int(item.get("first_step") or item.get("step") or 0),
+                        "last_step": int(item.get("last_step") or item.get("step") or 0),
+                        "blocked_count": int(item.get("blocked_count") or 1),
                         "reason": str(item.get("reason") or "")[:240],
                     }
                     for item in self.frozen_paths[
@@ -741,17 +963,56 @@ class RetrievalEpisodeState:
         step: int = 0,
         reason: str = "",
     ) -> dict[str, Any]:
-        """Freeze a retrieval route without discarding its evidence."""
+        """Freeze one exact retrieval route without duplicating route state.
+
+        Repeated attempts of the same model-authored request are still counted
+        for audit, but they remain one frozen path.  Treating every blocked
+        repeat as a new path made the routing revision advance even though no
+        strategy changed, which in turn caused redundant validation/replan
+        cycles on identical state.
+        """
 
         record = {
             "query": " ".join(str(query or "").split()).strip(),
             "action": str(action or ""),
             "arguments": dict(arguments or {}),
             "task_point_id": str(task_point_id or ""),
+            "first_step": int(step or 0),
+            "last_step": int(step or 0),
+            # Historical readers use ``step``. Keep it as the most recent
+            # blocked attempt while publishing explicit first/last fields.
             "step": int(step or 0),
             "reason": str(reason or "")[:500],
+            "blocked_count": 1,
         }
+        identity = json.dumps(
+            {
+                "action": record["action"],
+                "arguments": record["arguments"],
+                "task_point_id": record["task_point_id"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        record["route_id"] = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
         with self._lock:
+            existing = next(
+                (
+                    item
+                    for item in reversed(self.frozen_paths)
+                    if str(item.get("route_id") or "") == record["route_id"]
+                ),
+                None,
+            )
+            if existing is not None:
+                existing["last_step"] = int(step or 0)
+                existing["step"] = int(step or 0)
+                existing["blocked_count"] = int(existing.get("blocked_count") or 1) + 1
+                if reason:
+                    existing["reason"] = str(reason)[:500]
+                return dict(existing)
             self.frozen_paths.append(record)
         return dict(record)
 
@@ -993,7 +1254,10 @@ class AgentState:
                 separators=(",", ":"),
             )
         )
-        lines.append("RWKV-bound exact evidence records (working memory, not a finish gate):")
+        lines.append(
+            "RWKV-selected grounded candidate records "
+            "(working memory; no record is pre-declared correct/current):"
+        )
         lines.append(
             json.dumps(
                 self.retrieval.planner_record_snapshot(),

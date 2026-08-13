@@ -1,9 +1,8 @@
 """Observable, provider-neutral retrieval ranking primitives.
 
-Round 20 uses these functions in shadow mode only.  They record what a wider
-candidate pool and reciprocal-rank fusion would have selected without
-changing the URLs fetched for RWKV.  No reference answer or benchmark datum is
-accepted by this module.
+The functions accept only live provider order and resource URLs.  They never
+accept reference answers or benchmark metadata and never decide which source
+contains a true answer.
 """
 
 from __future__ import annotations

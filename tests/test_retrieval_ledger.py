@@ -59,6 +59,7 @@ class RetrievalLedgerTests(unittest.TestCase):
         )
         status = ledger.query_status("rwkv official github")
         self.assertTrue(status["attempted"])
+        self.assertTrue(status["exact_match"])
         self.assertEqual(status["count"], 1)
         self.assertEqual(status["last"]["new_url_count"], 1)
 
@@ -89,6 +90,7 @@ class RetrievalLedgerTests(unittest.TestCase):
         )
         status = ledger.query_status(variant)
         self.assertTrue(status["attempted"])
+        self.assertFalse(status["exact_match"])
         self.assertEqual(status["match_type"], "equivalent")
         self.assertEqual(status["matched_query"], original)
         self.assertGreaterEqual(status["similarity"], 0.88)

@@ -41,14 +41,19 @@ def canonicalize_tool_call(payload: Mapping[str, Any]) -> dict[str, Any]:
         arguments = _arguments(function.get("arguments", first.get("arguments", {})))
         call_id = call_id or str(first.get("id") or "").strip()
     else:
-        function = value.get("function")
-        function = function if isinstance(function, Mapping) else {}
+        function_value = value.get("function")
+        function = function_value if isinstance(function_value, Mapping) else {}
+        function_name = (
+            str(function_value).strip()
+            if isinstance(function_value, str)
+            else str(function.get("name") or "").strip()
+        )
         name = str(
             value.get("name")
             or value.get("tool_name")
             or value.get("action")
             or value.get("tool")
-            or function.get("name")
+            or function_name
             or ""
         ).strip()
         arguments = _arguments(

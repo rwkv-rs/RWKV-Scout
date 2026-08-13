@@ -3,7 +3,8 @@
 The ledger records what the retrieval system has attempted and what changed.
 It is shared by the active global decision loop.  It does not choose a
 replacement query, but it gives the controller enough state to block repeated
-exact or equivalent web-search queries before they reach the network.
+exact requests before they reach the network. Similarity remains an offline
+diagnostic and never suppresses a model-authored query.
 """
 
 from __future__ import annotations
@@ -161,7 +162,7 @@ class RetrievalLedger:
         task_point_id: str = "",
         threshold: float = 0.88,
     ) -> dict[str, Any]:
-        """Return whether an exact/equivalent query ran for this task point."""
+        """Describe exact/similar history; only ``exact_match`` is actionable."""
 
         query_key = normalize_query(query)
         similarity_threshold = max(0.0, min(float(threshold), 1.0))
@@ -184,6 +185,7 @@ class RetrievalLedger:
                     "attempted": True,
                     "count": len(exact_matches),
                     "match_type": "exact",
+                    "exact_match": True,
                     "matched_query": last.get("query", ""),
                     "similarity": 1.0,
                     "threshold": similarity_threshold,
@@ -204,6 +206,7 @@ class RetrievalLedger:
                     "attempted": True,
                     "count": 1,
                     "match_type": "equivalent",
+                    "exact_match": False,
                     "matched_query": matched.get("query", ""),
                     "similarity": round(score, 4),
                     "threshold": similarity_threshold,
@@ -216,6 +219,7 @@ class RetrievalLedger:
                 "attempted": False,
                 "count": 0,
                 "match_type": "none",
+                "exact_match": False,
                 "matched_query": "",
                 "similarity": 0.0,
                 "threshold": similarity_threshold,
@@ -459,7 +463,7 @@ class RetrievalLedger:
                 for item in branch_recent
             ],
             "decision_guidance": (
-                "Already-searched information is observational context. Exact or equivalent web_search repeats "
+                "Already-searched information is observational context. Exact web_search repeats "
                 "are blocked before network execution. You decide whether to refine the query, use existing "
                 "evidence, search a different aspect, or finish."
             ),

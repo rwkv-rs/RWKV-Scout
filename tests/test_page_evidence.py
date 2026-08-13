@@ -215,6 +215,45 @@ def test_current_release_keeps_after_cutoff_metadata_when_capacity_allows():
     assert by_version["## 5.0.0 pre-release"]["rank_scores"]["temporal"] == 0
 
 
+def test_current_table_rows_are_independent_literal_attention_records():
+    chunks = [
+        {
+            "chunk_id": "release-table",
+            "index": 0,
+            "text": (
+                "## Release history\n"
+                "| Version | Date | OS Build |\n"
+                "| --- | --- | --- |\n"
+                "| 25H2 | 2026-08-11 | 26200.9999 |\n"
+                "| 24H2 | 2026-07-14 | 26100.8888 |\n"
+            ),
+        }
+    ]
+
+    selected = select_model_evidence_chunks(
+        "Windows 11 current public version latest OS Build",
+        chunks,
+        {
+            "atomic_points": [
+                {
+                    "id": "P1",
+                    "question": "current public version and latest OS Build",
+                    "fields": ["version", "date", "build"],
+                    "time_scope": "current",
+                }
+            ],
+            "freshness_policy": {"as_of": "2026-08-13"},
+        },
+        max_chunks=3,
+    )
+
+    row = next(item for item in selected if "26200.9999" in item["text"])
+    assert row["attention_window_kind"] == "table_record"
+    assert row["text"] == "| 25H2 | 2026-08-11 | 26200.9999 |"
+    assert row["record_temporal_role"] == "newest_dated_window_in_page"
+    assert row["rank_scores"]["temporal"] == 12
+
+
 def test_rrf_shadow_uses_provider_ranks_not_incomparable_provider_scores():
     fused = rrf_fuse(
         [
@@ -613,7 +652,11 @@ def test_same_subject_other_record_is_preserved_as_candidate_not_exact_support()
     )
 
     assert candidate["supported"] is True
-    assert candidate["record_match"] == "same_subject_other_record"
+    # A page-local extractor cannot decide the global current/exact record.
+    # Preserve its declaration for audit, but expose the span to later RWKV
+    # comparison only as a candidate record.
+    assert candidate["record_match"] == "candidate_record"
+    assert candidate["extractor_declared_record_match"] == "same_subject_other_record"
     assert candidate["field_keys"] == ["版本号"]
     assert candidate["field_contract_valid"] is True
 
@@ -1278,7 +1321,7 @@ class PageEvidenceTests(unittest.TestCase):
         self.assertIn("Widget 4.7.2 Aug. 5, 2026", retained)
         self.assertIn("Widget 5.0 pre-release Oct. 1, 2026", retained)
 
-    def test_explicit_version_anchor_rejects_adjacent_release_page(self):
+    def test_explicit_version_mismatch_remains_visible_for_rwkv_comparison(self):
         page = {
             "title": "Kubernetes 1.14",
             "url": "https://example.org/kubernetes-1-14",
@@ -1293,8 +1336,16 @@ class PageEvidenceTests(unittest.TestCase):
             llm=_GroundedFakeLLM(),
             task_plan={"answer_requirements": [{"type": "date"}]},
         )
-        self.assertEqual(evidence["status"], "no_evidence")
-        self.assertFalse(any(row.get("supported") for row in evidence["chunk_candidates"]))
+        self.assertEqual(evidence["status"], "ok")
+        candidates = [
+            row for row in evidence["chunk_candidates"] if row.get("supported")
+        ]
+        self.assertTrue(candidates)
+        self.assertIn("Kubernetes 1.14", candidates[0]["quote"])
+        self.assertNotIn(
+            "explicit_identity_anchor_mismatch",
+            {str(row.get("rejection_reason") or "") for row in candidates},
+        )
 
     def test_explicit_version_anchor_recovers_source_span_when_model_misses_it(self):
         page = {

@@ -934,9 +934,13 @@ class ExperimentPipelineTests(unittest.TestCase):
             # creates a replacement query of its own.
             self.assertEqual([item[0] for item in executed], ["web_search"])
             self.assertEqual(len(synthesis_calls), 1)
+            # A duplicate boundary now gives the RWKV cross-validator one
+            # bounded opportunity to request a genuinely different plan.  If
+            # the replanned session still repeats the same route, the global
+            # step budget remains the final deterministic safety boundary.
             self.assertEqual(
                 synthesis_calls[0]["termination_reason"],
-                "resource_duplicate_limit",
+                "resource_max_steps",
             )
 
     def test_runtime_gate_is_persisted_and_released(self):
