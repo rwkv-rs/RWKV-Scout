@@ -159,7 +159,14 @@ class OpenAICompatBackend:
 
     @staticmethod
     def _apply_request_sampling(payload: dict[str, Any]) -> None:
-        """Attach only the active request's RWKV-compatible decoding profile."""
+        """Attach the standard-sampler subset supported by vLLM-RWKV.
+
+        ``penalty_decay`` and ``no_penalty_token_ids`` require the optional
+        rapid sampler and are intentionally never sent by this compatibility
+        client.  Temperature/seed remain request-local; the standard OpenAI
+        top-k/top-p and additive penalties are included only when a stage
+        profile explicitly configures them.
+        """
 
         sampling = get_llm_sampling_parameters()
         for name in (
@@ -168,18 +175,10 @@ class OpenAICompatBackend:
             "top_k",
             "presence_penalty",
             "frequency_penalty",
-            "penalty_decay",
         ):
             if name in sampling:
                 payload[name] = sampling[name]
-        if "no_penalty_token_ids" in sampling:
-            payload["no_penalty_token_ids"] = list(
-                sampling["no_penalty_token_ids"]
-            )
         if "presence_penalty" in sampling or "frequency_penalty" in sampling:
-            # vllm-rwkv's additive coefficients are carried by the two OpenAI
-            # penalty fields. Its standard multiplicative repetition penalty
-            # must remain neutral; values such as 0.25 severely distort logits.
             payload["repetition_penalty"] = 1.0
 
     def batch_text_completion(self, prompts: Sequence[str], *, max_tokens: int = 768) -> list[str]:

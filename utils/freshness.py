@@ -82,8 +82,20 @@ def annotate_freshness(row: dict[str, Any], policy: dict[str, Any]) -> dict[str,
         source_date = extract_explicit_date(item.get(key))
         if source_date:
             break
+    source_date_origin = "declared_metadata" if source_date else ""
+    # Search snippets can quote an arbitrary sentence from the body. Treating
+    # the first date in that sentence as the date of the whole source caused a
+    # product announcement, CVE row, or footer date to be presented to RWKV as
+    # publication metadata. URL/title dates identify the source record itself;
+    # body dates remain inside the exact evidence chunks for RWKV to compare.
     if not source_date:
-        source_date = extract_explicit_date(item.get("snippet"))
+        source_date = extract_explicit_date(item.get("url"))
+        if source_date:
+            source_date_origin = "url_record_identity"
+    if not source_date:
+        source_date = extract_explicit_date(item.get("title"))
+        if source_date:
+            source_date_origin = "title_record_identity"
     if as_of and source_date:
         state = "within_cutoff" if source_date <= as_of else "after_cutoff"
     elif as_of:
@@ -94,6 +106,7 @@ def annotate_freshness(row: dict[str, Any], policy: dict[str, Any]) -> dict[str,
         "policy": "explicit_cutoff" if as_of else "retrieval_time_only",
         "as_of": as_of or None,
         "source_date": source_date or None,
+        "source_date_origin": source_date_origin or None,
         "state": state,
     }
     return item

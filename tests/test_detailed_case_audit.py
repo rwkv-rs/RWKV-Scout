@@ -112,6 +112,32 @@ def test_case_audit_counts_one_logical_query_for_decision_and_execution_events()
     assert query["source"] == "model_tool_decision+web_search_stage"
 
 
+def test_case_audit_groups_replan_and_candidate_pool_at_their_actual_layers():
+    case = _case()
+    case["trace"]["events"] = [
+        {
+            "seq": 10,
+            "type": "planner_session_rebuilt",
+            "reason": "duplicate_path",
+        },
+        {
+            "seq": 11,
+            "type": "web_candidate_pool_shadow",
+            "query": "current version",
+            "legacy_candidates": [],
+            "rrf_candidates": [],
+        },
+        *case["trace"]["events"],
+    ]
+
+    audit = build_case_audit(case)
+
+    assert audit["events"]["planning"][0]["type"] == "planner_session_rebuilt"
+    assert audit["events"]["retrieval"][0]["type"] == "web_candidate_pool_shadow"
+    assert audit["events"]["other"] == []
+    assert audit["integrity"]["all_events_accounted_for"] is True
+
+
 def test_case_audit_distinguishes_empty_model_outputs_and_exact_chunk_quotes():
     case = _case()
     case["trace"]["events"].insert(

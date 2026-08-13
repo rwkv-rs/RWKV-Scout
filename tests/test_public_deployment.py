@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+import config
 from app.models import AnalyzeRequest
 from app.public_access import public_frontend_request_allowed
 from app.services.task_runner import resolve_model_connection
@@ -60,12 +61,20 @@ def test_public_api_guard_only_blocks_files_and_destructive_deletion(monkeypatch
 
 def test_public_mode_keeps_direct_rwkv_chat_available(monkeypatch):
     monkeypatch.setenv("RWKV_ECRA_PUBLIC_MODE", "1")
-    monkeypatch.setattr(
-        "clients.llm_client.LLMClient.chat_completion",
-        lambda self, messages, max_tokens: SimpleNamespace(
+    monkeypatch.setenv("RWKV_ECRA_LLM_BASE_URL", "http://deployment.example/v1")
+
+    observed: dict[str, str] = {}
+
+    def fake_chat_completion(self, messages, max_tokens):
+        observed["base_url"] = config.get_llm_base_url()
+        return SimpleNamespace(
             role="assistant",
             content=f"direct reply to: {messages[-1]['content']}",
-        ),
+        )
+
+    monkeypatch.setattr(
+        "clients.llm_client.LLMClient.chat_completion",
+        fake_chat_completion,
     )
     from api import app
 
@@ -80,6 +89,7 @@ def test_public_mode_keeps_direct_rwkv_chat_available(monkeypatch):
         "role": "assistant",
         "content": "direct reply to: hello",
     }
+    assert observed["base_url"] == "http://deployment.example/v1"
 
 
 def test_model_connection_request_overrides_environment(monkeypatch):

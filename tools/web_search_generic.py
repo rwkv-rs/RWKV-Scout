@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 from agent.page_evidence import build_page_chunks, extract_single_page_evidence, select_grounded_source_chunks
+from agent.task_plan_contract import point_question, task_points
 from clients.llm_client import LLMClient
 from config import DATA_PIPELINE, get_llm_context_length
 from tools.registry import ToolRegistry
@@ -40,9 +41,10 @@ from utils.source_authority import (
     required_domains_for_task_point,
     resolve_source_policy,
 )
-from utils.web_retrieval import candidate_score, normalize_url
+from utils.web_retrieval import candidate_score, normalize_url, retrieval_url_identity
 from utils.freshness import annotate_freshness, build_freshness_policy
 from utils.query_constraints import candidate_relevance, meaningful_query_terms
+from utils.retrieval_ranking import rrf_fuse
 
 
 _HOST_FETCH_GATE_LOCK = threading.Lock()
@@ -101,7 +103,7 @@ def _shared_source_urls(agent_state: Any) -> set[str]:
     attempted = getattr(retrieval, "attempted_urls", set()) if retrieval is not None else set()
     attempt_counts = getattr(retrieval, "url_attempt_counts", {}) if retrieval is not None else {}
     accepted = {
-        normalize_url(str(item.get("url") or ""))
+        retrieval_url_identity(str(item.get("url") or ""))
         for item in (sources.values() if isinstance(sources, dict) else [])
         if isinstance(item, dict) and str(item.get("url") or "").strip()
     }
@@ -113,7 +115,7 @@ def _shared_source_urls(agent_state: Any) -> set[str]:
     except (TypeError, ValueError):
         failed_retry_limit = 2
     frozen_failures = {
-        normalize_url(str(url or ""))
+        retrieval_url_identity(str(url or ""))
         for url in (attempted if isinstance(attempted, (set, list, tuple)) else [])
         if str(url or "").strip()
         and int((attempt_counts or {}).get(url, 0) or 0) >= failed_retry_limit
@@ -284,10 +286,18 @@ def _merge_candidates(
     *,
     task_plan: dict[str, Any] | None = None,
     constraint_query: str = "",
+    policy_query: str = "",
 ) -> list[dict[str, Any]]:
     """Deduplicate and rank candidates without classifying the task domain."""
 
-    source_policy = resolve_source_policy(query, {"task_plan": task_plan or {}})
+    # Search-query text is RWKV-owned strategy, not user policy.  A domain
+    # inserted into a follow-up query must therefore remain a retrieval hint
+    # instead of silently becoming a hard source requirement.
+    authority_query = str(policy_query or query)
+    source_policy = resolve_source_policy(
+        authority_query,
+        {"task_plan": task_plan or {}},
+    )
     merged: dict[str, dict[str, Any]] = {}
     for result in provider_results:
         for item in result.get("results") or []:
@@ -311,7 +321,11 @@ def _merge_candidates(
                     "source": str(item.get("source") or result.get("provider") or "web"),
                 }
             )
-            row = annotate_source(row, query, {"task_plan": task_plan or {}})
+            row = annotate_source(
+                row,
+                authority_query,
+                {"task_plan": task_plan or {}},
+            )
             relevance = candidate_relevance(
                 row,
                 query,
@@ -325,11 +339,10 @@ def _merge_candidates(
                 constraint_query=constraint_query,
                 source_policy=source_policy,
             )
-            # Provider ranking is not evidence.  Reject candidates that do not
-            # retain enough of the RWKV-generated query to be plausibly about
-            # the task; the later page extractor remains the semantic judge.
-            if not relevance.get("related"):
-                continue
+            # Discovery relevance is a soft ranking feature.  Search snippets
+            # are frequently sparse, translated, or generated from navigation
+            # text; rejecting here can discard the useful page before its body
+            # is fetched.  Only protocol/safety exclusions above are hard.
             row["query_relevance"] = relevance
             row["candidate_score"] = candidate_score(query, row)
             row["discovery_score"] = float(item.get("discovery_score") or 0.0)
@@ -345,9 +358,10 @@ def _merge_candidates(
                     ]
                 )
             )
-            existing = merged.get(url)
+            identity = retrieval_url_identity(url)
+            existing = merged.get(identity)
             if existing is None:
-                merged[url] = row
+                merged[identity] = row
                 continue
             existing["candidate_score"] = max(
                 float(existing.get("candidate_score") or 0),
@@ -413,6 +427,14 @@ def _merge_candidates(
     }
 
     route_query = str(constraint_query or query or "").casefold()
+    release_record_requested = bool(
+        re.search(
+            r"\b(?:release|released|version|changelog|current|latest|stable)\b|"
+            r"(?:发布|发行|版本|更新日志|当前|最新|稳定)",
+            route_query,
+            flags=re.IGNORECASE,
+        )
+    )
     documentation_requested = bool(
         re.search(
             r"\b(?:api\s+)?(?:docs?|documentation|reference)\b|"
@@ -434,6 +456,17 @@ def _merge_candidates(
                 return 3
             if re.search(
                 r"/(?:blog|news|announcements?|migrations?|releases?)(?:/|$)",
+                path,
+            ):
+                return 0
+        if release_record_requested:
+            if re.search(
+                r"/(?:releases?|release-notes?|release_notes|changelog|downloads?)(?:/|$)",
+                path,
+            ):
+                return 3
+            if re.search(
+                r"/(?:advanced|tutorial|examples?|community)(?:/|$)",
                 path,
             ):
                 return 0
@@ -464,7 +497,7 @@ def _merge_candidates(
         )
         item["query_relevance"] = relevance
 
-    latest_list = str((task_plan or {}).get("task_mode") or "").casefold() == "latest_list"
+    latest_list = _requests_recency(constraint_query or query)
     community_required = str(source_policy.get("mode") or "").casefold() == "community_required"
     def common_relevance_rank(item: dict[str, Any]) -> tuple[int, int, float]:
         """Compare providers on one query-derived scale.
@@ -503,6 +536,7 @@ def _merge_candidates(
             int(bool((item.get("authority") or {}).get("satisfied"))),
             int((item.get("authority") or {}).get("rank") or 0),
             int(_is_community_detail_url(item.get("url"))) if community_required else 0,
+            int(_is_community_detail_url(item.get("url"))),
             common_relevance_rank(item)[0],
             int(bool((item.get("query_relevance") or {}).get("anchor_satisfied"))),
             int(bool((item.get("query_relevance") or {}).get("constraint_topic_hits"))),
@@ -659,16 +693,16 @@ def _resolve_failed_page_fetches(
             )
         )
         pages_by_url = {
-            normalize_url(str(page.get("url") or "")): page
+            retrieval_url_identity(str(page.get("url") or "")): page
             for page in payload.get("results") or []
             if isinstance(page, dict)
-            and normalize_url(str(page.get("url") or ""))
+            and retrieval_url_identity(str(page.get("url") or ""))
             and _has_usable_fetched_page({"results": [page]})
         }
         recovered: list[str] = []
         for index in sorted(remaining):
             candidate, primary_result = resolved[index]
-            normalized = normalize_url(str(candidate.get("url") or ""))
+            normalized = retrieval_url_identity(str(candidate.get("url") or ""))
             page = pages_by_url.get(normalized)
             if page is None:
                 continue
@@ -740,50 +774,27 @@ def _claim_evidence_focus(
     point = next(
         (
             item
-            for item in plan.get("atomic_points") or []
+            for item in task_points(plan)
             if isinstance(item, dict) and str(item.get("id") or "").strip() == point_id
         ),
         None,
     )
     if not isinstance(point, dict):
         return str(query or "").strip()
-    # Search queries, objectives and evidence hints may contain hypotheses
-    # proposed by RWKV. They help discovery but must not be repeated to the
-    # extractor as if they were requested facts. Bind extraction to the
-    # normalized atomic task only; fall back to the search query when no task
-    # point exists (legacy/single-page callers).
-    task = str(point.get("task") or point.get("question") or "").strip()
-    return (task or str(query or "").strip())[:1600]
+    return (point_question(point) or str(query or "").strip())[:1600]
 
 
-def _claim_answer_requirements(
-    task_plan: dict[str, Any] | None,
-    task_point_id: str,
-) -> list[dict[str, Any]]:
-    """Return answer-shape requirements for only the active atomic point."""
+def _requests_recency(value: Any) -> bool:
+    """Detect an explicit recency request for attention ordering only."""
 
-    plan = task_plan if isinstance(task_plan, dict) else {}
-    point_id = str(task_point_id or "").strip()
-    if point_id:
-        point = next(
-            (
-                item
-                for item in plan.get("atomic_points") or []
-                if isinstance(item, dict) and str(item.get("id") or "").strip() == point_id
-            ),
-            None,
+    return bool(
+        re.search(
+            r"(?:\bcurrent\b|\blatest\b|\bnewest\b|\brecent\b|\btoday\b|"
+            r"当前|最新|目前|现行|截至)",
+            str(value or ""),
+            flags=re.IGNORECASE,
         )
-        if isinstance(point, dict):
-            return [
-                dict(value)
-                for value in point.get("answer_requirements") or []
-                if isinstance(value, dict)
-            ]
-    return [
-        dict(value)
-        for value in plan.get("answer_requirements") or []
-        if isinstance(value, dict)
-    ]
+    )
 
 
 def _cached_page_result(record: dict[str, Any]) -> dict[str, Any]:
@@ -1053,9 +1064,9 @@ def _compact_page(
         or page_evidence["all_selected_chunks_valid_negative"]
         or page_evidence["all_selected_chunks_semantically_rejected"]
     ):
-        # The locator has made a valid semantic decision that every inspected
-        # chunk lacks the requested fact.  Retaining a lexical fallback here
-        # lets the final writer infer an answer from unrelated adjacent notices.
+        # The extractor's negative decision is useful routing metadata, not a
+        # source admission gate.  Preserve only the bounded original spans so
+        # the final RWKV writer can judge the fetched material itself.
         page_evidence["source_body_available"] = bool(source_excerpt)
         page_evidence["model_extraction_status"] = (
             "semantically_rejected"
@@ -1063,22 +1074,37 @@ def _compact_page(
             and not page_evidence["all_selected_chunks_valid_negative"]
             else "negative"
         )
-        page_evidence["deterministic_chunk_fallback"] = False
-        page_evidence["evidence_origin"] = "rejected_fetched_page_body"
-        return None, page_evidence
+        page_evidence["deterministic_chunk_fallback"] = bool(source_excerpt)
+        page_evidence["evidence_origin"] = "bounded_fetched_page_body"
     if not source_excerpt:
         return None, page_evidence
+
+    rwkv_bound_claim_ids = list(
+        dict.fromkeys(
+            str(claim_id).strip()
+            for candidate_row in (evidence.get("candidates") or [])
+            if isinstance(candidate_row, dict)
+            for claim_id in (candidate_row.get("claim_ids") or [])
+            if str(claim_id).strip()
+        )
+    )
 
     extraction_status = str(page_evidence.get("status") or "no_evidence").casefold()
     # The locator improves chunk selection; it is never the admission gate for
     # a successfully fetched source.  When it fails, keep only the bounded
     # deterministic original spans selected above, never the complete page.
     deterministic_fallback = extraction_status in {"error", "no_evidence"} and not compact_facts
-    page_evidence["evidence_origin"] = "fetched_page_body"
-    page_evidence["model_extraction_status"] = (
-        "ok" if compact_facts else ("empty" if extraction_status == "no_evidence" else "error")
-    )
-    page_evidence["deterministic_chunk_fallback"] = deterministic_fallback
+    explicit_negative_status = str(
+        page_evidence.get("model_extraction_status") or ""
+    ).casefold() in {"negative", "semantically_rejected"}
+    if not explicit_negative_status:
+        page_evidence["evidence_origin"] = "fetched_page_body"
+        page_evidence["model_extraction_status"] = (
+            "ok"
+            if compact_facts
+            else ("empty" if extraction_status == "no_evidence" else "error")
+        )
+        page_evidence["deterministic_chunk_fallback"] = deterministic_fallback
 
     record = {
         "title": page_evidence["title"],
@@ -1093,7 +1119,7 @@ def _compact_page(
         "source_excerpt": source_excerpt[:14000],
         "model_extracted_facts": compact_facts[:14000],
         "untrusted_content": True,
-        "evidence_origin": "fetched_page_body",
+        "evidence_origin": page_evidence["evidence_origin"],
         "evidence_kind": "page_body",
         "evidence_boundary": "page_body_only",
         "body_verified": True,
@@ -1113,8 +1139,23 @@ def _compact_page(
         "chunk_candidates": evidence.get("chunk_candidates") or evidence.get("candidates") or [],
         "source_chunks": source_chunks,
         "selected_source_chunks": selected_source_chunks,
-        "claim_ids": [task_point_id] if task_point_id else [],
-        "locator_claim_id": task_point_id,
+        "claim_ids": rwkv_bound_claim_ids[:8],
+        # The Planner-selected point scopes the retrieval attempt and the
+        # extractor prompt; it is not evidence that every fetched page proves
+        # that point. Only RWKV chunk bindings enter ``claim_ids`` above.
+        "attempt_task_point_id": task_point_id,
+        "locator_claim_id": (
+            rwkv_bound_claim_ids[0] if len(rwkv_bound_claim_ids) == 1 else ""
+        ),
+        "claim_binding_origin": (
+            "rwkv_chunk_binding"
+            if any(
+                candidate_row.get("claim_ids")
+                for candidate_row in (evidence.get("candidates") or [])
+                if isinstance(candidate_row, dict)
+            )
+            else "unbound"
+        ),
         "locator_query": evidence_focus,
         "candidate_rank": candidate.get("candidate_rank"),
         "discovery_providers": candidate.get("discovery_providers") or [],
@@ -1127,9 +1168,11 @@ def _compact_page(
     if compact_facts:
         record["model_locator_facts"] = compact_facts[:14000]
     if not has_substantive_evidence(record):
-        page_evidence["status"] = "no_evidence"
-        page_evidence.setdefault("errors", []).append("extracted body did not meet the substantive evidence threshold")
-        return None, page_evidence
+        # Keep a fetched bounded body even when lexical heuristics consider it
+        # weak.  The metadata remains visible for ranking and audit, but only
+        # RWKV decides whether the text supports the final answer.
+        page_evidence["low_signal_body"] = True
+        record["low_signal_body"] = True
     # A fetched body may still be retained for deterministic routing after
     # some chunk calls failed.  Keep that source available, but do not rewrite
     # the extraction outcome to ``ok``: callers need to know that part of the
@@ -1210,7 +1253,7 @@ def _model_extraction_diagnostics(pages: list[dict[str, Any]]) -> dict[str, Any]
     retrieval_role="discovery",
     model_visible=True,
     category="retrieval",
-    description="Run one bounded general-web retrieval transaction for discovery and evidence; provide query and optionally max_results; the result is evidence, not a final answer.",
+    description="Search/fetch an exact URL, documentation, product or service status page, or the general web; also use it when no structured connector matches or connector evidence is insufficient.",
     signature="""[Tool] web_search
 - Function: perform one bounded general-web retrieval transaction.
 - Parameters: query (one concise search query or one complete http/https URL), max_results (optional, capped at 8).
@@ -1226,9 +1269,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     effective_task_plan = dict(task_plan)
     task_point_id = str(kwargs.get("task_point_id") or "").strip()
     original_goal = str(kwargs.get("original_goal") or query).strip()
-    point_count = len(
-        [value for value in task_plan.get("atomic_points") or [] if isinstance(value, dict)]
-    )
+    point_count = len(task_points(task_plan, fallback_query=original_goal))
     constraint_query = (
         _claim_evidence_focus(query, task_plan, task_point_id)
         if task_point_id and point_count > 1
@@ -1266,9 +1307,6 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             "required_domains": [],
             "preferred_domains": model_domain_hypotheses,
         }
-    active_answer_requirements = _claim_answer_requirements(task_plan, task_point_id)
-    if task_point_id:
-        effective_task_plan["answer_requirements"] = active_answer_requirements
     freshness_policy = build_freshness_policy(
         kwargs.get("original_goal") or query,
         effective_task_plan,
@@ -1278,7 +1316,19 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     # prerelease row from being selected as the current release while keeping
     # the fetched source body intact for RWKV.
     effective_task_plan["freshness_policy"] = freshness_policy
-    source_policy = resolve_source_policy(query, {"task_plan": effective_task_plan})
+    source_policy = resolve_source_policy(
+        original_goal,
+        {"task_plan": effective_task_plan},
+    )
+    if explicit_scoped_domains:
+        source_policy = resolve_source_policy(
+            constraint_query,
+            {
+                "task_plan": effective_task_plan,
+                "required_domains": explicit_scoped_domains,
+                "source_policy": source_policy.get("mode"),
+            },
+        )
     if not query:
         return json.dumps({"status": "error", "message": "query is empty", "results": []}, ensure_ascii=False)
 
@@ -1292,10 +1342,24 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         }
 
     try:
-        max_candidates = max(1, min(int(max_results or 8), 8))
+        requested_candidates = max(1, min(int(max_results or 8), 32))
     except (TypeError, ValueError):
-        max_candidates = 8
-    max_pages = _pipeline_concurrency("web_search_max_pages", 8, maximum=16)
+        requested_candidates = 8
+    fetch_limit = _pipeline_concurrency("web_fetch_limit", 8, maximum=32)
+    max_candidates = min(requested_candidates, fetch_limit)
+    provider_result_limit = max(
+        max_candidates,
+        _pipeline_concurrency("web_provider_result_limit", 20, maximum=50),
+    )
+    candidate_pool_limit = _pipeline_concurrency(
+        "web_candidate_pool_limit", 48, maximum=100
+    )
+    rrf_k = _pipeline_concurrency("web_rrf_k", 60, maximum=1000)
+    rrf_shadow_enabled = bool(DATA_PIPELINE.get("web_enable_rrf_shadow", True))
+    max_pages = min(
+        _pipeline_concurrency("web_search_max_pages", 8, maximum=16),
+        fetch_limit,
+    )
     append_task_event(
         task_id,
         "web_search_stage",
@@ -1305,6 +1369,11 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         query=query,
         budget={
             "max_candidates": max_candidates,
+            "provider_result_limit": provider_result_limit,
+            "candidate_pool_limit": candidate_pool_limit,
+            "fetch_limit": fetch_limit,
+            "rrf_k": rrf_k,
+            "rrf_shadow_only": rrf_shadow_enabled,
             "max_pages": max_pages,
             "context_length": get_llm_context_length(),
             "chunk_mode": DATA_PIPELINE.get("web_chunk_mode", "adaptive"),
@@ -1319,7 +1388,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         return _parse_result(
             search_web_keyless(
                 query,
-                max_results=max_candidates,
+                max_results=provider_result_limit,
                 fetch_pages=0,
                 task_id=task_id,
                 agentic_tool_loop=True,
@@ -1331,7 +1400,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         return _parse_result(
             search_web_tavily(
                 query,
-                max_results=max_candidates,
+                max_results=provider_result_limit,
                 search_depth="advanced",
                 topic="general",
                 task_id=task_id,
@@ -1342,9 +1411,8 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         return discover_official_urls(
             query,
             source_policy.get("required_domains") or [],
-            answer_requirements=active_answer_requirements,
-            max_results=max_candidates,
-            prefer_recent=str(effective_task_plan.get("task_mode") or "").casefold() == "latest_list",
+            max_results=provider_result_limit,
+            prefer_recent=_requests_recency(original_goal),
             constraint_query=constraint_query,
         )
 
@@ -1352,22 +1420,28 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         return discover_official_urls(
             query,
             model_domain_hypotheses,
-            answer_requirements=active_answer_requirements,
-            max_results=max_candidates,
-            prefer_recent=str(effective_task_plan.get("task_mode") or "").casefold() == "latest_list",
+            max_results=provider_result_limit,
+            prefer_recent=_requests_recency(original_goal),
             constraint_query=constraint_query,
         )
 
     direct_url = _extract_direct_url(query) or _extract_single_goal_url(kwargs.get("original_goal"))
     if direct_url:
         provider_results: list[dict[str, Any]] = []
+        candidate_pool_shadow: list[dict[str, Any]] = []
         provider_statuses = [
             {"provider": "direct_url", "status": "ok", "count": 1, "errors": []}
         ]
         candidates = (
             []
             if _is_unsupported_download_url(direct_url)
-            else [annotate_source(_direct_candidate(direct_url), query, {"task_plan": task_plan})]
+            else [
+                annotate_source(
+                    _direct_candidate(direct_url),
+                    original_goal,
+                    {"task_plan": effective_task_plan},
+                )
+            ]
         )
     else:
         provider_jobs = (
@@ -1417,12 +1491,29 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         finally:
             shutdown_pool(pool, list(futures), cancelled=cancelled)
 
-        # For an unseen project the plan may correctly require an official
-        # source without knowing its hostname.  Bootstrap the hostname from
-        # strong first-party signals in ordinary provider results, publish it
-        # to the request-scoped plan, then run the same generic official-site
-        # adapter.  This occurs after provider discovery; doing it in the
-        # direct-URL branch would always inspect an empty result set.
+        # Preserve Round 19's active per-provider admission slice while
+        # retaining the wider raw lists for offline recall/RRF analysis.  The
+        # shadow pool cannot affect authority inference, fetching or RWKV.
+        shadow_provider_results = [dict(result) for result in provider_results]
+        provider_results = [
+            {
+                **dict(result),
+                "results": list(result.get("results") or [])[:max_candidates],
+                "count": min(
+                    int(result.get("count") or len(result.get("results") or [])),
+                    max_candidates,
+                ),
+            }
+            for result in provider_results
+        ]
+
+        # For an unseen project the user may require an official source without
+        # supplying its hostname. Provider results can suggest domains, but a
+        # lexical ownership guess is not proof and must not open a sitemap or
+        # consume fetch slots. Round 24 therefore records this inference only
+        # as a shadow diagnostic. Ordinary providers remain the active first
+        # pass; if RWKV later chooses a site/domain in its next exact query,
+        # that model-owned hypothesis goes through `run_model_domain_hypothesis`.
         authority_candidates: list[dict[str, Any]] = []
         if (
             str(source_policy.get("mode") or "").casefold() == "official_required"
@@ -1432,23 +1523,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                 constraint_query or query,
                 provider_results,
             )
-            inferred_domains = [
-                str(item.get("domain") or "")
-                for item in authority_candidates
-                if item.get("domain")
-            ]
-            if inferred_domains:
-                effective_task_plan["required_domains"] = inferred_domains
-                effective_task_plan["source_resolution"] = {
-                    "domain_source": "provider_bootstrap",
-                    "required_domains": inferred_domains,
-                    "candidates": authority_candidates,
-                }
-                source_policy = resolve_source_policy(
-                    constraint_query or query,
-                    {"task_plan": effective_task_plan},
-                )
-                provider_results.insert(0, run_official_site())
+            if authority_candidates:
                 append_task_event(
                     task_id,
                     "web_search_stage",
@@ -1456,9 +1531,13 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                     action="web_search",
                     stage="authority_resolution",
                     query=query,
-                    source="provider_bootstrap",
+                    source="provider_bootstrap_shadow",
                     candidates=authority_candidates,
-                    required_domains=inferred_domains,
+                    required_domains=[],
+                    preferred_domains=[],
+                    affects_admission=False,
+                    affects_fetch=False,
+                    affects_rwkv=False,
                 )
 
         # A first-party sitemap fetched through the planned official domain
@@ -1467,7 +1546,11 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         # annotation; otherwise discovery succeeds but the authority gate
         # rejects the very page that the official host redirected us to.
         planned_domains = list(source_policy.get("required_domains") or [])
+        preferred_domains = list(
+            effective_task_plan.get("preferred_domains") or []
+        )
         resolved_domains = list(planned_domains)
+        resolved_preferred_domains = list(preferred_domains)
         verified_aliases: list[dict[str, Any]] = []
         for provider_result in provider_results:
             if str(provider_result.get("provider") or "") != "official site adapter":
@@ -1481,9 +1564,13 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             verified_aliases.extend(aliases)
             for value in provider_result.get("resolved_domains") or []:
                 domain = str(value or "").casefold().removeprefix("www.").rstrip(".")
-                if domain and domain not in resolved_domains:
+                if not domain:
+                    continue
+                if planned_domains and domain not in resolved_domains:
                     resolved_domains.append(domain)
-        if verified_aliases and resolved_domains != planned_domains:
+                elif not planned_domains and domain not in resolved_preferred_domains:
+                    resolved_preferred_domains.append(domain)
+        if planned_domains and verified_aliases and resolved_domains != planned_domains:
             effective_task_plan["required_domains"] = resolved_domains
             effective_task_plan["source_resolution"] = {
                 "domain_source": "official_sitemap_canonicalization",
@@ -1505,6 +1592,31 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                 aliases=verified_aliases,
                 required_domains=resolved_domains,
             )
+        elif (
+            not planned_domains
+            and verified_aliases
+            and resolved_preferred_domains != preferred_domains
+        ):
+            effective_task_plan["preferred_domains"] = resolved_preferred_domains
+            effective_task_plan["source_resolution"] = {
+                "domain_source": "official_sitemap_hypothesis_canonicalization",
+                "required_domains": [],
+                "preferred_domains": resolved_preferred_domains,
+                "aliases": verified_aliases,
+            }
+            append_task_event(
+                task_id,
+                "web_search_stage",
+                phase="DISCOVERY",
+                action="web_search",
+                stage="authority_resolution",
+                query=query,
+                source="official_sitemap_hypothesis_canonicalization",
+                aliases=verified_aliases,
+                required_domains=[],
+                preferred_domains=resolved_preferred_domains,
+                affects_admission=False,
+            )
 
         provider_statuses = [
             {
@@ -1521,68 +1633,66 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             limit=max_candidates,
             task_plan=effective_task_plan,
             constraint_query=constraint_query,
+            policy_query=original_goal,
+        )
+        candidate_pool_shadow = (
+            rrf_fuse(
+                shadow_provider_results,
+                rrf_k=rrf_k,
+                pool_limit=candidate_pool_limit,
+            )
+            if rrf_shadow_enabled
+            else []
+        )
+        legacy_rank_by_url = {
+            retrieval_url_identity(str(item.get("url") or "")): int(
+                item.get("candidate_rank") or index
+            )
+            for index, item in enumerate(candidates, start=1)
+        }
+        for item in candidate_pool_shadow:
+            item["legacy_rank"] = legacy_rank_by_url.get(
+                retrieval_url_identity(str(item.get("url") or ""))
+            )
+            # Provider snippets remain in provider responses and are not
+            # needed in the compact shadow record.
+            item.pop("snippet", None)
+        append_task_event(
+            task_id,
+            "web_candidate_pool_shadow",
+            phase="DISCOVERY",
+            action="web_search",
+            query=query,
+            active_ranking="legacy",
+            provider_result_limit=provider_result_limit,
+            active_provider_slice=max_candidates,
+            candidate_pool_limit=candidate_pool_limit,
+            fetch_limit=max_pages,
+            rrf_k=rrf_k,
+            providers=[
+                {
+                    "provider": result.get("provider") or "unknown",
+                    "raw_count": len(result.get("results") or []),
+                    "status": result.get("status") or "error",
+                }
+                for result in shadow_provider_results
+            ],
+            legacy_candidates=[
+                {
+                    "rank": item.get("candidate_rank"),
+                    "url": item.get("url"),
+                    "title": item.get("title"),
+                }
+                for item in candidates
+            ],
+            rrf_candidates=candidate_pool_shadow,
+            affects_fetch=False,
+            affects_rwkv=False,
         )
 
-    if not direct_url and source_policy.get("required"):
-        discovered_candidates = list(candidates)
-        candidates = [
-            item for item in candidates
-            if bool((item.get("authority") or {}).get("satisfied"))
-        ]
-        if not candidates:
-            candidate_urls = [
-                {
-                    key: item.get(key)
-                    for key in (
-                        "candidate_rank",
-                        "title",
-                        "url",
-                        "source",
-                        "candidate_score",
-                        "discovery_score",
-                        "query_relevance",
-                        "authority",
-                    )
-                }
-                for item in discovered_candidates
-            ]
-            append_task_event(
-                task_id,
-                "web_search_stage",
-                phase="DISCOVERY",
-                action="web_search",
-                stage="authority_gate",
-                query=query,
-                required_domains=source_policy.get("required_domains") or [],
-                candidate_count=len(discovered_candidates),
-                message="no candidate satisfies the required official-domain policy; page fetch skipped",
-            )
-            return json.dumps(
-                {
-                    "status": "no_evidence",
-                    "real_network": True,
-                    "provider": "web.generic",
-                    "retrieval_role": "discovery",
-                    "query": query,
-                    "count": 0,
-                    "candidate_count": len(discovered_candidates),
-                    "results": [],
-                    "sources": [],
-                    "citation_refs": [],
-                    "provider_statuses": provider_statuses,
-                    "provider_errors": [],
-                    "candidate_urls": candidate_urls,
-                    "page_evidence": [],
-                    "evidence_ready": False,
-                    "authority_missing": True,
-                    "required_domains": source_policy.get("required_domains") or [],
-                    "source_resolution": source_resolution_payload(),
-                    "freshness_policy": freshness_policy,
-                    "evidence_policy": "official-domain gate blocked page fetch; refine the query or use a matching official URL",
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+    # Authority remains auditable metadata and a soft ranking signal.  A
+    # model- or adapter-derived domain hypothesis must never suppress every
+    # fetched page.  Explicit user URLs are already handled by direct_url.
 
     # A follow-up research round must add novelty to the shared evidence
     # store. Reuse is handled from the store; do not refetch the same page as
@@ -1590,7 +1700,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     seen_urls = _shared_source_urls(agent_state)
     novel_candidates = [
         item for item in candidates
-        if normalize_url(str(item.get("url") or "")) not in seen_urls
+        if retrieval_url_identity(str(item.get("url") or "")) not in seen_urls
     ]
     reused_records = []
     retrieval = getattr(agent_state, "retrieval", None)
@@ -1602,19 +1712,19 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     )
     if not novel_candidates and stored_sources:
         discovered_urls = {
-            normalize_url(str(item.get("url") or ""))
+            retrieval_url_identity(str(item.get("url") or ""))
             for item in candidates
             if isinstance(item, dict) and str(item.get("url") or "").strip()
         }
         claim_by_url = {
-            normalize_url(str(item.get("url") or "")): item
+            retrieval_url_identity(str(item.get("url") or "")): item
             for item in claim_sources.values()
             if isinstance(item, dict) and str(item.get("url") or "").strip()
         }
         for item in stored_sources.values():
             if not isinstance(item, dict):
                 continue
-            normalized = normalize_url(str(item.get("url") or ""))
+            normalized = retrieval_url_identity(str(item.get("url") or ""))
             if normalized not in discovered_urls:
                 continue
             reused_records.append(dict(claim_by_url.get(normalized) or item))
@@ -1723,7 +1833,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             def reextract_cached(record: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
                 candidate = annotate_source(
                     dict(record),
-                    query,
+                    original_goal,
                     {"task_plan": effective_task_plan},
                 )
                 return _compact_page(
@@ -1854,7 +1964,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
 
     fetched.sort(key=lambda item: int(item[0].get("candidate_rank") or 10**6))
     fetched = _resolve_failed_page_fetches(
-        _claim_evidence_focus(query, effective_task_plan, task_point_id),
+        constraint_query,
         fetched,
         task_id,
     )
@@ -1868,8 +1978,12 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
 
     def process_page(pair: tuple[dict[str, Any], dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         candidate, fetched_result = pair
+        # When Planner omits the optional task_point_id, extraction must retain
+        # the complete user request rather than inherit a narrow search query.
+        # Otherwise a query for P1 makes RWKV's chunk locator blind to P2 even
+        # when the same fetched paper/page contains both requested facts.
         return _compact_page(
-            query,
+            constraint_query,
             candidate,
             fetched_result,
             llm,
@@ -1968,6 +2082,18 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             }
             for item in candidates
         ],
+        "candidate_pool_shadow": {
+            "enabled": rrf_shadow_enabled,
+            "active_ranking": "legacy",
+            "affects_fetch": False,
+            "affects_rwkv": False,
+            "provider_result_limit": provider_result_limit,
+            "active_provider_slice": max_candidates,
+            "candidate_pool_limit": candidate_pool_limit,
+            "fetch_limit": max_pages,
+            "rrf_k": rrf_k,
+            "candidates": candidate_pool_shadow,
+        },
         "page_evidence": evidence_pages,
         "evidence_ready": bool(usable_records),
         "usable_evidence_count": len(usable_records),

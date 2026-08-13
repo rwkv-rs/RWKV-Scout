@@ -128,7 +128,9 @@ def merge_parts(label: str, parts: list[Path], output_path: Path, input_path: Pa
         "cases": rows,
         "aggregate_trace_summary": aggregate,
     }
-    output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    from scripts.run_json_acceptance import _atomic_write_json
+
+    _atomic_write_json(output_path, report)
     return report
 
 

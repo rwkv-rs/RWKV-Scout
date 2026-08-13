@@ -33,6 +33,9 @@ _PLANNING_EVENTS = {
     "task_replan",
     "retrieval_strategy_selected",
     "research_loop_started",
+    "planner_session_rebuilt",
+    "task_replan_attempt",
+    "task_replan_limit_reached",
 }
 _RETRIEVAL_EVENTS = {
     "model_tool_decision",
@@ -45,6 +48,7 @@ _RETRIEVAL_EVENTS = {
     "page_chunk",
     "page_chunk_candidate",
     "page_candidate_merge",
+    "web_candidate_pool_shadow",
     "retrieval_ledger",
     "retrieval_fork_started",
     "retrieval_fork_completed",

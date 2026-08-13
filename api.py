@@ -263,7 +263,14 @@ def chat_endpoint(req: ChatRequest):
         profile = config.get_model_profile(model_key)
         backend_token = config.override_model_backend.set(profile.get("runtime_backend")) if profile.get("runtime_backend") else None
         direct_token = config.override_direct_rwkv_config.set(profile.get("direct_runtime")) if profile.get("direct_runtime") is not None else None
-        base_url = str(profile.get("base_url") or "")
+        # Deployment-local routing must take precedence over repository profiles.
+        # This keeps one frontend build portable between WSL forwarding and a
+        # model service running directly on the remote host.
+        base_url = str(
+            os.environ.get("RWKV_ECRA_LLM_BASE_URL")
+            or profile.get("base_url")
+            or ""
+        )
         url_token = config.override_llm_url.set(base_url)
         slm_token = config.override_slm_endpoint.set(base_url.rstrip("/") + "/chat/completions") if base_url else None
         from clients.llm_client import LLMClient

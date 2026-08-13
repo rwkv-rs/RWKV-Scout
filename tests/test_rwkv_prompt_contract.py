@@ -35,13 +35,73 @@ class RWKVPromptContractTests(unittest.TestCase):
     def test_json_prefix_matches_rwkv_skills_tool_continuation(self):
         self.assertEqual(
             assistant_json_prefix(enable_think=True, prefill_object=True),
-            "### Assistant\n<think></think\n{",
+            "Assistant: <think></think\n```json\n{",
         )
         self.assertEqual(
             assistant_json_prefix(enable_think=False, prefill_object=True),
-            "### Assistant\n```json\n{",
+            "Assistant: ```json\n{",
         )
-        self.assertEqual(tool_call_prefix(), "### Assistant\n**Tool Call:**\n")
+        self.assertEqual(tool_call_prefix(), "Assistant: ```json\n")
+
+    def test_online_g1i_tool_role_blocks_are_exact(self):
+        rendered = prompt_contract.render_tool_transcript(
+            [
+                {
+                    "role": "system",
+                    "content": 'Tools: [{"name":"read_file"}]\nReturn only a JSON function call.',
+                },
+                {"role": "user", "content": "Read the requested file."},
+                {
+                    "role": "assistant",
+                    "content": {
+                        "name": "read_file",
+                        "arguments": {"path": "notes.txt"},
+                    },
+                },
+                {
+                    "role": "tool",
+                    "content": {"status": "ok", "content": "hello"},
+                },
+            ]
+        )
+        self.assertEqual(
+            rendered,
+            'System: Tools: [{"name":"read_file"}]\n'
+            'Return only a JSON function call.\n\n'
+            'User: Read the requested file.\n\n'
+            'Assistant: ```json\n'
+            '{"name":"read_file","arguments":{"path":"notes.txt"}}\n\n'
+            'User: Function output: {\n  "status": "ok",\n  "content": "hello"\n}\n\n'
+            'Assistant: ```json\n',
+        )
+        self.assertNotIn("###", rendered)
+        self.assertNotIn("**Tool Call:**", rendered)
+        self.assertNotIn("### Tool Output", rendered)
+
+    def test_online_g1i_followup_request_can_start_from_function_output(self):
+        rendered = prompt_contract.render_tool_transcript(
+            [
+                {
+                    "role": "system",
+                    "content": 'Tools: [{"name":"submit"}]\nReturn only a JSON function call.',
+                },
+                {
+                    "role": "tool",
+                    "content": '{"status":"ok","current_goal":"finish the task"}',
+                },
+            ]
+        )
+        self.assertEqual(
+            rendered,
+            'System: Tools: [{"name":"submit"}]\n'
+            'Return only a JSON function call.\n\n'
+            'User: Function output: {\n'
+            '  "status": "ok",\n'
+            '  "current_goal": "finish the task"\n'
+            '}\n\n'
+            'Assistant: ```json\n',
+        )
+        self.assertEqual(rendered.count("Assistant: ```json"), 1)
 
     def test_final_prefill_decoder_consumes_only_protocol_boundary(self):
         self.assertEqual(

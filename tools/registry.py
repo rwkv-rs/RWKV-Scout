@@ -34,6 +34,17 @@ def _json_type(parameter: inspect.Parameter) -> str:
 
 class ToolRegistry:
     _tools: Dict[str, Dict[str, Any]] = {}
+    # One model-visible order shared by names, JSON catalog and therefore the
+    # actual System prompt.  Keeping two local maps previously made tests pass
+    # while the live catalog still placed finish_task first.
+    _model_visible_order = {
+        "connector_lookup": 0,
+        "web_search": 1,
+        "calculator": 2,
+        "date_diff": 3,
+        "current_time": 4,
+        "finish_task": 5,
+    }
     _runtime_context_keys = {
         "original_goal",
         "path_to_id",
@@ -56,6 +67,60 @@ class ToolRegistry:
     @classmethod
     def metadata(cls, name: str) -> dict[str, Any]:
         return dict(cls._tools.get(str(name or ""), {}))
+
+    @classmethod
+    def validate_model_call(cls, name: str, arguments: dict[str, Any]) -> None:
+        """Validate one RWKV call against the catalog it actually saw.
+
+        This is protocol validation only: it never selects a tool or changes
+        an argument.  A caller may show the bounded error to RWKV for its one
+        allowed same-temperature serialization correction.
+        """
+
+        meta = cls._tools.get(str(name or ""))
+        if not meta or not meta.get("model_visible", False):
+            raise ValueError(f"tool {name!r} is not in the model-visible catalog")
+        if not isinstance(arguments, dict):
+            raise ValueError("tool call arguments must be a JSON object")
+        schema = meta.get("argument_schema") or {}
+        properties = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        missing = sorted(required - set(arguments))
+        if missing:
+            raise ValueError(f"missing required arguments: {', '.join(missing)}")
+        if schema.get("additionalProperties") is False:
+            unknown = sorted(set(arguments) - set(properties))
+            if unknown:
+                raise ValueError(f"unknown arguments: {', '.join(unknown)}")
+
+        expected_python_types = {
+            "string": (str,),
+            "integer": (int,),
+            "number": (int, float),
+            "boolean": (bool,),
+            "object": (dict,),
+            "array": (list,),
+        }
+        for key, value in arguments.items():
+            field = properties.get(key)
+            if not isinstance(field, dict):
+                continue
+            expected = str(field.get("type") or "")
+            allowed_types = expected_python_types.get(expected)
+            if allowed_types and (
+                not isinstance(value, allowed_types)
+                or expected in {"integer", "number"} and isinstance(value, bool)
+            ):
+                raise ValueError(f"argument {key!r} must be {expected}")
+            choices = field.get("enum")
+            if isinstance(choices, list) and value not in choices:
+                rendered = ", ".join(repr(choice) for choice in choices)
+                raise ValueError(f"argument {key!r} must be one of: {rendered}")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if field.get("minimum") is not None and value < field["minimum"]:
+                    raise ValueError(f"argument {key!r} is below minimum {field['minimum']}")
+                if field.get("maximum") is not None and value > field["maximum"]:
+                    raise ValueError(f"argument {key!r} is above maximum {field['maximum']}")
 
     @classmethod
     def capability_names(
@@ -168,15 +233,10 @@ class ToolRegistry:
             for name, meta in cls._tools.items()
             if meta.get("model_visible", False) and cls._phase_allows(meta, catalog_phase)
         ]
-        public_order = {
-            "finish_task": 0,
-            "web_search": 1,
-            "connector_lookup": 2,
-            "calculator": 3,
-            "date_diff": 4,
-            "current_time": 5,
-        }
-        return sorted(names, key=lambda name: (public_order.get(name, 99), name))
+        return sorted(
+            names,
+            key=lambda name: (cls._model_visible_order.get(name, 99), name),
+        )
 
     @classmethod
     def get_json_catalog(
@@ -197,15 +257,12 @@ class ToolRegistry:
         rows = []
         items = list(cls._tools.items())
         if model_visible_only:
-            public_order = {
-                "finish_task": 0,
-                "web_search": 1,
-                "connector_lookup": 2,
-                "calculator": 3,
-                "date_diff": 4,
-                "current_time": 5,
-            }
-            items.sort(key=lambda item: (public_order.get(item[0], 99), item[0]))
+            items.sort(
+                key=lambda item: (
+                    cls._model_visible_order.get(item[0], 99),
+                    item[0],
+                )
+            )
         for name, meta in items:
             catalog_phase = "ALL" if model_visible_only and phase is not None else phase
             if not cls._phase_allows(meta, catalog_phase):
@@ -254,6 +311,7 @@ class ToolRegistry:
         model_visible: bool = False,
         category: str = "internal",
         description: str = "",
+        argument_schema: dict[str, Any] | None = None,
     ):
         def decorator(func: Callable):
             model_description = str(description or signature or "").strip()
@@ -288,6 +346,20 @@ class ToolRegistry:
                     capabilities=capabilities_tuple,
                     tools=(name,),
                 )
+            inferred_argument_schema = {
+                "type": "object",
+                "properties": {
+                    key: {"type": argument_types.get(key, "string")}
+                    for key in allowed
+                },
+                "required": required,
+                "additionalProperties": False,
+            }
+            declared_argument_schema = (
+                dict(argument_schema)
+                if isinstance(argument_schema, dict) and argument_schema
+                else inferred_argument_schema
+            )
             cls._tools[name] = {
                 "name": name,
                 "func": func,
@@ -302,12 +374,7 @@ class ToolRegistry:
                 "category": str(category or "internal"),
                 "allowed_args": tuple(allowed),
                 "required_args": tuple(required),
-                "argument_schema": {
-                    "type": "object",
-                    "properties": {key: {"type": argument_types.get(key, "string")} for key in allowed},
-                    "required": required,
-                    "additionalProperties": False,
-                },
+                "argument_schema": declared_argument_schema,
             }
             return func
         return decorator

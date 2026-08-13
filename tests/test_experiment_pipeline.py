@@ -27,7 +27,12 @@ from utils.human_review import aggregate_reviews, build_blind_packet, create_rev
 from utils.model_judge import build_judge_prompt, parse_judge_output
 from utils.operational_metrics import collect_operational_metrics, prometheus_text
 from scripts.preflight import run_preflight
-from scripts.run_json_acceptance import _trace_summary
+from scripts.run_json_acceptance import (
+    _aggregate_trace_summaries,
+    _atomic_write_json,
+    _module_responsibility_metrics,
+    _trace_summary,
+)
 from utils.retry import retry_with_fallback
 from utils.runtime_gate import analysis_slot
 from utils.time_budget import TaskTimeoutError, task_time_budget
@@ -45,7 +50,144 @@ from tools.registry import ToolRegistry
 
 
 class ExperimentPipelineTests(unittest.TestCase):
-    def test_task_plan_merges_duplicate_points_without_losing_requirements(self):
+    def test_atomic_checkpoint_failure_preserves_previous_complete_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "part.result.json"
+            _atomic_write_json(output, {"revision": 1, "cases": ["stable"]})
+
+            with (
+                patch(
+                    "scripts.run_json_acceptance.json.dump",
+                    side_effect=RuntimeError("simulated serialization failure"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "simulated serialization failure"),
+            ):
+                _atomic_write_json(output, {"revision": 2, "cases": ["partial"]})
+
+            self.assertEqual(
+                json.loads(output.read_text(encoding="utf-8")),
+                {"revision": 1, "cases": ["stable"]},
+            )
+            self.assertEqual(list(output.parent.glob(f".{output.name}.*.tmp")), [])
+
+    def test_atomic_checkpoint_is_always_parseable_during_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "part.result.json"
+            _atomic_write_json(output, {"revision": 0, "payload": "x" * 100_000})
+            stopped = threading.Event()
+            read_errors: list[BaseException] = []
+
+            def read_repeatedly() -> None:
+                while not stopped.is_set():
+                    try:
+                        value = json.loads(output.read_text(encoding="utf-8"))
+                        if not isinstance(value.get("revision"), int):
+                            raise AssertionError("checkpoint revision is missing")
+                    except BaseException as exc:  # captured for the main test thread
+                        read_errors.append(exc)
+                        stopped.set()
+
+            reader = threading.Thread(target=read_repeatedly)
+            reader.start()
+            try:
+                for revision in range(1, 21):
+                    _atomic_write_json(
+                        output,
+                        {"revision": revision, "payload": str(revision) * 100_000},
+                    )
+            finally:
+                stopped.set()
+                reader.join(timeout=2)
+
+            self.assertEqual(read_errors, [])
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["revision"], 20)
+
+    def test_rwkv_replan_is_observed_but_not_a_module_responsibility_violation(self):
+        metrics = _module_responsibility_metrics(
+            [
+                {"type": "planner_session_rebuilt", "reason": "duplicate_path"},
+                {"type": "model_call", "request_stage": "planner_replan"},
+                {"type": "synthesis", "content": "RWKV answer"},
+                {"type": "final", "content": "RWKV answer"},
+            ]
+        )
+
+        self.assertTrue(metrics["pass"])
+        self.assertEqual(metrics["violation_count"], 0)
+        self.assertEqual(metrics["rwkv_semantic_control_count"], 2)
+        self.assertEqual(metrics["prohibited_output_intervention_count"], 0)
+
+    def test_answer_mutation_and_output_mismatch_are_responsibility_violations(self):
+        metrics = _module_responsibility_metrics(
+            [
+                {"type": "answer_rewrite"},
+                {"type": "tool_call", "controller_override": True},
+                {"type": "synthesis", "content": "RWKV answer"},
+                {"type": "final", "content": "rewritten answer"},
+            ]
+        )
+        aggregate = _aggregate_trace_summaries(
+            [
+                {
+                    "delivery": "answer",
+                    "runtime_error": "",
+                    "trace": {"stats": {"module_responsibility": metrics}},
+                }
+            ]
+        )
+
+        self.assertFalse(metrics["pass"])
+        self.assertEqual(metrics["violation_count"], 3)
+        self.assertEqual(metrics["prohibited_output_intervention_count"], 1)
+        self.assertEqual(metrics["controller_override_count"], 1)
+        self.assertEqual(metrics["final_output_mismatch_count"], 1)
+        self.assertEqual(aggregate["module_responsibility"]["violation_count"], 3)
+        self.assertEqual(
+            aggregate["module_responsibility"]["prohibited_output_intervention_count"],
+            1,
+        )
+
+    def test_production_live_100_uses_natural_agent_visible_queries(self):
+        dataset_path = (
+            Path(__file__).resolve().parents[1]
+            / "data"
+            / "evaluation"
+            / "retrieval_production_live_100_v1_20260812.json"
+        )
+        payload = json.loads(dataset_path.read_text(encoding="utf-8"))
+        cases = payload["cases"]
+
+        self.assertEqual(payload["suite"], "retrieval-production-live-100-v1")
+        self.assertEqual(len(cases), 100)
+        self.assertEqual(len({row["case_id"] for row in cases}), 100)
+        benchmark_only_phrases = (
+            "截至测试当天",
+            "截至查询时刻",
+            "当前测试",
+            "本次测试",
+            "在测试当天",
+        )
+        forbidden_agent_hints = {
+            "answer",
+            "final_answer",
+            "reference_answer",
+            "task_graph",
+            "task_plan",
+            "tool_route",
+            "source_url",
+            "replan_path",
+            "benchmark_timestamp",
+        }
+        for row in cases:
+            query = str(row.get("query") or "").strip()
+            self.assertTrue(query, row.get("case_id"))
+            self.assertFalse(
+                any(phrase in query for phrase in benchmark_only_phrases),
+                (row.get("case_id"), query),
+            )
+            self.assertFalse(forbidden_agent_hints.intersection(row), row)
+
+    def test_task_plan_merges_duplicate_factual_points_without_keeping_gates(self):
         plan = Planner._validate_task_plan(
             {
                 "goal": "verify one fact",
@@ -71,11 +213,10 @@ class ExperimentPipelineTests(unittest.TestCase):
         point = plan["atomic_points"][0]
         self.assertEqual(point["id"], "P1")
         self.assertEqual(point["source_ids"], ["P1", "P2"])
-        self.assertEqual(point["evidence_needed"], ["official page", "archived page"])
-        self.assertEqual(
-            point["acceptance_criteria"],
-            ["date is present", "source URL is present"],
-        )
+        self.assertEqual(point["question"], "Find the fact")
+        self.assertEqual(point["fields"], [])
+        self.assertNotIn("evidence_needed", point)
+        self.assertNotIn("acceptance_criteria", point)
 
     def test_routing_observation_keeps_candidate_urls_before_evidence_rows(self):
         observation = Planner._compact_observation(
@@ -137,7 +278,10 @@ class ExperimentPipelineTests(unittest.TestCase):
         )
         self.assertEqual([item["ref_id"] for item in context["selected_evidence"]], ["S1", "S2", "S3"])
         self.assertLessEqual(context["context_tokens"], 10000)
-        self.assertIn("[S3] Source 3", context["text"])
+        self.assertIn(
+            "[S3] UNBOUND SOURCE EXCERPT: Source 3",
+            context["text"],
+        )
         self.assertEqual(context["usable_evidence_count"], 3)
         self.assertEqual(
             sum(item["chunk_count"] for item in context["selected_evidence"]),
@@ -694,7 +838,7 @@ class ExperimentPipelineTests(unittest.TestCase):
             self.assertEqual(calls["count"], 1)
             self.assertEqual([event["type"] for event in events], ["error"])
 
-    def test_agentic_loop_bounds_repeat_and_forces_summary(self):
+    def test_agentic_loop_bounds_duplicate_path_and_synthesizes(self):
         with tempfile.TemporaryDirectory() as directory:
             task_dir = Path(directory) / "task"
             task_dir.mkdir()
@@ -780,7 +924,8 @@ class ExperimentPipelineTests(unittest.TestCase):
                 )
                 orchestrator._cross_validate_research = lambda *_args, **_kwargs: {
                     "decision": "replan",
-                    "missing_points": ["P1"],
+                    "missing_point_id": "P1",
+                    "evidence_needed": "station list",
                 }
                 result = orchestrator._run_model_tool_loop("find stations", {})
 
@@ -789,7 +934,10 @@ class ExperimentPipelineTests(unittest.TestCase):
             # creates a replacement query of its own.
             self.assertEqual([item[0] for item in executed], ["web_search"])
             self.assertEqual(len(synthesis_calls), 1)
-            self.assertEqual(synthesis_calls[0]["termination_reason"], "max_steps_reached")
+            self.assertEqual(
+                synthesis_calls[0]["termination_reason"],
+                "resource_duplicate_limit",
+            )
 
     def test_runtime_gate_is_persisted_and_released(self):
         with tempfile.TemporaryDirectory() as directory:

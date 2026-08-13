@@ -76,7 +76,7 @@ class ChunkContractTests(unittest.TestCase):
         self.assertEqual(page_evidence["error_class"], "")
         self.assertEqual(page_evidence["model_extraction_status"], "empty")
 
-    def test_explicit_negative_locator_rejects_page_body(self):
+    def test_explicit_negative_locator_keeps_bounded_body_with_negative_metadata(self):
         evidence = {
             "status": "no_evidence",
             "page_chars": len(self.body),
@@ -98,13 +98,15 @@ class ChunkContractTests(unittest.TestCase):
                 "CHUNK_EXPLICIT_NEGATIVE_TEST",
             )
 
-        self.assertIsNone(record)
-        self.assertEqual(page_evidence["status"], "no_evidence")
+        self.assertIsNotNone(record)
+        self.assertEqual(page_evidence["status"], "ok")
         self.assertEqual(page_evidence["model_extraction_status"], "negative")
-        self.assertFalse(page_evidence["deterministic_chunk_fallback"])
+        self.assertTrue(page_evidence["deterministic_chunk_fallback"])
         self.assertTrue(page_evidence["source_body_available"])
+        self.assertEqual(page_evidence["evidence_origin"], "bounded_fetched_page_body")
+        self.assertEqual(record["model_extraction_status"], "negative")
 
-    def test_selected_chunk_negative_rejects_uninspected_body_fallback(self):
+    def test_selected_chunk_negative_keeps_only_bounded_selected_body(self):
         evidence = {
             "status": "no_evidence",
             "page_chars": len(self.body),
@@ -128,11 +130,12 @@ class ChunkContractTests(unittest.TestCase):
                 "CHUNK_SELECTED_NEGATIVE_TEST",
             )
 
-        self.assertIsNone(record)
+        self.assertIsNotNone(record)
         self.assertEqual(page_evidence["model_extraction_status"], "negative")
-        self.assertFalse(page_evidence["deterministic_chunk_fallback"])
+        self.assertTrue(page_evidence["deterministic_chunk_fallback"])
+        self.assertEqual(record["evidence_origin"], "bounded_fetched_page_body")
 
-    def test_post_gate_semantic_rejection_does_not_restore_page_body(self):
+    def test_semantic_rejection_keeps_bounded_body_and_preserves_metadata(self):
         evidence = {
             "status": "no_evidence",
             "page_chars": len(self.body),
@@ -157,10 +160,11 @@ class ChunkContractTests(unittest.TestCase):
                 "CHUNK_SEMANTIC_REJECTION_TEST",
             )
 
-        self.assertIsNone(record)
+        self.assertIsNotNone(record)
         self.assertEqual(page_evidence["model_extraction_status"], "semantically_rejected")
-        self.assertEqual(page_evidence["evidence_origin"], "rejected_fetched_page_body")
-        self.assertFalse(page_evidence["deterministic_chunk_fallback"])
+        self.assertEqual(page_evidence["evidence_origin"], "bounded_fetched_page_body")
+        self.assertTrue(page_evidence["deterministic_chunk_fallback"])
+        self.assertEqual(record["model_extraction_status"], "semantically_rejected")
 
     def test_long_body_with_failed_extraction_keeps_bounded_original_chunks(self):
         evidence = {
@@ -310,6 +314,8 @@ class ChunkContractTests(unittest.TestCase):
                         "chunk_candidates": [
                             {
                                 "chunk_id": "chunk-1",
+                                "supported": True,
+                                "claim_ids": ["P1"],
                                 "facts": ["release date is 2025-04-16"],
                                 "quote": "The release date is 2025-04-16.",
                             }

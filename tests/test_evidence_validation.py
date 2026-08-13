@@ -102,21 +102,23 @@ def test_validation_uses_bilingual_topic_anchors_for_english_official_body():
     )
     report = build_evidence_validation(
         {"results": [body]},
-        query="python 3.14 free threading到底怎么开，查官方文档",
+        query="python 3.14 free threading到底怎么开，查 docs.python.org 官方文档",
         constraints={
             "task_plan": {
-                "source_policy": "official_required",
-                "required_domains": ["docs.python.org"],
+                "schema_version": "task_plan.v2",
+                "goal": "查 docs.python.org 官方文档回答 free threading 问题",
                 "atomic_points": [
                     {
                         "id": "P1",
-                        "task": "查找 Python 3.14 官方文档中关于 free threading 的说明",
-                        "objective": "获取官方文档中关于如何启用 free threading 的描述",
+                        "question": "查找 Python 3.14 官方文档中关于 free threading 的说明",
+                        "fields": ["启用方法"],
+                        "time_scope": "timeless",
                     },
                     {
                         "id": "P2",
-                        "task": "查找 threading 模块的使用说明",
-                        "objective": "确认其与 free threading 的关系",
+                        "question": "查找 threading 模块的使用说明",
+                        "fields": ["与 free threading 的关系"],
+                        "time_scope": "timeless",
                     },
                 ],
             }
@@ -144,7 +146,7 @@ def test_answer_alignment_marks_supported_and_unmatched_claim_lines():
     assert alignment["unsupported_line_count"] == 1
 
 
-def test_context_builder_preserves_upstream_retrieval_order():
+def test_context_builder_routes_structured_evidence_before_ordinary_web_when_limited():
     page = _page(
         "https://blog.example/release",
         "release date: 2024-07-04. This is a long enough fetched body record for the ranking test and source context.",
@@ -161,7 +163,8 @@ def test_context_builder_preserves_upstream_retrieval_order():
         constraints={"strategy_config": {"context_source_count": 1}},
     )
 
-    assert context["selected_evidence"][0]["url"] == page["url"]
+    assert context["selected_evidence"][0]["url"] == structured["url"]
+    assert context["selected_evidence"][0]["context_selection"]["structured_record"] is True
 
 
 def test_context_projection_keeps_evidence_available_to_alignment():

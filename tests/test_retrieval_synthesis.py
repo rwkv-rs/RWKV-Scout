@@ -5,6 +5,7 @@ import config
 
 from agent.retrieval_synthesis import (
     _clean_answer,
+    _writer_prompt,
     build_evidence_context,
     synthesize_retrieval_answer,
 )
@@ -35,6 +36,72 @@ def _source(index=1):
     }
 
 
+def test_context_packer_prioritizes_direct_user_url_without_dropping_sources():
+    direct = {
+        "title": "Requested page",
+        "url": "https://docs.example.test/exact",
+        "content": "Exact requested page body.",
+    }
+    earlier = {
+        "title": "Earlier candidate",
+        "url": "https://other.example.test/page",
+        "content": "Earlier candidate body.",
+        "evidence_origin": "structured_api_record",
+    }
+
+    context = build_evidence_context(
+        {"results": [earlier, direct]},
+        query="Read https://docs.example.test/exact and answer.",
+        max_sources=2,
+    )
+
+    selected = context["selected_evidence"]
+    assert [row["url"] for row in selected] == [direct["url"], earlier["url"]]
+    assert selected[0]["context_selection"]["direct_user_url"] is True
+    assert len(selected) == 2
+
+
+def test_context_packer_routes_structured_and_recent_records_first_for_latest_query():
+    ordinary = {
+        "title": "Old web page",
+        "url": "https://example.test/old",
+        "content": "Old general-web material.",
+        "published": "2024-01-01",
+    }
+    older_release = {
+        "title": "Release v2",
+        "url": "https://github.com/example/project/releases/tag/v2",
+        "content": "Release: v2",
+        "published": "2025-01-01",
+        "evidence_origin": "structured_api_record",
+        "content_type": "release",
+    }
+    latest_release = {
+        "title": "Release v3",
+        "url": "https://github.com/example/project/releases/tag/v3",
+        "content": "Release: v3",
+        "published": "2026-08-10",
+        "evidence_origin": "structured_api_record",
+        "content_type": "release",
+    }
+
+    context = build_evidence_context(
+        {"results": [ordinary, older_release, latest_release]},
+        query="What is the current latest release?",
+        max_sources=3,
+    )
+
+    selected = context["selected_evidence"]
+    assert [row["title"] for row in selected] == [
+        "Release v3",
+        "Release v2",
+        "Old web page",
+    ]
+    assert selected[0]["context_selection"]["structured_record"] is True
+    assert selected[0]["context_selection"]["date_priority_active"] is True
+    assert selected[0]["context_selection"]["source_date"] == "2026-08-10"
+
+
 def test_rwkv_output_is_returned_without_semantic_rewrite():
     output = "**P1** – model wording\nDo not replace this answer. [S1]"
     model = FakeRWKV(output)
@@ -50,8 +117,8 @@ def test_rwkv_output_is_returned_without_semantic_rewrite():
     assert "exact owner/repository" in model.calls[0]["prompt"]
     assert "every requested field" in model.calls[0]["prompt"]
     assert "If the answer starts to loop, stop immediately" in model.calls[0]["prompt"]
-    assert "marked missing by the latest RWKV cross-validation remains unsupported" in model.calls[0]["prompt"]
-    assert "an explicitly historical record cannot resolve a missing current value" in model.calls[0]["prompt"]
+    assert "judge it directly" in model.calls[0]["prompt"]
+    assert "state the time conflict or uncertainty instead" in model.calls[0]["prompt"]
     assert "repair" not in result
 
 
@@ -197,6 +264,214 @@ def test_query_focused_source_span_precedes_unrelated_grounded_quotes():
     )
 
 
+def test_contained_locator_is_merged_into_selected_span_once():
+    selected_text = (
+        "Release record context. Version 4.2.1 was released on 2026-08-05. "
+        "This paragraph explains the changes."
+    )
+    source = {
+        "title": "Release",
+        "url": "https://example.com/release",
+        "content": selected_text,
+        "selected_source_chunks": [
+            {
+                "chunk_id": "release-section",
+                "index": 2,
+                "text": selected_text,
+                "attention_rank": 1,
+            }
+        ],
+        "source_chunks": [
+            {"chunk_id": "release-section", "index": 2, "text": selected_text}
+        ],
+        "chunk_candidates": [
+            {
+                "supported": True,
+                "source_grounded": True,
+                "chunk_id": "release-section",
+                "chunk_index": 2,
+                "claim_ids": ["P1"],
+                "quote": "Version 4.2.1 was released on 2026-08-05.",
+            }
+        ],
+    }
+
+    context = build_evidence_context({"results": [source]}, token_budget=512)
+
+    assert context["text"].count("Version 4.2.1 was released on 2026-08-05.") == 1
+    packed = context["selected_evidence"][0]["packed_chunks"]
+    assert packed[0]["chunk_id"] == "release-section"
+    assert packed[0]["claim_ids"] == ["P1"]
+    assert packed[0]["contained_locator_ids"] == ["locator-release-section"]
+
+
+def test_temporal_attention_metadata_reaches_final_writer_context():
+    source = {
+        "title": "Release history",
+        "url": "https://example.com/releases",
+        "content": "Version 4.2.1 was released on 2026-08-05.",
+        "selected_source_chunks": [
+            {
+                "chunk_id": "release-section",
+                "index": 2,
+                "text": "Version 4.2.1 was released on 2026-08-05.",
+                "record_date": "2026-08-05",
+                "record_date_precision": "day",
+                "record_temporal_role": "newest_dated_window_in_page",
+                "temporal_attention_score": 96,
+                "rank_scores": {
+                    "requirement": 54,
+                    "lexical": 1.0,
+                    "temporal": 96,
+                    "final": 220,
+                },
+                "attention_rank": 1,
+                "attention_reasons": ["query_focused_source_span"],
+            }
+        ],
+        "source_chunks": [
+            {
+                "chunk_id": "release-section",
+                "index": 2,
+                "text": "Version 4.2.1 was released on 2026-08-05.",
+            }
+        ],
+        "chunk_candidates": [
+            {
+                "supported": True,
+                "source_grounded": True,
+                "chunk_id": "release-section",
+                "chunk_index": 2,
+                "claim_ids": ["P1"],
+                "quote": "Version 4.2.1 was released on 2026-08-05.",
+            }
+        ],
+    }
+
+    context = build_evidence_context(
+        {"results": [source]},
+        constraints={
+            "task_plan": {
+                "schema_version": "task_plan.v2",
+                "atomic_points": [
+                    {
+                        "id": "P1",
+                        "question": "What is the latest release and date?",
+                        "fields": ["release_version", "release_date"],
+                        "time_scope": "current",
+                    }
+                ],
+            }
+        },
+        token_budget=512,
+    )
+
+    packed = context["selected_evidence"][0]["packed_chunks"][0]
+    assert packed["record_date"] == "2026-08-05"
+    assert packed["record_date_precision"] == "day"
+    assert packed["record_temporal_role"] == "newest_dated_window_in_page"
+    assert "rank_scores" not in packed
+    assert "attention_rank" not in packed
+    assert (
+        '"record_date":"2026-08-05","date_precision":"day",'
+        '"role":"newest_dated_window_in_page"'
+    ) in context["text"]
+
+
+def test_non_temporal_task_keeps_temporal_state_out_of_writer_text():
+    source = {
+        "title": "Official command reference",
+        "url": "https://example.test/command",
+        "content": "Use --jobs N. The command opens N+1 connections.",
+        "selected_source_chunks": [
+            {
+                "chunk_id": "chunk-1",
+                "index": 0,
+                "text": "Use --jobs N. The command opens N+1 connections.",
+                "record_date": "2026-07-16",
+                "record_date_precision": "day",
+                "record_temporal_role": "newest_dated_window_in_page",
+            }
+        ],
+    }
+    task_plan = {
+        "schema_version": "task_plan.v2",
+        "atomic_points": [
+            {
+                "id": "P1",
+                "question": "How many connections does --jobs use?",
+                "fields": ["extra_connections"],
+                "time_scope": "current",
+            }
+        ],
+    }
+
+    context = build_evidence_context(
+        {"results": [source]},
+        constraints={"task_plan": task_plan},
+        query="Read the current documentation and explain --jobs.",
+        token_budget=512,
+    )
+
+    packed = context["selected_evidence"][0]["packed_chunks"][0]
+    assert packed["record_date"] == "2026-07-16"
+    assert "Same-page temporal routing metadata" not in context["text"]
+
+
+def test_broad_source_neighbour_cannot_replace_selected_exact_window():
+    selected = "Exact option record: jobs + 1 connections."
+    broad = "Long unrelated preface.\n" + selected + "\nLong unrelated appendix."
+    source = {
+        "title": "Command reference",
+        "url": "https://example.com/reference",
+        "content": broad,
+        "selected_source_chunks": [
+            {
+                "chunk_id": "full-record",
+                "index": 0,
+                "text": selected,
+                "attention_rank": 1,
+                "attention_score": 90,
+            }
+        ],
+        "source_chunks": [
+            {"chunk_id": "full-record", "index": 0, "text": broad}
+        ],
+    }
+
+    context = build_evidence_context(
+        {"results": [source]},
+        token_budget=512,
+        max_chunks_per_source=1,
+    )
+
+    packed = context["selected_evidence"][0]["packed_chunks"]
+    assert packed[0]["text"] == selected
+    assert packed[0]["packing_role"] == "selected_attention_window"
+    assert "Long unrelated preface" not in context["text"]
+
+
+def test_context_exposes_observed_record_order_without_selecting_truth():
+    source = {
+        "title": "Release history",
+        "url": "https://example.com/history",
+        "content": "Version 4.1 on 2026-07-01. Version 4.2 on 2026-08-05.",
+        "source_chunks": [
+            {
+                "chunk_id": "history",
+                "index": 0,
+                "text": "Version 4.1 on 2026-07-01. Version 4.2 on 2026-08-05.",
+            }
+        ],
+    }
+
+    context = build_evidence_context({"results": [source]})
+
+    assert '"dates":["2026-07-01","2026-08-05"]' in context["text"]
+    assert '"versions":["Version 4.1","Version 4.2"]' in context["text"]
+    assert "no truth/currentness judgment" in context["text"]
+
+
 def test_context_backfills_unselected_original_chunks_when_budget_allows():
     source = _source(1)
     source["selected_source_chunks"] = [source["source_chunks"][1]]
@@ -258,18 +533,131 @@ def test_claim_grounded_spans_become_compact_citable_sources():
 
     context = build_evidence_context({"results": [], "claim_ledger": ledger})
 
-    assert "[S1] Official downloads" in context["text"]
+    assert "[S1] Source label (routing metadata only): Official downloads" in context["text"]
     assert "https://example.com/releases" in context["text"]
     assert context["text"].count("Version 4.2.1 was released on 2026-08-05.") == 1
     assert '"source_locator"' not in context["text"]
-    assert '"grounded_source_count": 1' in context["text"]
-    assert context["citation_refs"] == [
-        {
-            "ref_id": "S1",
-            "title": "Official downloads",
-            "url": "https://example.com/releases",
-        }
+    assert "RWKV task-point bindings: P1" in context["text"]
+    citation = context["citation_refs"][0]
+    assert citation["ref_id"] == "S1"
+    assert citation["title"] == "Official downloads"
+    assert citation["url"] == "https://example.com/releases"
+    assert citation["quote"] == "Version 4.2.1 was released on 2026-08-05."
+    assert citation["chunk_ids"] == ["locator-release-row"]
+    assert citation["task_point_ids"] == ["P1"]
+
+
+def test_evidence_records_on_same_url_keep_version_identity_separate():
+    ledger = {
+        "claims": [
+            {
+                "claim_id": "P1",
+                "question": "current version, title and date",
+                "fields": ["version", "title", "date"],
+                "evidence_records": [
+                    {
+                        "evidence_record_id": "E-current",
+                        "task_record_id": "P1",
+                        "subject_key": "Example Game",
+                        "record_key": "Version 4.4",
+                        "field_keys": ["version", "title"],
+                        "title": "Release history",
+                        "url": "https://example.com/releases",
+                        "chunk_id": "current",
+                        "quote": "Version 4.4 is titled New Dawn.",
+                        "support_state": "rwkv_supported_exact_span",
+                    },
+                    {
+                        "evidence_record_id": "E-old",
+                        "task_record_id": "P1",
+                        "subject_key": "Example Game",
+                        "record_key": "Version 4.0",
+                        "field_keys": ["date"],
+                        "title": "Release history",
+                        "url": "https://example.com/releases",
+                        "chunk_id": "old",
+                        "quote": "Version 4.0 was released on 2025-01-01.",
+                        "support_state": "rwkv_supported_exact_span",
+                    },
+                ],
+                "sources": [],
+            }
+        ]
+    }
+
+    context = build_evidence_context(
+        {"results": [], "claim_ledger": ledger},
+        constraints={"context_source_count": 4},
+    )
+
+    assert context["context_stats"]["bound_evidence_record_count"] == 2
+    assert [row["evidence_record_id"] for row in context["selected_evidence"]] == [
+        "E-current",
+        "E-old",
     ]
+    assert context["text"].count("RWKV-EXACT EVIDENCE RECORD") == 2
+    assert '"record_key":"Version 4.4"' in context["text"]
+    assert '"record_key":"Version 4.0"' in context["text"]
+
+
+def test_current_record_context_orders_grounded_literal_dates_without_merging_rows():
+    ledger = {
+        "claims": [
+            {
+                "claim_id": "P1",
+                "question": "latest version and date",
+                "fields": ["version", "date"],
+                "evidence_records": [
+                    {
+                        "evidence_record_id": "E-old",
+                        "task_record_id": "P1",
+                        "record_key": "4.0",
+                        "field_keys": ["version", "date"],
+                        "title": "Release notes",
+                        "url": "https://example.com/releases",
+                        "chunk_id": "old",
+                        "quote": "4.0\n2026-07-01",
+                        "support_state": "rwkv_candidate_other_record",
+                    },
+                    {
+                        "evidence_record_id": "E-new",
+                        "task_record_id": "P1",
+                        "record_key": "5.0",
+                        "field_keys": ["version", "date"],
+                        "title": "Release notes",
+                        "url": "https://example.com/releases",
+                        "chunk_id": "new",
+                        "quote": "5.0\n2026-08-10",
+                        "support_state": "rwkv_candidate_other_record",
+                    },
+                ],
+                "sources": [],
+            }
+        ]
+    }
+    plan = {
+        "goal": "latest version and date",
+        "atomic_points": [
+            {
+                "id": "P1",
+                "question": "latest version and date",
+                "fields": ["version", "date"],
+                "time_scope": "current",
+            }
+        ],
+    }
+
+    context = build_evidence_context(
+        {"results": [], "claim_ledger": ledger},
+        constraints={"task_plan": plan, "context_source_count": 4},
+        query="What is the latest version and date?",
+    )
+
+    assert [row["evidence_record_id"] for row in context["selected_evidence"]] == [
+        "E-new",
+        "E-old",
+    ]
+    assert "5.0\n2026-08-10" in context["citation_refs"][0]["quote"]
 
 
 def test_grounded_source_slots_are_round_robin_across_claims():
@@ -360,7 +748,7 @@ def test_final_context_caps_grounded_spans_per_source(monkeypatch):
     assert context["context_stats"]["max_grounded_spans_per_source"] == 3
 
 
-def test_latest_cross_validation_review_is_forwarded_as_advisory_context():
+def test_cross_validation_review_does_not_enter_writer_context():
     review = {
         "schema_version": "rwkv-cross-validation.v1",
         "decision": "replan",
@@ -379,9 +767,9 @@ def test_latest_cross_validation_review_is_forwarded_as_advisory_context():
         constraints={"last_cross_validation": review},
     )
 
-    assert "LATEST RWKV CROSS-VALIDATION REVIEW" in context["text"]
-    assert "the exact release date is still absent" in context["text"]
-    assert context["context_stats"]["cross_validation_review_included"] is True
+    assert "LATEST RWKV CROSS-VALIDATION REVIEW" not in context["text"]
+    assert "the exact release date is still absent" not in context["text"]
+    assert context["context_stats"]["cross_validation_review_included"] is False
 
 
 def test_context_keeps_reference_ids_contiguous_when_a_source_does_not_fit():
@@ -407,16 +795,19 @@ def test_context_keeps_reference_ids_contiguous_when_a_source_does_not_fit():
         token_budget=128,
     )
 
-    assert "[S1] Source 1" in context["text"]
-    assert "[S2] Source 3" in context["text"]
+    assert "[S1] UNBOUND SOURCE EXCERPT: Source 1" in context["text"]
+    assert "[S2] UNBOUND SOURCE EXCERPT: Source 3" in context["text"]
     assert "[S3]" not in context["text"]
-    assert context["citation_refs"] == [
-        {"ref_id": "S1", "title": "Source 1", "url": "https://example.com/1"},
-        {"ref_id": "S2", "title": "Source 3", "url": "https://example.com/3"},
+    assert [
+        (row["ref_id"], row["title"], row["url"])
+        for row in context["citation_refs"]
+    ] == [
+        ("S1", "Source 1", "https://example.com/1"),
+        ("S2", "Source 3", "https://example.com/3"),
     ]
 
 
-def test_context_prioritizes_sources_bound_by_rwkv_cross_validation():
+def test_cross_validation_cannot_reorder_writer_sources():
     context = build_evidence_context(
         {"results": [_source(1), _source(2)]},
         constraints={
@@ -425,8 +816,8 @@ def test_context_prioritizes_sources_bound_by_rwkv_cross_validation():
         },
     )
 
-    assert "https://example.com/2" in context["text"]
-    assert "https://example.com/1" not in context["text"]
+    assert "https://example.com/1" in context["text"]
+    assert "https://example.com/2" not in context["text"]
 
 
 def test_validation_context_can_bound_sources_chunks_and_locator_spans():
@@ -470,7 +861,7 @@ def test_validation_context_can_bound_sources_chunks_and_locator_spans():
     assert context["context_stats"]["source_locator_char_limit"] == 120
 
 
-def test_context_reserves_a_source_slot_for_each_bound_claim():
+def test_raw_page_level_claim_ids_do_not_reserve_evidence_slots():
     p1_first = _source(1)
     p1_first["claim_ids"] = ["P1"]
     p1_second = _source(2)
@@ -490,8 +881,42 @@ def test_context_reserves_a_source_slot_for_each_bound_claim():
     )
 
     assert "https://example.com/1" in context["text"]
-    assert "https://example.com/3" in context["text"]
-    assert "https://example.com/2" not in context["text"]
+    assert "https://example.com/2" in context["text"]
+    assert "https://example.com/3" not in context["text"]
+
+
+def test_raw_page_level_bindings_are_removed_from_fallback_context():
+    p1_first = _source(1)
+    p1_first["claim_ids"] = ["P1"]
+    p1_second = _source(2)
+    p1_second["claim_ids"] = ["P1"]
+    p1_and_p2 = _source(3)
+    p1_and_p2["claim_ids"] = ["P1", "P2"]
+    p3 = _source(4)
+    p3["claim_ids"] = ["P3"]
+    plan = {
+        "schema_version": "task_plan.v2",
+        "goal": "answer three records",
+        "atomic_points": [
+            {"id": "P1", "question": "first", "fields": [], "time_scope": "unspecified"},
+            {"id": "P2", "question": "second", "fields": [], "time_scope": "unspecified"},
+            {"id": "P3", "question": "third", "fields": [], "time_scope": "unspecified"},
+        ],
+    }
+
+    context = build_evidence_context(
+        {"results": [p1_first, p1_second, p1_and_p2, p3]},
+        constraints={"context_source_count": 3, "task_plan": plan},
+    )
+
+    urls = [row["url"] for row in context["selected_evidence"]]
+    assert urls == [
+        "https://example.com/1",
+        "https://example.com/2",
+        "https://example.com/3",
+    ]
+    assert context["context_stats"]["factual_points_with_selected_sources"] == 0
+    assert all(not row.get("claim_ids") for row in context["selected_evidence"])
 
 
 def test_context_exposes_source_dates_and_question_freshness_policy():
@@ -511,12 +936,35 @@ def test_context_exposes_source_dates_and_question_freshness_policy():
         constraints={"freshness_policy": {"as_of": "2026-08-09", "mode": "latest"}},
     )
 
-    assert "RWKV task-point bindings: P2" in context["text"]
+    assert "RWKV task-point bindings: P2" not in context["text"]
+    assert "UNBOUND SOURCE EXCERPT" in context["text"]
     assert "Published: 2026-07-01" in context["text"]
     assert "Updated: 2026-07-20" in context["text"]
     assert "official-feed" in context["text"]
     assert "QUESTION TIME/FRESHNESS POLICY" in context["text"]
     assert '"as_of": "2026-08-09"' in context["text"]
+
+
+def test_writer_is_told_not_to_expand_into_adjacent_unrequested_material():
+    prompt = _writer_prompt(
+        "Which output format is required?",
+        {"text": "<chunk-1>Directory format. Nearby unrelated limitation."},
+    )
+
+    assert "Answer only the fields the user requested" in prompt
+    assert "Do not append adjacent limitations" in prompt
+
+
+def test_writer_repeats_the_verbatim_user_question_after_research_material():
+    question = "Which exact version, title, and release date are requested?"
+    evidence = "<chunk-1>The exact record is preserved here.</chunk-1>"
+
+    prompt = _writer_prompt(question, {"text": evidence})
+
+    question_block = f"USER QUESTION:\n{question}"
+    assert prompt.count(question_block) == 2
+    assert prompt.rindex(question_block) > prompt.index(evidence)
+    assert prompt.endswith(f"{question_block}\n\nWrite the final answer now.")
 
 
 def test_claim_ledger_is_advisory_context_not_a_gate():

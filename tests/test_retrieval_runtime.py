@@ -20,7 +20,9 @@ class FakePlanner:
         self.decisions = list(decisions)
         self.observations = []
         self.rebuilt_sessions = []
+        self.recovery_turns = []
         self.replan_progress = []
+        self.active_missing_point = ""
 
     def plan_next_action(self, *_args):
         return self.decisions.pop(0)
@@ -48,6 +50,10 @@ class FakePlanner:
 
     def rebuild_session(self, user_query, env_context, observation, phase):
         self.observations.append(observation)
+        review = observation.get("evidence_review") if isinstance(observation, dict) else {}
+        self.active_missing_point = str(
+            (review or {}).get("missing_point_id") or ""
+        )
         self.rebuilt_sessions.append(
             {
                 "user_query": user_query,
@@ -57,8 +63,30 @@ class FakePlanner:
             }
         )
 
+    def request_recovery_turn(
+        self,
+        observation,
+        *,
+        user_query="",
+        env_context="",
+        phase="DISCOVERY",
+    ):
+        self.recovery_turns.append(
+            {
+                "observation": observation,
+                "user_query": user_query,
+                "env_context": env_context,
+                "phase": phase,
+            }
+        )
+        self.rebuild_session(user_query, env_context, observation, phase)
+
     def mark_replan_progress(self, task_point_id):
-        self.replan_progress.append(task_point_id)
+        point_id = str(task_point_id or "")
+        if not self.active_missing_point or point_id != self.active_missing_point:
+            return
+        self.replan_progress.append(point_id)
+        self.active_missing_point = ""
 
 
 def test_planner_environment_context_exposes_observable_utc_time():
@@ -72,6 +100,161 @@ def test_planner_environment_context_exposes_observable_utc_time():
         "current_utc_datetime": "2026-08-09T10:11:12+00:00",
         "current_utc_date": "2026-08-09",
     }
+
+
+def test_planner_routing_snapshot_exposes_zero_bound_factual_points():
+    state = AgentState(task_id="POINT_PROGRESS", user_query="answer both facts")
+    plan = {
+        "schema_version": "task_plan.v2",
+        "goal": "answer both facts",
+        "atomic_points": [
+            {"id": "P1", "question": "first fact", "fields": ["date"]},
+            {"id": "P2", "question": "second fact", "fields": ["name"]},
+        ],
+    }
+    state.retrieval.claims.initialize(plan, state.user_query)
+    state.retrieval.record_query(
+        "first fact query",
+        {
+            "status": "ok",
+            "results": [
+                {
+                    "title": "First source",
+                    "url": "https://example.test/first",
+                    "content": "first fact source body",
+                    "chunk_candidates": [
+                        {
+                            "chunk_id": "chunk-1",
+                            "chunk_index": 0,
+                            "supported": True,
+                            "source_grounded": True,
+                            "task_record_ids": ["P1"],
+                            "claim_ids": ["P1"],
+                            "field_keys": ["date"],
+                            "quote": "first fact source body",
+                            "source_locator": {"char_start": 0, "char_end": 22},
+                            "grounding_basis": "exact",
+                        }
+                    ],
+                }
+            ],
+        },
+        step=1,
+        task_point_id="P1",
+        strategy="rwkv_selected",
+    )
+
+    snapshot = state.retrieval.planner_routing_snapshot()
+
+    assert snapshot["factual_point_progress"] == [
+            {
+                "id": "P1",
+                "bound_evidence_record_count": 1,
+                "candidate_evidence_record_count": 0,
+                "total_evidence_record_count": 1,
+                "attempt_count": 1,
+                "retrieval_state": "evidence_recorded",
+            },
+            {
+                "id": "P2",
+                "bound_evidence_record_count": 0,
+                "candidate_evidence_record_count": 0,
+                "total_evidence_record_count": 0,
+                "attempt_count": 0,
+                "retrieval_state": "not_recorded",
+            },
+    ]
+
+
+def test_planner_prompt_projection_preserves_factual_point_progress():
+    state = AgentState(task_id="POINT_PROMPT", user_query="answer both facts")
+    plan = {
+        "schema_version": "task_plan.v2",
+        "goal": "answer both facts",
+        "atomic_points": [
+            {"id": "P1", "question": "first fact", "fields": ["date"]},
+            {"id": "P2", "question": "second fact", "fields": ["name"]},
+        ],
+    }
+    state.retrieval.claims.initialize(plan, state.user_query)
+
+    projected = json.loads(
+        Planner._replan_environment_projection(state.to_retrieval_context())
+    )
+
+    assert projected["retrieval_ledger"]["factual_point_progress"] == [
+            {
+                "id": "P1",
+                "bound_evidence_record_count": 0,
+                "candidate_evidence_record_count": 0,
+                "total_evidence_record_count": 0,
+                "attempt_count": 0,
+                "retrieval_state": "not_recorded",
+            },
+            {
+                "id": "P2",
+                "bound_evidence_record_count": 0,
+                "candidate_evidence_record_count": 0,
+                "total_evidence_record_count": 0,
+                "attempt_count": 0,
+                "retrieval_state": "not_recorded",
+            },
+    ]
+    assert projected["retrieval_ledger"]["unassigned_source_count"] == 0
+
+
+def test_planner_projection_carries_exact_records_not_whole_page_bindings():
+    state = AgentState(task_id="RECORD_PROMPT", user_query="current version and date")
+    plan = {
+        "schema_version": "task_plan.v2",
+        "goal": "current version and date",
+        "atomic_points": [
+            {
+                "id": "P1",
+                "question": "current version and date",
+                "fields": ["version", "date"],
+            }
+        ],
+    }
+    state.retrieval.claims.initialize(plan, state.user_query)
+    state.retrieval.record_query(
+        "current release",
+        {
+            "status": "ok",
+            "results": [
+                {
+                    "title": "Official release",
+                    "url": "https://example.test/releases",
+                    "content": "Version 4.4 was released on 2026-08-01. Old navigation text.",
+                    "chunk_candidates": [
+                        {
+                            "chunk_id": "release-row",
+                            "chunk_index": 0,
+                            "supported": True,
+                            "source_grounded": True,
+                            "task_record_ids": ["P1"],
+                            "field_keys": ["version", "date"],
+                            "subject_key": "",
+                            "record_key": "Version 4.4",
+                            "quote": "Version 4.4 was released on 2026-08-01.",
+                        }
+                    ],
+                }
+            ],
+        },
+        task_point_id="P1",
+    )
+
+    projected = json.loads(
+        Planner._replan_environment_projection(state.to_retrieval_context())
+    )
+    records = projected["evidence_records"]["records"]
+
+    assert len(records) == 1
+    assert records[0]["task_record_id"] == "P1"
+    assert records[0]["record_key"] == "Version 4.4"
+    assert records[0]["quote"] == "Version 4.4 was released on 2026-08-01."
+    assert "Old navigation text" not in json.dumps(records)
 
 class FakeOwner:
     def __init__(self, decisions, reviews=None):
@@ -105,6 +288,15 @@ class FakeOwner:
         self.review_calls.append({"args": args, "kwargs": kwargs})
         return self.reviews.pop(0)
 
+    def _cross_validate_if_evidence_changed(self, *args, **kwargs):
+        revision = int(self.state.retrieval.evidence_revision or 0)
+        if self.state.run_metadata.get("last_cross_validation_evidence_revision") == revision:
+            return None
+        review = self._cross_validate_research(*args, **kwargs)
+        if str(review.get("decision") or "") in {"finish", "replan"}:
+            self.state.run_metadata["last_cross_validation_evidence_revision"] = revision
+        return review
+
     def _complete_model_tool_loop(self, query, action, rounds, step, *, termination_reason):
         self.finished.append(
             {
@@ -120,10 +312,21 @@ class FakeOwner:
 
 def _plan():
     return {
+        "schema_version": "task_plan.v2",
+        "goal": "question",
         "atomic_points": [
-            {"id": "P1", "task": "question", "objective": "answer question"}
+            {"id": "P1", "question": "question", "fields": [], "time_scope": "unspecified"}
         ]
     }
+
+
+def _duplicate_recovery_turns(owner):
+    return [
+        row
+        for row in owner.planner.recovery_turns
+        if str((row.get("observation") or {}).get("error_class") or "")
+        in {"exact_duplicate_request", "equivalent_duplicate_query"}
+    ]
 
 
 def test_loop_executes_exact_rwkv_tool_and_query(monkeypatch):
@@ -176,25 +379,26 @@ def test_loop_executes_exact_rwkv_tool_and_query(monkeypatch):
             None,
         )
     ]
-    assert owner.finished[0]["termination_reason"] == "rwkv_cross_validation_finish"
+    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
 
 
-def test_finish_request_is_decided_by_rwkv_review_not_claim_rules():
+def test_finish_request_goes_directly_to_writer_without_second_gate():
     owner = FakeOwner([{"action": "finish_task", "args": {}, "task_point_id": "P1"}])
     answer = run_unified_research_loop(owner, "question", {}, _plan(), 5)
     assert answer == "rwkv final"
     assert owner.finished[0]["rounds"] == []
-    assert owner.finished[0]["termination_reason"] == "rwkv_cross_validation_finish"
+    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
+    assert owner.review_calls == []
 
 
-def test_exact_duplicate_is_reviewed_by_rwkv_without_controller_recovery_route(monkeypatch):
+def test_exact_duplicate_is_frozen_and_replanned_without_network_reexecution(monkeypatch):
     calls = []
     decision = {
         "action": "web_search",
         "args": {"query": "same query"},
         "task_point_id": "P1",
     }
-    owner = FakeOwner([decision, decision])
+    owner = FakeOwner([decision, decision, {"action": "finish_task", "args": {}}])
     monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
     monkeypatch.setattr(
         ToolRegistry,
@@ -210,15 +414,17 @@ def test_exact_duplicate_is_reviewed_by_rwkv_without_controller_recovery_route(m
     answer = run_unified_research_loop(owner, "question", {}, _plan(), 5)
     assert answer == "rwkv final"
     assert calls == [("web_search", {"query": "same query"})]
-    assert len(owner.review_calls) == 1
+    assert owner.review_calls == []
     assert owner.state.retrieval.routing_snapshot()["frozen_path_count"] == 1
-    assert owner.state.retrieval.replan_count == 0
-    assert owner.planner.rebuilt_sessions == []
-    assert owner.finished[0]["termination_reason"] == "rwkv_cross_validation_finish_after_duplicate"
+    assert owner.state.retrieval.replan_count == 1
+    assert len(owner.planner.rebuilt_sessions) == 1
+    assert len(_duplicate_recovery_turns(owner)) == 1
+    assert _duplicate_recovery_turns(owner)[0]["observation"]["frozen_path"]["query"] == "same query"
+    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
     assert not hasattr(owner.planner, "begin_replan")
 
 
-def test_duplicate_review_replan_runs_only_the_next_rwkv_selected_query(monkeypatch):
+def test_duplicate_recovery_runs_only_the_next_rwkv_selected_query(monkeypatch):
     first = {
         "action": "web_search",
         "args": {"query": "same query"},
@@ -229,18 +435,7 @@ def test_duplicate_review_replan_runs_only_the_next_rwkv_selected_query(monkeypa
         "args": {"query": "RWKV selected missing evidence query"},
         "task_point_id": "P1",
     }
-    owner = FakeOwner(
-        [first, first, follow_up, {"action": "finish_task", "args": {}}],
-        reviews=[
-            {
-                "decision": "replan",
-                "missing_points": ["P1"],
-                "conflicts": [],
-                "next_focus": "an independent official confirmation",
-            },
-            {"decision": "finish", "missing_points": [], "conflicts": []},
-        ],
-    )
+    owner = FakeOwner([first, first, follow_up, {"action": "finish_task", "args": {}}])
     calls = []
     monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
     monkeypatch.setattr(
@@ -261,16 +456,13 @@ def test_duplicate_review_replan_runs_only_the_next_rwkv_selected_query(monkeypa
         ("web_search", {"query": "same query"}),
         ("web_search", {"query": "RWKV selected missing evidence query"}),
     ]
-    assert len(owner.review_calls) == 2
-    assert len(owner.planner.rebuilt_sessions) == 1
-    assert owner.planner.rebuilt_sessions[0]["review"]["decision"] == "replan"
-    assert owner.planner.rebuilt_sessions[0]["routing_observation"]["frozen_path"][
-        "query"
-    ] == "same query"
+    assert owner.review_calls == []
+    assert len(_duplicate_recovery_turns(owner)) == 1
+    assert _duplicate_recovery_turns(owner)[0]["observation"]["frozen_path"]["query"] == "same query"
     assert owner.state.retrieval.replan_count == 1
 
 
-def test_new_url_without_claim_binding_does_not_clear_pending_replan(monkeypatch):
+def test_distinct_model_selected_url_is_not_blocked_by_claim_binding(monkeypatch):
     first = {
         "action": "web_search",
         "args": {"query": "same query"},
@@ -281,18 +473,8 @@ def test_new_url_without_claim_binding_does_not_clear_pending_replan(monkeypatch
         "args": {"query": "different route with an unsupported page"},
         "task_point_id": "P1",
     }
-    owner = FakeOwner(
-        [first, first, alternative, {"action": "finish_task", "args": {}}],
-        reviews=[
-            {
-                "decision": "replan",
-                "missing_points": ["P1"],
-                "conflicts": [],
-                "next_focus": "another source route",
-            },
-            {"decision": "finish", "missing_points": [], "conflicts": []},
-        ],
-    )
+    owner = FakeOwner([first, first, alternative, {"action": "finish_task", "args": {}}])
+    calls = []
     monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
     monkeypatch.setattr(
         ToolRegistry,
@@ -301,6 +483,7 @@ def test_new_url_without_claim_binding_does_not_clear_pending_replan(monkeypatch
     )
 
     def execute(_cls, action, args, context, phase=None):
+        calls.append((action, dict(args)))
         results = (
             [
                 {
@@ -327,31 +510,21 @@ def test_new_url_without_claim_binding_does_not_clear_pending_replan(monkeypatch
     answer = run_unified_research_loop(owner, "question", {}, _plan(), 6)
 
     assert answer == "rwkv final"
+    assert calls == [
+        ("web_search", {"query": "same query"}),
+        ("web_search", {"query": "different route with an unsupported page"}),
+    ]
     assert owner.planner.replan_progress == []
 
 
-def test_repeated_frozen_path_reuses_pending_rwkv_replan_without_reviewer_loop(monkeypatch):
+def test_second_duplicate_hits_resource_boundary_without_second_gate(monkeypatch):
     repeated = {
         "action": "web_search",
         "args": {"query": "same frozen query"},
         "task_point_id": "P1",
     }
-    alternative = {
-        "action": "web_search",
-        "args": {"query": "RWKV independently selected alternative"},
-        "task_point_id": "P1",
-    }
     owner = FakeOwner(
-        [repeated, repeated, repeated, alternative, {"action": "finish_task", "args": {}}],
-        reviews=[
-            {
-                "decision": "replan",
-                "missing_points": ["P1"],
-                "conflicts": [],
-                "next_focus": "another source route",
-            },
-            {"decision": "finish", "missing_points": [], "conflicts": []},
-        ],
+        [repeated, repeated, repeated, {"action": "finish_task", "args": {}}],
     )
     calls = []
     monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
@@ -363,31 +536,24 @@ def test_repeated_frozen_path_reuses_pending_rwkv_replan_without_reviewer_loop(m
 
     def execute(_cls, action, args, context, phase=None):
         calls.append((action, dict(args)))
-        results = (
-            [{"title": "new source", "url": "https://example.com/new", "content": "new evidence"}]
-            if args.get("query") == "RWKV independently selected alternative"
-            else []
-        )
-        return json.dumps({"status": "ok", "results": results})
+        return json.dumps({"status": "ok", "results": []})
 
     monkeypatch.setattr(ToolRegistry, "execute", classmethod(execute))
     answer = run_unified_research_loop(owner, "question", {}, _plan(), 7)
 
     assert answer == "rwkv final"
-    assert calls == [
-        ("web_search", {"query": "same frozen query"}),
-        ("web_search", {"query": "RWKV independently selected alternative"}),
-    ]
-    assert len(owner.review_calls) == 2
-    assert len(owner.planner.rebuilt_sessions) == 2
-    assert owner.state.retrieval.replan_count == 2
+    assert calls == [("web_search", {"query": "same frozen query"})]
+    assert owner.review_calls == []
+    assert len(_duplicate_recovery_turns(owner)) == 1
+    assert owner.state.retrieval.replan_count == 1
+    assert owner.finished[0]["termination_reason"] == "resource_duplicate_limit"
     assert any(
         observation.get("status") == "no_new_evidence"
         for observation in owner.planner.observations
     )
 
 
-def test_pending_replan_stall_is_bounded_without_rebuild_loop(monkeypatch):
+def test_duplicate_stall_allows_only_one_rebuilt_planner_then_stops(monkeypatch):
     repeated = {
         "action": "web_search",
         "args": {"query": "same frozen query"},
@@ -395,14 +561,6 @@ def test_pending_replan_stall_is_bounded_without_rebuild_loop(monkeypatch):
     }
     owner = FakeOwner(
         [repeated, repeated, repeated, repeated, repeated, repeated, repeated, repeated],
-        reviews=[
-            {
-                "decision": "replan",
-                "missing_points": ["P1"],
-                "conflicts": [],
-                "next_focus": "another source route",
-            }
-        ],
     )
     calls = []
     monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
@@ -421,10 +579,11 @@ def test_pending_replan_stall_is_bounded_without_rebuild_loop(monkeypatch):
 
     assert answer == "rwkv final"
     assert calls == [("web_search", {"query": "same frozen query"})]
-    assert len(owner.review_calls) == 1
-    assert len(owner.planner.rebuilt_sessions) == 2
-    assert owner.state.retrieval.replan_count == 2
-    assert owner.finished[0]["termination_reason"] == "rwkv_replan_stalled"
+    assert owner.review_calls == []
+    assert len(_duplicate_recovery_turns(owner)) == 1
+    assert len(owner.planner.rebuilt_sessions) == 1
+    assert owner.state.retrieval.replan_count == 1
+    assert owner.finished[0]["termination_reason"] == "resource_duplicate_limit"
 
 
 def test_equivalent_query_is_frozen_only_within_the_same_task_point(monkeypatch):
@@ -438,7 +597,10 @@ def test_equivalent_query_is_frozen_only_within_the_same_task_point(monkeypatch)
         "args": {"query": "official epsilon delta gamma beta alpha"},
         "task_point_id": "P1",
     }
-    owner = FakeOwner([first, equivalent], reviews=[{"decision": "finish"}])
+    owner = FakeOwner(
+        [first, equivalent, {"action": "finish_task", "args": {}}],
+        reviews=[{"decision": "finish"}],
+    )
     calls = []
     monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
     monkeypatch.setattr(
@@ -458,7 +620,8 @@ def test_equivalent_query_is_frozen_only_within_the_same_task_point(monkeypatch)
     assert calls == [
         ("web_search", {"query": "alpha beta gamma delta epsilon official"})
     ]
-    assert owner.finished[0]["termination_reason"] == "rwkv_cross_validation_finish_after_duplicate"
+    assert len(_duplicate_recovery_turns(owner)) == 1
+    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
 
 
 def test_exact_retrieval_request_is_not_reexecuted_for_another_task_point(monkeypatch):
@@ -473,7 +636,7 @@ def test_exact_retrieval_request_is_not_reexecuted_for_another_task_point(monkey
         "task_point_id": "P2",
     }
     owner = FakeOwner(
-        [first, repeated_for_another_point],
+        [first, repeated_for_another_point, {"action": "finish_task", "args": {}}],
         reviews=[{"decision": "finish"}],
     )
     calls = []
@@ -500,23 +663,19 @@ def test_exact_retrieval_request_is_not_reexecuted_for_another_task_point(monkey
 
     assert answer == "rwkv final"
     assert calls == [("web_search", {"query": "one exact shared query"})]
-    assert owner.finished[0]["termination_reason"] == (
-        "rwkv_cross_validation_finish_after_duplicate"
-    )
+    assert len(_duplicate_recovery_turns(owner)) == 1
+    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
 
 
-def test_duplicate_cross_validation_protocol_errors_are_bounded(monkeypatch):
+def test_removed_cross_validation_cannot_block_writer(monkeypatch):
     repeated = {
         "action": "web_search",
         "args": {"query": "same query"},
         "task_point_id": "P1",
     }
     owner = FakeOwner(
-        [repeated, repeated, repeated],
-        reviews=[
-            {"decision": "protocol_error", "message": "invalid review one"},
-            {"decision": "protocol_error", "message": "invalid review two"},
-        ],
+        [repeated, repeated, {"action": "finish_task", "args": {}}],
+        reviews=[{"decision": "protocol_error", "message": "invalid review"}],
     )
     calls = []
     monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
@@ -536,13 +695,12 @@ def test_duplicate_cross_validation_protocol_errors_are_bounded(monkeypatch):
 
     assert answer == "rwkv final"
     assert calls == [("web_search", {"query": "same query"})]
-    assert len(owner.review_calls) == 2
-    assert owner.finished[0]["termination_reason"] == (
-        "rwkv_cross_validation_protocol_stalled"
-    )
+    assert owner.review_calls == []
+    assert len(_duplicate_recovery_turns(owner)) == 1
+    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
 
 
-def test_rwkv_cross_validation_can_rebuild_planner_and_run_another_round(monkeypatch):
+def test_planner_finish_does_not_invoke_a_hidden_follow_up_path(monkeypatch):
     owner = FakeOwner(
         [
             {"action": "finish_task", "args": {}, "task_point_id": "P1"},
@@ -554,13 +712,8 @@ def test_rwkv_cross_validation_can_rebuild_planner_and_run_another_round(monkeyp
             {"action": "finish_task", "args": {}, "task_point_id": "P1"},
         ],
         reviews=[
-            {
-                "decision": "replan",
-                "missing_points": ["P1"],
-                "conflicts": [],
-                "next_focus": "missing official confirmation",
-            },
-            {"decision": "finish", "missing_points": [], "conflicts": []},
+            {"decision": "replan"},
+            {"decision": "finish"},
         ],
     )
     calls = []
@@ -590,14 +743,15 @@ def test_rwkv_cross_validation_can_rebuild_planner_and_run_another_round(monkeyp
     answer = run_unified_research_loop(owner, "question", {}, _plan(), 6)
 
     assert answer == "rwkv final"
-    assert calls == [("web_search", {"query": "model selected follow-up"}, None)]
-    assert len(owner.planner.rebuilt_sessions) == 1
-    assert owner.planner.rebuilt_sessions[0]["review"]["decision"] == "replan"
-    assert owner.planner.replan_progress == ["P1"]
-    assert owner.state.retrieval.replan_count == 1
+    assert calls == []
+    assert owner.review_calls == []
+    assert owner.planner.rebuilt_sessions == []
+    assert owner.planner.replan_progress == []
+    assert owner.state.retrieval.replan_count == 0
+    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
 
 
-def test_unrelated_new_source_does_not_clear_model_requested_missing_point(monkeypatch):
+def test_planner_finish_does_not_supply_or_override_task_point(monkeypatch):
     owner = FakeOwner(
         [
             {"action": "finish_task", "args": {}, "task_point_id": "P1"},
@@ -614,20 +768,17 @@ def test_unrelated_new_source_does_not_clear_model_requested_missing_point(monke
             {"action": "finish_task", "args": {}, "task_point_id": "P1"},
         ],
         reviews=[
-            {
-                "decision": "replan",
-                "missing_points": ["P2"],
-                "conflicts": [],
-                "next_focus": "P2 evidence",
-            },
-            {"decision": "finish", "missing_points": [], "conflicts": []},
+            {"decision": "replan"},
+            {"decision": "finish"},
         ],
     )
     calls = []
     plan = {
+        "schema_version": "task_plan.v2",
+        "goal": "mixed question",
         "atomic_points": [
-            {"id": "P1", "task": "historical fact"},
-            {"id": "P2", "task": "current fact"},
+            {"id": "P1", "question": "historical fact", "fields": [], "time_scope": "historical"},
+            {"id": "P2", "question": "current fact", "fields": [], "time_scope": "current"},
         ]
     }
     monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
@@ -657,9 +808,13 @@ def test_unrelated_new_source_does_not_clear_model_requested_missing_point(monke
     answer = run_unified_research_loop(owner, "mixed question", {}, plan, 6)
 
     assert answer == "rwkv final"
-    assert calls == [("web_search", {"query": "another P1 source"})]
+    assert calls == []
+    assert owner.review_calls == []
     assert owner.planner.replan_progress == []
-    assert any("pending_replan" in observation for observation in owner.planner.observations)
+    assert owner.planner.active_missing_point == ""
+    assert owner.planner.rebuilt_sessions == []
+    assert owner.planner.recovery_turns == []
+    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
 
 
 def test_planner_context_keeps_original_source_spans_after_feedback_changes():
@@ -824,12 +979,8 @@ def test_planner_context_compacts_large_feedback_and_source_bodies():
             },
             "evidence_review": {
                 "decision": "replan",
-                "missing_points": ["P2"],
-                "next_focus": "current fact",
-                "task_point_status": {
-                    "P1": {"status": "completed", "large": "x" * 10000},
-                    "P2": {"status": "not_retrieved", "large": "x" * 10000},
-                },
+                "missing_point_id": "P2",
+                "evidence_needed": "current fact",
             },
         }
     )
@@ -838,12 +989,12 @@ def test_planner_context_compacts_large_feedback_and_source_bodies():
 
     assert get_token_count(context) <= 3000
     assert "ROUTING_SOURCE_MARKER" in context
-    assert '"missing_points":["P2"]' in context
-    assert '"P2":{"status":"not_retrieved"}' in context
+    assert '"missing_point_id":"P2"' in context
+    assert '"evidence_needed":"current fact"' in context
     assert "https://noise.example/499" not in context
 
 
-def test_cross_validation_uses_bounded_evidence_and_compact_routing(monkeypatch):
+def test_cross_validation_uses_only_bounded_source_evidence(monkeypatch):
     orchestrator = Orchestrator()
     orchestrator.state.task_id = "COMPACT_CROSS_VALIDATION"
     orchestrator.state.user_query = "mixed historical and current question"
@@ -854,6 +1005,12 @@ def test_cross_validation_uses_bounded_evidence_and_compact_routing(monkeypatch)
         ]
     }
     orchestrator.state.retrieval.claims.initialize(plan, orchestrator.state.user_query)
+    orchestrator.state.run_metadata["freshness_policy"] = {
+        "as_of": None,
+        "now": "2026-08-12T00:00:00+00:00",
+        "mode": "retrieval_time_only",
+        "unknown_date_policy": "preserve_unknown",
+    }
     orchestrator.state.retrieval.record_query(
         "historical query",
         {
@@ -884,38 +1041,16 @@ def test_cross_validation_uses_bounded_evidence_and_compact_routing(monkeypatch)
     def reject_full_routing(*_args, **_kwargs):
         raise AssertionError("full routing snapshot must not enter cross-validation")
 
-    compact_routing = {
-        "schema_version": "planner-routing.v1",
-        "marker": "COMPACT_ROUTING_MARKER",
-        "claims": [
-            {"claim_id": "P1", "source_count": 1},
-            {"claim_id": "P2", "source_count": 0},
-        ],
-    }
     monkeypatch.setattr(
         orchestrator.state.retrieval,
         "routing_snapshot",
         reject_full_routing,
     )
-    monkeypatch.setattr(
-        orchestrator.state.retrieval,
-        "planner_routing_snapshot",
-        lambda: compact_routing,
-    )
     captured = {}
 
-    def review(
-        _query,
-        _plan,
-        evidence_context,
-        *,
-        evidence_refs=None,
-        evidence_text_by_ref=None,
-    ):
+    def review(_query, _plan, evidence_context):
         captured["context"] = evidence_context
-        captured["evidence_refs"] = list(evidence_refs or [])
-        captured["evidence_text_by_ref"] = dict(evidence_text_by_ref or {})
-        return {"decision": "replan", "missing_points": ["P2"]}
+        return {"decision": "replan"}
 
     orchestrator.planner.cross_validate_research = review
     monkeypatch.setattr("agent.orchestrator.append_task_event", lambda *_args, **_kwargs: None)
@@ -927,14 +1062,14 @@ def test_cross_validation_uses_bounded_evidence_and_compact_routing(monkeypatch)
     )
 
     assert result["decision"] == "replan"
-    assert "COMPACT_ROUTING_MARKER" in captured["context"]
+    assert "planner-routing.v1" not in captured["context"]
+    assert "2026-08-12T00:00:00+00:00" in captured["context"]
     assert "ORIGINAL_CHUNK_0" in captured["context"]
-    assert "ORIGINAL_CHUNK_2" not in captured["context"]
-    assert captured["evidence_refs"] == ["S1"]
-    assert get_token_count(captured["context"]) <= 5000
+    assert "ORIGINAL_CHUNK_2" in captured["context"]
+    assert get_token_count(captured["context"]) <= 14000
 
 
-def test_cross_validation_persists_rwkv_supported_source_bindings(monkeypatch):
+def test_cross_validation_persists_only_binary_routing_state(monkeypatch):
     orchestrator = Orchestrator()
     orchestrator.state.task_id = "CROSS_VALIDATED_SOURCE_BINDING"
     orchestrator.state.user_query = "current release"
@@ -967,15 +1102,9 @@ def test_cross_validation_persists_rwkv_supported_source_bindings(monkeypatch):
         step=1,
     )
     orchestrator.planner.cross_validate_research = lambda *_args, **_kwargs: {
+        "schema_version": "rwkv-cross-validation.v3",
         "decision": "finish",
-        "missing_points": [],
-        "conflicts": [],
-        "task_point_status": {
-            "P1": {
-                "status": "supported",
-                "evidence_refs": ["S1"],
-            }
-        },
+        "selected_action": "write_answer",
     }
     emitted_events = []
     monkeypatch.setattr(
@@ -989,33 +1118,15 @@ def test_cross_validation_persists_rwkv_supported_source_bindings(monkeypatch):
         step=2,
     )
 
-    assert review["validated_source_urls"] == ["https://example.com/current"]
-    assert review["evidence_ref_map"]["S1"]["url"] == "https://example.com/current"
+    assert "validated_source_urls" not in review
+    assert "evidence_ref_map" not in review
     assert emitted_events[-1][0][1] == "cross_validation"
-    assert emitted_events[-1][1]["task_point_status"]["P1"] == {
-        "status": "supported",
-        "evidence_urls": ["https://example.com/current"],
-        "supported_facts": [],
-        "missing_fields": [],
-    }
-    assert orchestrator.state.run_metadata["validated_source_urls"] == [
-        "https://example.com/current"
-    ]
+    assert "task_point_status" not in emitted_events[-1][1]
+    assert "validated_source_urls" not in orchestrator.state.run_metadata
     assert orchestrator.state.run_metadata["last_cross_validation"] == {
-        "schema_version": "rwkv-cross-validation.v1",
+        "schema_version": "rwkv-cross-validation.v3",
         "decision": "finish",
-        "missing_points": [],
-        "conflicts": [],
-        "task_point_status": {
-                "P1": {
-                    "status": "supported",
-                    "evidence_urls": ["https://example.com/current"],
-                    "supported_facts": [],
-                    "missing_fields": [],
-                }
-        },
-        "next_focus": "",
-        "reason": "",
+        "trigger": "planner_finish",
         "evidence_revision": 1,
     }
 
@@ -1097,12 +1208,10 @@ def test_latest_evidence_revision_is_cross_validated_once(monkeypatch):
     def review(*_args, **_kwargs):
         calls.append(orchestrator.state.retrieval.evidence_revision)
         return {
+            "schema_version": "rwkv-cross-validation.v3",
             "decision": "finish",
-            "missing_points": [],
-            "conflicts": [],
-            "task_point_status": {
-                "P1": {"status": "supported", "evidence_refs": ["S1"]}
-            },
+            "missing_point_id": "",
+            "evidence_needed": "",
         }
 
     orchestrator.planner.cross_validate_research = review
@@ -1131,12 +1240,10 @@ def test_empty_evidence_revision_is_cross_validated_once(monkeypatch):
     def review(*_args, **_kwargs):
         calls.append(orchestrator.state.retrieval.evidence_revision)
         return {
+            "schema_version": "rwkv-cross-validation.v3",
             "decision": "replan",
-            "missing_points": ["P1"],
-            "conflicts": [],
-            "task_point_status": {
-                "P1": {"status": "missing", "evidence_refs": []}
-            },
+            "missing_point_id": "P1",
+            "evidence_needed": "official current release",
         }
 
     orchestrator.planner.cross_validate_research = review

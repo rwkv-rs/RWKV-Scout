@@ -95,6 +95,30 @@ def normalize_url(value: str, base: str = "") -> str:
     return parsed._replace(query=urlencode(query), path=path).geturl()
 
 
+def retrieval_url_identity(value: str, base: str = "") -> str:
+    """Return a conservative URL identity for retrieval deduplication.
+
+    The fetch URL remains untouched.  Only the identity used to merge provider
+    candidates treats a non-root trailing slash as equivalent.  This prevents
+    the same documentation page discovered as ``/page`` and ``/page/`` from
+    consuming two fetch/model budgets while preserving the original URL for
+    transport and citations.
+    """
+
+    normalized = normalize_url(value, base)
+    if not normalized:
+        return ""
+    parsed = urlparse(normalized)
+    path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/") or "/"
+    return parsed._replace(
+        scheme=parsed.scheme.casefold(),
+        netloc=parsed.netloc.casefold(),
+        path=path,
+    ).geturl()
+
+
 def hostname(value: str) -> str:
     return (urlparse(value).hostname or "").casefold().removeprefix("www.")
 
@@ -220,4 +244,3 @@ def attach_page(item: dict[str, Any], *, timeout: int = 15) -> dict[str, Any]:
         value.setdefault("page_excerpt", "")
         value.setdefault("content", "")
     return value
-

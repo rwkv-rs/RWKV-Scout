@@ -92,14 +92,22 @@ def _arxiv(query: str, limit: int) -> list[dict]:
             (node.findtext(f"{ATOM_NS}name") or "").strip()
             for node in entry.findall(f"{ATOM_NS}author")
         ]
+        identifier = link or (entry.findtext(f"{ATOM_NS}id") or "")
+        version_match = re.search(
+            r"arxiv\.org/(?:abs|pdf)/[0-9]+\.[0-9]+(v[0-9]+)",
+            identifier,
+            flags=re.IGNORECASE,
+        )
         records.append(
             {
                 "title": " ".join((entry.findtext(f"{ATOM_NS}title") or "").split()),
                 "authors": [name for name in authors if name],
                 "published": (entry.findtext(f"{ATOM_NS}published") or "")[:10],
+                "updated": (entry.findtext(f"{ATOM_NS}updated") or "")[:10],
+                "version": version_match.group(1) if version_match else "",
                 "abstract": " ".join((entry.findtext(f"{ATOM_NS}summary") or "").split()),
                 "doi": "",
-                "url": link or (entry.findtext(f"{ATOM_NS}id") or ""),
+                "url": identifier,
                 "citations": None,
                 "source": "arXiv",
             }
@@ -157,7 +165,16 @@ def _deduplicate(records: list[dict], limit: int) -> list[dict]:
                 current = unique[seen[key]]
                 priority = {"arXiv": 3, "OpenAlex": 2, "Crossref": 1}
                 if priority.get(record.get("source"), 0) > priority.get(current.get("source"), 0):
-                    for field in ("title", "authors", "published", "abstract", "url", "source"):
+                    for field in (
+                        "title",
+                        "authors",
+                        "published",
+                        "updated",
+                        "version",
+                        "abstract",
+                        "url",
+                        "source",
+                    ):
                         if record.get(field):
                             current[field] = record[field]
             continue

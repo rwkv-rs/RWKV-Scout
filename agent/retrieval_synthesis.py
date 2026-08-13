@@ -21,11 +21,13 @@ from config import (
 )
 from utils.chunker import get_token_count, semantic_chunk_text
 from utils.context_budget import evidence_tokens
+from utils.freshness import extract_explicit_date
 from utils.model_budget import bounded_completion_budget
 from utils.rwkv_prompt import (
     build_final_continuation_prompt,
     consume_final_prefill_boundary,
 )
+from agent.task_plan_contract import compact_task_plan, task_points
 
 
 def _clean_answer(value: Any) -> str:
@@ -58,6 +60,12 @@ def _source_body(item: dict[str, Any]) -> str:
 def _source_identity(item: dict[str, Any]) -> str:
     """Build a stable resource identity without judging source semantics."""
 
+    evidence_record_id = str(item.get("evidence_record_id") or "").strip()
+    if evidence_record_id:
+        # Two exact records on the same page may refer to different versions,
+        # dates, advisories or rows. URL-level merging would destroy the
+        # identity boundary the evidence extractor established.
+        return f"record:{evidence_record_id}"
     url = str(item.get("url") or "").strip().casefold()
     if url:
         url = re.sub(r"^https?://(?:www\.)?", "", url)
@@ -88,23 +96,46 @@ def _source_chunks(
     chunk_tokens: int = 1000,
     grounded_span_limit: int = 3,
 ) -> list[dict[str, Any]]:
-    """Put query-focused original spans before short model locators.
+    """Pack query-focused spans and exact locators without duplicate context.
 
-    Page extraction keeps ``selected_source_chunks`` as an attention routing
-    result and ``source_chunks`` as the complete provenance record.  Packing
-    model-grounded quotes first made a merely related short quote consume the
-    per-source chunk cap before the exact requested field later in the page.
-    Attention-ranked original spans are verbatim source text and therefore
-    receive first priority; grounded locators and neighbouring chunks remain
-    available as context.  Complete original chunks stay in persistent state
-    for later replans.
+    Page extraction keeps ``selected_source_chunks`` as an attention-routing
+    result and ``source_chunks`` as the complete provenance record. Exact
+    locators and selected source windows often overlap. Round 19 packed
+    both, creating hundreds of exact/containment duplicates and wasting RWKV's
+    attention budget.  The highest-priority focused span now wins: a later
+    full source chunk must not replace the exact window selected for RWKV.
+    Locator claim ids are merged into that span. This is text deduplication
+    only; no fact is accepted, rejected, rewritten, or selected as the answer.
     """
+
+    # These fields are computed by the page-evidence attention router.  They
+    # describe the literal record window; they do not decide whether a fact is
+    # true or current.  Keep them attached while spans are deduplicated so the
+    # final RWKV writer can receive the same minimal temporal context that the
+    # extractor used.  Previously `_source_chunks` rebuilt each row from only
+    # id/index/text and silently dropped this cross-layer state.
+    routing_metadata_fields = (
+        "record_date",
+        "record_date_precision",
+        "record_temporal_role",
+    )
+
+    def routing_metadata(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: row[key]
+            for key in routing_metadata_fields
+            if row.get(key) not in (None, "", [], {})
+        }
 
     grounded_rows = [
         {
             "chunk_id": "locator-" + str(row.get("chunk_id") or index + 1),
             "index": int(row.get("chunk_index") or index),
             "text": str(row.get("quote") or "").strip(),
+            "claim_ids": list(row.get("claim_ids") or []),
+            "packing_role": "grounded_locator",
+            "_packing_priority": 2,
+            **routing_metadata(row),
         }
         for index, row in enumerate(item.get("chunk_candidates") or [])
         if isinstance(row, dict)
@@ -113,7 +144,11 @@ def _source_chunks(
         and str(row.get("quote") or "").strip()
     ][: max(1, int(grounded_span_limit))]
     selected_rows = [
-        row
+        {
+            **row,
+            "packing_role": "selected_attention_window",
+            "_packing_priority": 3,
+        }
         for row in item.get("selected_source_chunks") or []
         if isinstance(row, dict) and str(row.get("text") or "").strip()
     ]
@@ -124,33 +159,47 @@ def _source_chunks(
             int(row.get("index") or 0),
         )
     )
-    preferred_rows = [*selected_rows, *grounded_rows]
     original_rows = [
-        row
+        {
+            **row,
+            "packing_role": "source_neighbour",
+            "_packing_priority": 1,
+        }
         for row in item.get("source_chunks") or []
         if isinstance(row, dict) and str(row.get("text") or "").strip()
     ]
+    focus_indexes = {
+        int(row.get("index") or 0)
+        for row in [*selected_rows, *grounded_rows]
+    }
+    neighbour_rows = [
+        row
+        for row in original_rows
+        if any(abs(int(row.get("index") or 0) - focus) <= 1 for focus in focus_indexes)
+    ]
+    preferred_rows = [*selected_rows, *grounded_rows, *neighbour_rows]
     # Once RWKV has located exact evidence, the final writer needs that span
     # and its immediate source neighbourhood, not an unrelated page preamble
     # or every historical table row from the same document.  The complete
     # source_chunks record remains in state for recovery and later replans.
-    routed_indices = {
-        int(row.get("index", row.get("chunk_index", 0)) or 0)
-        for row in [*grounded_rows, *selected_rows]
-    }
-    if routed_indices:
-        original_rows = [
-            row
-            for row in original_rows
-            if any(
-                abs(int(row.get("index", 0) or 0) - selected_index) <= 1
-                for selected_index in routed_indices
-            )
-        ]
     chunks: list[dict[str, Any]] = []
     seen: set[tuple[str, int, str]] = set()
-    seen_text: set[str] = set()
-    for index, row in enumerate([*preferred_rows, *original_rows]):
+
+    def normalized(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+    def merged_claim_ids(*values: Any) -> list[str]:
+        return list(
+            dict.fromkeys(
+                str(item).strip()
+                for value in values
+                for item in (value or [])
+                if str(item).strip()
+            )
+        )[:8]
+
+    routed_rows = preferred_rows if preferred_rows else original_rows
+    for index, row in enumerate(routed_rows):
         if not isinstance(row, dict):
             continue
         text = str(row.get("text") or "").strip()
@@ -159,11 +208,75 @@ def _source_chunks(
         chunk_id = str(row.get("chunk_id") or f"chunk-{index + 1}")
         chunk_index = int(row.get("index", index) or index)
         identity = (chunk_id, chunk_index, text)
-        normalized_text = re.sub(r"\s+", " ", text).strip().casefold()
-        if identity in seen or normalized_text in seen_text:
+        normalized_text = normalized(text)
+        if identity in seen:
             continue
         seen.add(identity)
-        seen_text.add(normalized_text)
+        # Keep the already-routed span when it contains a later row. Locator
+        # and task bindings are provenance, so merge them instead of retaining
+        # a second copy of the same source text.
+        contained_by = next(
+            (
+                existing
+                for existing in chunks
+                if len(normalized_text) >= 24
+                and int(existing.get("index") or 0) == chunk_index
+                and normalized_text in normalized(existing.get("text"))
+            ),
+            None,
+        )
+        if contained_by is not None:
+            contained_by["claim_ids"] = merged_claim_ids(
+                contained_by.get("claim_ids"), row.get("claim_ids")
+            )
+            locator_ids = list(contained_by.get("contained_locator_ids") or [])
+            if str(chunk_id).startswith("locator-") and chunk_id not in locator_ids:
+                locator_ids.append(chunk_id)
+            if locator_ids:
+                contained_by["contained_locator_ids"] = locator_ids
+            continue
+
+        contained_indexes = [
+            existing_index
+            for existing_index, existing in enumerate(chunks)
+            if len(normalized(existing.get("text"))) >= 24
+            and int(existing.get("index") or 0) == chunk_index
+            and normalized(existing.get("text")) in normalized_text
+        ]
+        row_priority = int(row.get("_packing_priority") or 0)
+        if contained_indexes:
+            strongest_index = max(
+                contained_indexes,
+                key=lambda existing_index: int(
+                    chunks[existing_index].get("_packing_priority") or 0
+                ),
+            )
+            strongest = chunks[strongest_index]
+            strongest_priority = int(strongest.get("_packing_priority") or 0)
+            if row_priority <= strongest_priority:
+                # A broad neighbour/full chunk arriving after a selected
+                # exact window used to erase that window here. Preserve the
+                # routing decision and merge provenance only.
+                strongest["claim_ids"] = merged_claim_ids(
+                    strongest.get("claim_ids"), row.get("claim_ids")
+                )
+                if str(chunk_id).startswith("locator-"):
+                    locator_ids = list(strongest.get("contained_locator_ids") or [])
+                    if chunk_id not in locator_ids:
+                        locator_ids.append(chunk_id)
+                    strongest["contained_locator_ids"] = locator_ids
+                continue
+
+        inherited_claim_ids: list[str] = []
+        inherited_locator_ids: list[str] = []
+        for existing_index in reversed(contained_indexes):
+            existing = chunks.pop(existing_index)
+            inherited_claim_ids = merged_claim_ids(
+                inherited_claim_ids, existing.get("claim_ids")
+            )
+            inherited_locator_ids.extend(existing.get("contained_locator_ids") or [])
+            if str(existing.get("chunk_id") or "").startswith("locator-"):
+                inherited_locator_ids.append(str(existing.get("chunk_id") or ""))
         parts = (
             semantic_chunk_text(
                 text,
@@ -174,8 +287,7 @@ def _source_chunks(
             else [text]
         )
         for part_index, part in enumerate(parts, start=1):
-            chunks.append(
-                {
+            packed_row = {
                     "chunk_id": (
                         chunk_id
                         if len(parts) == 1
@@ -183,9 +295,31 @@ def _source_chunks(
                     ),
                     "index": chunk_index,
                     "text": part,
+                    "claim_ids": merged_claim_ids(
+                        row.get("claim_ids"), inherited_claim_ids
+                    ),
+                    "packing_role": str(row.get("packing_role") or "source_chunk"),
+                    "_packing_priority": row_priority,
+                    "_routing_order": index,
+                    "_part_index": part_index,
+                    **routing_metadata(row),
                 }
-            )
+            locator_ids = list(dict.fromkeys(inherited_locator_ids))
+            if locator_ids:
+                packed_row["contained_locator_ids"] = locator_ids
+            chunks.append(packed_row)
     if chunks:
+        # A single very long source chunk must not consume every per-source
+        # slot before another neighbouring record receives one. Interleave
+        # semantic parts within the same routing tier while preserving focused
+        # windows ahead of locators and broad neighbours.
+        chunks.sort(
+            key=lambda row: (
+                -int(row.get("_packing_priority") or 0),
+                int(row.get("_part_index") or 1),
+                int(row.get("_routing_order") or 0),
+            )
+        )
         return chunks
 
     body = _source_body(item)
@@ -225,12 +359,15 @@ def _claim_projection(value: Any) -> list[dict[str, Any]]:
         projected.append(
             {
                 "claim_id": str(row.get("claim_id") or row.get("point_id") or ""),
-                "task": str(row.get("task") or row.get("objective") or "")[:600],
-                "evidence_needed": [
+                "question": str(
+                    row.get("question") or row.get("task") or row.get("objective") or ""
+                )[:600],
+                "fields": [
                     str(item)[:400]
-                    for item in row.get("evidence_needed") or []
+                    for item in row.get("fields") or row.get("evidence_needed") or []
                     if str(item).strip()
                 ][:8],
+                "time_scope": str(row.get("time_scope") or "unspecified"),
                 "retrieval_state": str(row.get("retrieval_state") or ""),
                 "retrieved_source_count": len(spans),
                 "grounded_source_count": grounded_source_count,
@@ -244,7 +381,7 @@ def _claim_projection(value: Any) -> list[dict[str, Any]]:
         projected.append(
             {
                 "claim_id": "UNASSIGNED",
-                "task": (
+                "question": (
                     "Retrieved material not bound to a specific atomic point by RWKV; "
                     "inspect it directly and do not assume it covers every point."
                 ),
@@ -277,11 +414,89 @@ def _claim_grounded_source_items(
 
     if not isinstance(value, dict):
         return []
-    projected: list[dict[str, Any]] = []
+    projected_by_claim: list[list[dict[str, Any]]] = []
     for claim in value.get("claims") or []:
         if not isinstance(claim, dict):
             continue
         claim_id = str(claim.get("claim_id") or claim.get("point_id") or "").strip()
+        claim_items: list[dict[str, Any]] = []
+        evidence_records = [
+            row
+            for row in claim.get("evidence_records") or []
+            if isinstance(row, dict)
+            and str(row.get("quote") or "").strip()
+        ]
+        if evidence_records:
+            for record in evidence_records[: max(2, int(grounded_span_limit) * 3)]:
+                quote = str(record.get("quote") or "").strip()
+                support_state = str(record.get("support_state") or "")
+                context_role = (
+                    "exact_evidence_record"
+                    if support_state in {
+                        "rwkv_exact_requested_record",
+                        "rwkv_supported_exact_span",
+                    }
+                    else "candidate_evidence_record"
+                )
+                item: dict[str, Any] = {
+                    "evidence_record_id": str(
+                        record.get("evidence_record_id") or ""
+                    ),
+                    "evidence_kind": "evidence_record",
+                    "context_role": context_role,
+                    "title": str(
+                        record.get("title")
+                        or record.get("url")
+                        or "Grounded evidence record"
+                    ),
+                    "url": str(record.get("url") or ""),
+                    "claim_ids": [claim_id] if claim_id else [],
+                    "content": quote,
+                    "record_metadata": {
+                        "task_record_id": claim_id,
+                        "subject_key": str(record.get("subject_key") or ""),
+                        "record_key": str(record.get("record_key") or ""),
+                        "field_keys": list(record.get("field_keys") or [])[:16],
+                        "support_state": str(record.get("support_state") or ""),
+                        "record_match": str(record.get("record_match") or ""),
+                        "field_contract_valid": bool(
+                            record.get("field_contract_valid", True)
+                        ),
+                        "binding_origin": str(record.get("binding_origin") or ""),
+                    },
+                    "chunk_candidates": [
+                        {
+                            "supported": True,
+                            "source_grounded": True,
+                            "chunk_id": str(record.get("chunk_id") or ""),
+                            "chunk_index": int(record.get("chunk_index") or 0),
+                            "claim_ids": [claim_id] if claim_id else [],
+                            "field_keys": list(record.get("field_keys") or [])[:16],
+                            "subject_key": str(record.get("subject_key") or ""),
+                            "record_key": str(record.get("record_key") or ""),
+                            "quote": quote,
+                            "source_locator": dict(record.get("source_locator") or {}),
+                            "grounding_basis": str(record.get("grounding_basis") or ""),
+                        }
+                    ],
+                }
+                for key in (
+                    "source",
+                    "provider",
+                    "source_type",
+                    "published",
+                    "published_at",
+                    "updated",
+                    "updated_at",
+                    "date",
+                    "retrieved_at",
+                    "freshness",
+                ):
+                    if record.get(key) not in (None, "", [], {}):
+                        item[key] = record[key]
+                claim_items.append(item)
+            projected_by_claim.append(claim_items)
+            continue
         for source in claim.get("sources") or claim.get("evidence") or []:
             if not isinstance(source, dict):
                 continue
@@ -296,6 +511,7 @@ def _claim_grounded_source_items(
                 "title": str(source.get("title") or source.get("url") or "Grounded source"),
                 "url": str(source.get("url") or ""),
                 "claim_ids": [claim_id] if claim_id else [],
+                "context_role": "legacy_bound_span",
                 "content": "\n\n".join(str(row.get("text") or "") for row in grounded),
                 "source_chunks": [
                     dict(row)
@@ -334,8 +550,50 @@ def _claim_grounded_source_items(
             ):
                 if source.get(key) not in (None, "", [], {}):
                     item[key] = source[key]
-            projected.append(item)
+            claim_items.append(item)
+        if claim_items:
+            projected_by_claim.append(claim_items)
+    projected: list[dict[str, Any]] = []
+    cursor = 0
+    while any(cursor < len(items) for items in projected_by_claim):
+        for items in projected_by_claim:
+            if cursor < len(items):
+                projected.append(items[cursor])
+        cursor += 1
     return projected
+
+
+def _unbound_fallback_items(
+    items: Iterable[dict[str, Any]],
+    *,
+    excluded_urls: set[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Keep a small isolated escape hatch when extraction missed a page.
+
+    This does not bind a source to a task record and does not decide that the
+    page is relevant. It only preserves bounded fetched text for RWKV to judge
+    instead of turning an extractor false-negative into an empty answer.
+    """
+
+    output: list[dict[str, Any]] = []
+    for raw in items:
+        item = dict(raw)
+        if not _source_body(item):
+            continue
+        url_identity = re.sub(
+            r"^https?://(?:www\.)?",
+            "",
+            str(item.get("url") or "").strip().casefold(),
+        ).split("#", 1)[0].split("?", 1)[0].rstrip("/")
+        if url_identity and url_identity in excluded_urls:
+            continue
+        item["claim_ids"] = []
+        item["context_role"] = "unbound_source_fallback"
+        output.append(item)
+        if len(output) >= max(0, int(limit)):
+            break
+    return output
 
 
 def _merge_source_records(items: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
@@ -381,14 +639,271 @@ def _citation_refs(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
     for index, item in enumerate(items, start=1):
         url = str(item.get("url") or "").strip()
+        chunks = [
+            row
+            for row in item.get("packed_chunks") or []
+            if isinstance(row, dict) and str(row.get("text") or "").strip()
+        ]
         refs.append(
             {
                 "ref_id": f"S{index}",
                 "title": str(item.get("title") or url or f"Source {index}"),
                 "url": url,
+                "quote": str(chunks[0].get("text") or "")[:1600] if chunks else "",
+                "chunk_ids": [str(row.get("chunk_id") or "") for row in chunks],
+                "published": item.get("published") or item.get("published_at"),
+                "updated": item.get("updated") or item.get("updated_at"),
+                "authority": item.get("authority") or {},
+                "evidence_record_id": str(
+                    item.get("evidence_record_id") or ""
+                ),
+                "context_role": str(item.get("context_role") or ""),
+                "record_metadata": dict(item.get("record_metadata") or {}),
+                "task_point_ids": [
+                    str(value)
+                    for value in item.get("claim_ids") or []
+                    if str(value).strip()
+                ],
             }
         )
     return refs
+
+
+_OBSERVED_DATE_RE = re.compile(
+    r"\b(?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\b|"
+    r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\s+\d{1,2}(?:st|nd|rd|th)?(?:,)?\s+(?:19|20)\d{2}\b|"
+    r"(?:19|20)\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日",
+    re.IGNORECASE,
+)
+_OBSERVED_VERSION_RE = re.compile(
+    r"(?<![\d-])(?:v(?:ersion)?\s*)?\d+\.\d+(?:\.\d+)?"
+    r"(?:[-+._][A-Za-z0-9.-]+)?\b",
+    re.IGNORECASE,
+)
+
+
+def _observed_record_markers(text: Any) -> dict[str, list[str]]:
+    """Expose literal marker order without selecting a current/true record."""
+
+    value = str(text or "")
+    return {
+        "dates": list(dict.fromkeys(match.group(0) for match in _OBSERVED_DATE_RE.finditer(value)))[:12],
+        "versions": list(dict.fromkeys(match.group(0) for match in _OBSERVED_VERSION_RE.finditer(value)))[:12],
+    }
+
+
+_TEMPORAL_IDENTITY_FIELD_RE = re.compile(
+    r"(?:date|time|month|year|version|release|published|updated|tag|build|"
+    r"patch[_ -]?level|版本|日期|时间|月份|年份|补丁|构建号)",
+    re.IGNORECASE,
+)
+
+
+def _task_plan_requests_temporal_identity(task_plan: dict[str, Any] | None) -> bool:
+    """Whether RWKV explicitly requested a dated or versioned record field.
+
+    ``time_scope=current`` alone is intentionally insufficient. Current
+    documentation and direct-page procedure tasks also receive that scope,
+    while dates in their navigation bars are unrelated to the requested
+    command or procedure. This controls metadata display only; it neither
+    ranks facts nor decides an answer.
+    """
+
+    for point in task_points(task_plan):
+        fields = " ".join(str(value) for value in point.get("fields") or [])
+        if _TEMPORAL_IDENTITY_FIELD_RE.search(fields):
+            return True
+    return False
+
+
+def _query_url_identities(query: str) -> set[str]:
+    """Return stable identities for URLs explicitly supplied by the user."""
+
+    identities: set[str] = set()
+    for value in re.findall(r"https?://[^\s<>\]\[()]+", str(query or ""), re.IGNORECASE):
+        identity = _source_identity({"url": value.rstrip(".,;:!?，。；：！？")})
+        if identity:
+            identities.add(identity)
+    return identities
+
+
+def _source_selection_metadata(
+    item: dict[str, Any],
+    *,
+    query_url_identities: set[str],
+    prefer_recent: bool,
+    original_index: int,
+) -> dict[str, Any]:
+    """Describe deterministic packing priority without judging source truth."""
+
+    identity = _source_identity(item)
+    direct = bool(identity and identity in query_url_identities)
+    origin = str(item.get("evidence_origin") or "").casefold()
+    kind = str(item.get("evidence_kind") or "").casefold()
+    content_type = str(item.get("content_type") or "").casefold()
+    structured = bool(
+        origin == "structured_api_record"
+        or kind == "structured_record"
+        or content_type in {"release", "weather", "paper"}
+    )
+    authority = item.get("authority") if isinstance(item.get("authority"), dict) else {}
+    authority_rank = int(authority.get("rank") or 0)
+    if str(item.get("source_kind") or "").casefold() == "official":
+        authority_rank = max(authority_rank, 3)
+    grounded = _has_grounded_locator(item)
+    source_date = ""
+    source_date_origin = ""
+    freshness = item.get("freshness") if isinstance(item.get("freshness"), dict) else {}
+    for value in (
+        freshness.get("source_date"),
+        item.get("published"),
+        item.get("published_at"),
+        item.get("updated"),
+        item.get("updated_at"),
+        item.get("date"),
+    ):
+        source_date = extract_explicit_date(value)
+        if source_date:
+            source_date_origin = "source_metadata"
+            break
+    if not source_date and kind == "evidence_record":
+        # EvidenceRecord content is already an exact grounded source quote.
+        # Expose its first literal date for attention order so paired
+        # version/date rows do not arrive at RWKV in arbitrary lexical order.
+        # This metadata never asserts currentness or correctness.
+        source_date = extract_explicit_date(_source_body(item))
+        if source_date:
+            source_date_origin = "grounded_record_quote"
+    date_rank = int(source_date.replace("-", "")) if prefer_recent and source_date else 0
+    return {
+        "direct_user_url": direct,
+        "structured_record": structured,
+        "authority_rank": authority_rank,
+        "grounded_locator": grounded,
+        "source_date": source_date or None,
+        "source_date_origin": source_date_origin or None,
+        "date_priority_active": prefer_recent,
+        "original_index": original_index,
+        "sort_key": (
+            int(direct),
+            int(structured),
+            authority_rank,
+            int(grounded),
+            date_rank,
+            -original_index,
+        ),
+    }
+
+
+def _order_sources_for_context(
+    items: Iterable[dict[str, Any]],
+    query: str,
+    task_plan: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Order useful source records for the bounded final context.
+
+    This is attention routing, not an answer gate: no source is declared true,
+    false, supported, or unsupported.  Existing structured provenance,
+    authority metadata, exact locators, and explicit dates only decide which
+    records reach RWKV first when the context has a source limit.
+    """
+
+    query_urls = _query_url_identities(query)
+    prefer_recent = bool(
+        re.search(
+            r"(?:\bcurrent\b|\blatest\b|\bnewest\b|\brecent\b|\btoday\b|"
+            r"当前|最新|目前|现行|截至)",
+            str(query or ""),
+            flags=re.IGNORECASE,
+        )
+    )
+    ranked: list[dict[str, Any]] = []
+    for index, raw in enumerate(items):
+        item = dict(raw)
+        metadata = _source_selection_metadata(
+            item,
+            query_url_identities=query_urls,
+            prefer_recent=prefer_recent,
+            original_index=index,
+        )
+        item["context_selection"] = {
+            key: value for key, value in metadata.items() if key != "sort_key"
+        }
+        ranked.append(item)
+    ranked.sort(
+        key=lambda item: _source_selection_metadata(
+            item,
+            query_url_identities=query_urls,
+            prefer_recent=prefer_recent,
+            original_index=int(
+                (item.get("context_selection") or {}).get("original_index") or 0
+            ),
+        )["sort_key"],
+        reverse=True,
+    )
+    point_ids = [
+        str(point.get("id") or "").strip()
+        for point in task_points(task_plan)
+        if str(point.get("id") or "").strip()
+    ]
+    if not point_ids:
+        return ranked
+
+    # Attention projection only: reserve up to two already-ranked records for
+    # every RWKV factual point before filling the remaining slots.  No source is
+    # declared true or sufficient and no claim binding is invented here.
+    ordered: list[dict[str, Any]] = []
+    selected: set[int] = set()
+    per_point_count = {point_id: 0 for point_id in point_ids}
+
+    def add(item: dict[str, Any], role: str = "") -> None:
+        marker = id(item)
+        claim_ids = [
+            str(value).strip()
+            for value in item.get("claim_ids") or []
+            if str(value).strip() in per_point_count
+        ]
+        if marker not in selected:
+            selected.add(marker)
+            ordered.append(item)
+            for claim_id in claim_ids:
+                per_point_count[claim_id] += 1
+        if role:
+            metadata = item.setdefault("context_selection", {})
+            roles = list(metadata.get("task_point_roles") or [])
+            if role not in roles:
+                roles.append(role)
+            metadata["task_point_roles"] = roles
+
+    for item in ranked:
+        if bool((item.get("context_selection") or {}).get("direct_user_url")):
+            add(item, "direct_user_url")
+
+    for ordinal, label in ((1, "primary"), (2, "secondary")):
+        for point_id in point_ids:
+            if per_point_count[point_id] >= ordinal:
+                continue
+            candidate = next(
+                (
+                    item
+                    for item in ranked
+                    if id(item) not in selected
+                    and point_id
+                    in {
+                        str(value).strip()
+                        for value in item.get("claim_ids") or []
+                    }
+                ),
+                None,
+            )
+            if candidate is not None:
+                add(candidate, f"{point_id}:{label}")
+
+    for item in ranked:
+        add(item)
+    return ordered
 
 
 def build_evidence_context(
@@ -418,6 +933,27 @@ def build_evidence_context(
     )
     source_limit = max(1, min(source_limit, 24))
     ledger_value = data.get("claim_ledger") or (constraints or {}).get("claim_ledger")
+    task_plan = (constraints or {}).get("task_plan")
+    if not task_points(task_plan) and isinstance(ledger_value, dict):
+        task_plan = {
+            "goal": query,
+            "atomic_points": [
+                {
+                    "id": row.get("claim_id") or row.get("point_id"),
+                    "question": row.get("question") or row.get("task") or row.get("objective"),
+                    "subject": row.get("subject") or "",
+                    "relation": row.get("relation") or "",
+                    "fields": row.get("fields") or row.get("evidence_needed") or [],
+                    "time_scope": row.get("time_scope") or "unspecified",
+                    "set_semantics": row.get("set_semantics") or "single",
+                    "premise_requires_verification": bool(
+                        row.get("premise_requires_verification")
+                    ),
+                }
+                for row in ledger_value.get("claims") or []
+                if isinstance(row, dict)
+            ],
+        }
     grounded_span_limit = max(
         1,
         min(
@@ -425,111 +961,58 @@ def build_evidence_context(
             int(DATA_PIPELINE.get("final_context_max_grounded_spans_per_source", 3) or 3),
         ),
     )
-    raw_items = [
-        *_claim_grounded_source_items(
-            ledger_value,
-            grounded_span_limit=grounded_span_limit,
-        ),
-        *[item for item in data.get("results") or [] if isinstance(item, dict)],
+    # RWKV-authored exact records are the primary semantic context. Raw fetched
+    # pages remain available only through a small, explicitly unbound fallback
+    # lane so an extraction miss does not become an empty answer.
+    fetched_items = [
+        item for item in data.get("results") or [] if isinstance(item, dict)
     ]
-    merged_items, duplicate_source_count = _merge_source_records(raw_items)
-    unique_items = [item for item in merged_items if _source_body(item)]
-
-    # Preserve the retrieval ranking while reserving one slot for every
-    # explicitly bound RWKV task point. This prevents one high-volume aspect
-    # from evicting all evidence for another aspect of a mixed question.
-    selected: list[dict[str, Any]] = []
-    selected_ids: set[str] = set()
-
-    def select(item: dict[str, Any]) -> None:
-        identity = _source_identity(item)
-        if len(selected) >= source_limit or (identity and identity in selected_ids):
-            return
-        selected.append(item)
-        if identity:
-            selected_ids.add(identity)
-
-    # A completed RWKV cross-validation may bind supported task points to
-    # concrete [S#] sources. Preserve that model-owned choice as attention
-    # priority for the final writer; it is not a controller-side relevance
-    # judgement and every other source remains eligible for budget backfill.
-    validated_urls = {
-        str(value).strip().casefold().rstrip("/")
-        for value in (
-            (constraints or {}).get("validated_source_urls")
-            or data.get("validated_source_urls")
-            or []
-        )
-        if str(value).strip()
+    record_items = _claim_grounded_source_items(
+        ledger_value,
+        grounded_span_limit=grounded_span_limit,
+    )
+    merged_records, duplicate_record_count = _merge_source_records(record_items)
+    ordered_records = _order_sources_for_context(
+        [item for item in merged_records if _source_body(item)],
+        query,
+        task_plan,
+    )
+    record_urls = {
+        re.sub(
+            r"^https?://(?:www\.)?",
+            "",
+            str(item.get("url") or "").strip().casefold(),
+        ).split("#", 1)[0].split("?", 1)[0].rstrip("/")
+        for item in ordered_records
+        if str(item.get("url") or "").strip()
     }
-    # Reserve one exact model-grounded source for each claim before any
-    # high-volume claim or validated set can consume every context slot.
-    if isinstance(ledger_value, dict):
-        claim_buckets: list[list[dict[str, Any]]] = []
-        for claim in ledger_value.get("claims") or []:
-            if not isinstance(claim, dict):
-                continue
-            claim_id = str(claim.get("claim_id") or claim.get("point_id") or "")
-            bucket = [
-                item
-                for item in unique_items
-                if claim_id
-                and claim_id
-                in {
-                    str(value)
-                    for value in item.get("claim_ids") or []
-                    if str(value).strip()
-                }
-                and _has_grounded_locator(item)
-            ]
-            claim_buckets.append(bucket)
-        for bucket in claim_buckets:
-            if bucket:
-                select(bucket[0])
+    configured_fallback_limit = int(
+        DATA_PIPELINE.get("final_context_unbound_fallback_sources", 2) or 2
+    )
+    fallback_limit = (
+        configured_fallback_limit
+        if ordered_records
+        else max(configured_fallback_limit, min(4, source_limit))
+    )
+    fallback_candidates = [
+        {**dict(item), "claim_ids": []}
+        for item in fetched_items
+    ]
+    fallback_items = _unbound_fallback_items(
+        _order_sources_for_context(fallback_candidates, query, task_plan),
+        excluded_urls=record_urls,
+        # Scan beyond the visible limit so duplicate URLs can be merged and
+        # still backfilled with distinct fallback sources.
+        limit=max(fallback_limit, fallback_limit * 3),
+    )
+    merged_fallback, duplicate_fallback_count = _merge_source_records(
+        fallback_items
+    )
+    merged_fallback = merged_fallback[:fallback_limit]
+    unique_items = [*ordered_records, *merged_fallback]
+    duplicate_source_count = duplicate_record_count + duplicate_fallback_count
 
-        for item in unique_items:
-            if str(item.get("url") or "").strip().casefold().rstrip("/") in validated_urls:
-                select(item)
-
-        cursor = 1
-        while len(selected) < source_limit and any(cursor < len(bucket) for bucket in claim_buckets):
-            for bucket in claim_buckets:
-                if cursor < len(bucket):
-                    select(bucket[cursor])
-            cursor += 1
-
-        # A claim without an exact grounded locator still receives one generic
-        # bound source when space remains, preserving recall without declaring
-        # that source supportive.
-        for claim in ledger_value.get("claims") or []:
-            if not isinstance(claim, dict):
-                continue
-            claim_id = str(claim.get("claim_id") or claim.get("point_id") or "")
-            bound = next(
-                (
-                    item
-                    for item in unique_items
-                    if claim_id
-                    and claim_id
-                    in {
-                        str(value)
-                        for value in item.get("claim_ids") or []
-                        if str(value).strip()
-                    }
-                ),
-                None,
-            )
-            if bound is not None:
-                select(bound)
-    else:
-        for item in unique_items:
-            if str(item.get("url") or "").strip().casefold().rstrip("/") in validated_urls:
-                select(item)
-    for item in unique_items:
-        if _has_grounded_locator(item):
-            select(item)
-    for item in unique_items:
-        select(item)
+    selected = unique_items[:source_limit]
 
     default_budget = evidence_tokens(get_llm_context_length())
     budget = (
@@ -537,27 +1020,24 @@ def build_evidence_context(
         if token_budget is None
         else max(128, min(int(token_budget), default_budget))
     )
-    claims = _claim_projection(ledger_value)
+    factual_plan = compact_task_plan(task_plan)
+    factual_points = [
+        point
+        for point in factual_plan.get("atomic_points") or []
+        if isinstance(point, dict)
+    ]
+    show_temporal_routing = _task_plan_requests_temporal_identity(task_plan)
     calculations = [
         item for item in data.get("calculation_results") or [] if isinstance(item, dict)
     ]
-    freshness_policy = (constraints or {}).get("freshness_policy") or data.get(
-        "freshness_policy"
-    )
-    cross_validation_review = (constraints or {}).get("last_cross_validation") or data.get(
-        "last_cross_validation"
-    )
+    freshness_policy = (constraints or {}).get("freshness_policy")
     static_preview: list[str] = []
-    if claims:
-        static_preview.append(json.dumps(claims, ensure_ascii=False, indent=2))
+    if factual_points:
+        static_preview.append(json.dumps(factual_points, ensure_ascii=False, indent=2))
     if calculations:
         static_preview.append(json.dumps(calculations, ensure_ascii=False, indent=2))
     if isinstance(freshness_policy, dict) and freshness_policy:
         static_preview.append(json.dumps(freshness_policy, ensure_ascii=False, indent=2))
-    if isinstance(cross_validation_review, dict) and cross_validation_review:
-        static_preview.append(
-            json.dumps(cross_validation_review, ensure_ascii=False, indent=2)
-        )
     for item in selected:
         locator_preview = (
             ""
@@ -624,12 +1104,41 @@ def build_evidence_context(
         ref_index = len(projected_sources) + 1
         title = str(item.get("title") or item.get("url") or f"Source {ref_index}")
         url = str(item.get("url") or "")
-        lines = [f"[S{ref_index}] {title}", f"URL: {url}"]
-        claim_ids = [
-            str(value) for value in item.get("claim_ids") or [] if str(value).strip()
-        ]
-        if claim_ids:
-            lines.append(f"RWKV task-point bindings: {', '.join(claim_ids)}")
+        context_role = str(item.get("context_role") or "")
+        if context_role in {"exact_evidence_record", "candidate_evidence_record"}:
+            role_label = (
+                "RWKV-EXACT EVIDENCE RECORD"
+                if context_role == "exact_evidence_record"
+                else "RWKV-CANDIDATE RECORD"
+            )
+            lines = [
+                f"[S{ref_index}] {role_label}: {title}",
+                f"URL: {url}",
+            ]
+            record_metadata = dict(item.get("record_metadata") or {})
+            lines.append(
+                "Record grouping metadata (RWKV routing labels, not extra facts): "
+                + json.dumps(
+                    record_metadata,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        elif context_role == "unbound_source_fallback":
+            lines = [
+                f"[S{ref_index}] UNBOUND SOURCE EXCERPT: {title}",
+                f"URL: {url}",
+                (
+                    "Binding note: no exact span from this source was bound to a task record; "
+                    "RWKV must inspect the excerpt directly and must not combine it with another "
+                    "record merely because the topic is similar."
+                ),
+            ]
+        else:
+            lines = [
+                f"[S{ref_index}] Source label (routing metadata only): {title}",
+                f"URL: {url}",
+            ]
         for label, value in (
             ("Published", item.get("published") or item.get("published_at")),
             ("Updated", item.get("updated") or item.get("updated_at")),
@@ -643,7 +1152,33 @@ def build_evidence_context(
                 "Freshness metadata: "
                 + json.dumps(item["freshness"], ensure_ascii=False, separators=(",", ":"))
             )
+        claim_ids = [str(value) for value in item.get("claim_ids") or [] if str(value).strip()]
+        if claim_ids:
+            lines.append("RWKV task-point bindings: " + ", ".join(claim_ids))
         for chunk in chunks:
+            temporal_role = str(chunk.get("record_temporal_role") or "").strip()
+            record_date = str(chunk.get("record_date") or "").strip()
+            if show_temporal_routing and (temporal_role or record_date):
+                lines.append(
+                    "Same-page temporal routing metadata "
+                    "(literal ordering only; RWKV must judge identity, stability and currentness): "
+                    + json.dumps(
+                        {
+                            "record_date": record_date or None,
+                            "date_precision": chunk.get("record_date_precision") or None,
+                            "role": temporal_role or None,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+            observed = _observed_record_markers(chunk.get("text"))
+            if observed["dates"] or observed["versions"]:
+                lines.append(
+                    "Observed literal record markers in occurrence order "
+                    "(routing metadata only; no truth/currentness judgment): "
+                    + json.dumps(observed, ensure_ascii=False, separators=(",", ":"))
+                )
             lines.append(f"<{chunk['chunk_id']}>\n{chunk['text']}")
         source_locators = (
             ""
@@ -667,10 +1202,10 @@ def build_evidence_context(
         )
 
     sections: list[str] = []
-    if claims:
+    if factual_points:
         sections.append(
-            "RESEARCH CHECKLIST (progress information for RWKV, not an answer gate):\n"
-            + json.dumps(claims, ensure_ascii=False, indent=2)
+            "RWKV FACTUAL PLAN (user-requested records; not a completion gate):\n"
+            + json.dumps(factual_points, ensure_ascii=False, indent=2)
         )
     if calculations:
         sections.append(
@@ -680,11 +1215,6 @@ def build_evidence_context(
         sections.append(
             "QUESTION TIME/FRESHNESS POLICY (metadata for RWKV, not an answer gate):\n"
             + json.dumps(freshness_policy, ensure_ascii=False, indent=2)
-        )
-    if isinstance(cross_validation_review, dict) and cross_validation_review:
-        sections.append(
-            "LATEST RWKV CROSS-VALIDATION REVIEW (model-authored coverage notes, not an answer gate):\n"
-            + json.dumps(cross_validation_review, ensure_ascii=False, indent=2)
         )
     sections.append(
         "RETRIEVED SOURCES:\n" + ("\n\n".join(blocks) if blocks else "No source text was retrieved.")
@@ -711,7 +1241,36 @@ def build_evidence_context(
             "source_count": len(projected_sources),
             "chunk_count": sum(len(chunks) for chunks in packed),
             "duplicate_source_count": duplicate_source_count,
+            "bound_evidence_record_count": sum(
+                str(item.get("context_role") or "")
+                == "exact_evidence_record"
+                for item in projected_sources
+            ),
+            "candidate_evidence_record_count": sum(
+                str(item.get("context_role") or "")
+                == "candidate_evidence_record"
+                for item in projected_sources
+            ),
+            "unbound_fallback_source_count": sum(
+                str(item.get("context_role") or "")
+                == "unbound_source_fallback"
+                for item in projected_sources
+            ),
+            "unbound_fallback_source_limit": fallback_limit,
             "calculation_count": len(calculations),
+            "factual_point_count": len(factual_points),
+            "factual_points_with_selected_sources": sum(
+                any(
+                    str(point.get("id") or "")
+                    in {
+                        str(value).strip()
+                        for value in source.get("claim_ids") or []
+                    }
+                    for source in projected_sources
+                )
+                for point in factual_points
+                if str(point.get("id") or "").strip()
+            ),
             "context_tokens": get_token_count(text),
             "evidence_budget_tokens": budget,
             "source_chunk_budget_tokens": chunk_budget,
@@ -719,10 +1278,9 @@ def build_evidence_context(
             "configured_source_limit": source_limit,
             "max_chunks_per_source": effective_chunk_limit,
             "max_grounded_spans_per_source": grounded_span_limit,
-            "cross_validation_review_included": bool(
-                isinstance(cross_validation_review, dict) and cross_validation_review
-            ),
+            "cross_validation_review_included": False,
             "source_locator_char_limit": max(0, int(source_locator_char_limit or 0)),
+            "exact_or_containment_dedup_active": True,
         },
     }
 
@@ -742,24 +1300,26 @@ def _writer_prompt(
         "If some information is missing, answer the supported parts and clearly state what remains uncertain. "
         "For commands, dates, versions, identifiers, names, statuses, quoted output, and examples, use only "
         "values explicitly present in the material; do not substitute a plausible value or invent an example. "
+        "Source labels, page titles, provider names and URLs identify records but are not factual evidence; bind "
+        "the answer to the original text inside each <chunk-id> block. "
+        "Treat each RWKV-EXACT EVIDENCE RECORD and RWKV-CANDIDATE RECORD as an independent subject/version/time record. "
+        "A candidate is relevant source text whose exact current/latest/requested identity was not established by the extractor; compare its literal identity and date yourself rather than treating it as already current. Do not take a field "
+        "from one record and attach it to another record unless the source text explicitly establishes that identity. "
+        "UNBOUND SOURCE EXCERPT blocks are fallback material, not pre-established support. "
         "For a current/latest request, do not present a future-dated or explicitly historical record as current; "
         "state the time conflict or uncertainty instead. For a repository-specific request, bind claims to the "
         "exact owner/repository rather than another project on the same host. Satisfy every requested field when "
         "the material supports it, and explicitly identify any requested field that remains unsupported. "
-        "Use one clean answer path and keep it concise. Do not restart, repeat, enumerate duplicate support, "
+        "Answer only the fields the user requested. Do not append adjacent limitations, examples, commands, or "
+        "background merely because they occur near the supporting span. Use one clean answer path and keep it concise. "
+        "Do not restart, repeat, enumerate duplicate support, "
         "or re-check fields already answered. If the answer starts to loop, stop immediately and return the "
         "best answer already written. Do not describe controller rules or the research process. Use [S1], [S2], ... "
         "when citing a retrieved source.\n\n"
         + runtime_section
         + f"USER QUESTION:\n{query}\n\n"
         + f"RESEARCH MATERIAL:\n{context['text']}\n\n"
-        + "FINAL EVIDENCE CHECK:\n"
-        + "A requested field marked missing by the latest RWKV cross-validation remains unsupported "
-        + "in the final answer; do not fill it from another source snippet or from model memory. "
-        + "For a current/latest field, an explicitly historical record cannot resolve a missing current value. "
-        + "If no source text was retrieved, do not supply names, dates, versions, identifiers, statuses, or themes "
-        + "from memory. This does not prevent an answer: answer supported fields and clearly state which fields "
-        + "could not be verified.\n\n"
+        + f"USER QUESTION:\n{query}\n\n"
         + "Write the final answer now."
     )
 

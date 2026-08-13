@@ -1,14 +1,14 @@
 """RWKV-native agent-loop planner.
 
-The local RWKV service is trained around the same transcript used by the
-rwkv-skills function-calling runner.  Keep the wire format explicit:
+The local RWKV service uses the online G1i function-calling transcript. Keep
+the wire format explicit:
 
-    ### User
-    <instructions, task, or observation>
-    ### Assistant
-    **Tool Call:**
-    ```json
+    System: Tools: [...]
+    Return only a JSON function call.
+    User: <instructions, task, or observation>
+    Assistant: ```json
     {"name":"tool","arguments":{...}}
+    User: Function output: <tool result>
 
 The planner owns the conversation history.  The application only executes
 the name and arguments returned by the model; it does not manufacture a
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable
 
 from clients.llm_client import LLMClient
 from config import (
@@ -44,7 +44,13 @@ from utils.rwkv_prompt import (
     assistant_json_prefix,
     render_tool_transcript,
 )
+from runtime.transcript import render_rwkv_transcript
 from agent.tool_protocol import canonicalize_tool_call
+from agent.task_plan_contract import (
+    compact_task_plan,
+    normalize_task_plan,
+    point_question,
+)
 
 
 def _same_nonempty_route_target(left: str, right: str) -> bool:
@@ -195,18 +201,6 @@ def _canonicalize_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return canonicalize_tool_call(payload)
 
 
-def _merge_unique(existing: list[Any], additions: list[Any]) -> list[Any]:
-    """Append non-empty values while preserving the model's first-seen order."""
-    merged = list(existing)
-    seen = {str(item).casefold() for item in merged}
-    for item in additions:
-        key = str(item).casefold()
-        if key and key not in seen:
-            merged.append(item)
-            seen.add(key)
-    return merged
-
-
 class Planner:
     """Own the model-facing plan, tool decisions, and global retrieval state."""
 
@@ -215,27 +209,28 @@ class Planner:
         self.llm = LLMClient()
         self._messages: list[dict[str, Any]] = []
         self._task_plan: dict[str, Any] | None = None
-        # The transcript is retained for auditability, but it is deliberately
-        # not the model's recurrent decision context.  Each decision receives
-        # only the latest routing projection below.
+        # ``_messages`` is an audit trace, not recurrent model context. Every
+        # decision is an independent online-G1i request built from the current
+        # state projection and, after the first turn, only the latest compact
+        # Function output. Replaying Assistant calls anchors RWKV to old paths.
         self._latest_routing_observation = ""
+        self._latest_tool_call: dict[str, Any] | None = None
         self._decision_count = 0
         self._next_decision_sampling_stage = "planner"
         self._next_decision_seed: int | None = None
         self._replan_generation = 0
         self._active_replan_review: dict[str, Any] | None = None
-        self._queued_replan_actions: list[dict[str, Any]] = []
 
     def reset(self) -> None:
         self._messages = []
         self._task_plan = None
         self._latest_routing_observation = ""
+        self._latest_tool_call = None
         self._decision_count = 0
         self._next_decision_sampling_stage = "planner"
         self._next_decision_seed = None
         self._replan_generation = 0
         self._active_replan_review = None
-        self._queued_replan_actions = []
 
     def execution_transcript(self) -> str:
         """Return the visible routing transcript for final summarization."""
@@ -243,181 +238,38 @@ class Planner:
 
     @staticmethod
     def _validate_task_plan(payload: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            raise ValueError("task plan must be a JSON object")
-        goal = str(payload.get("goal") or "").strip()
-        points = payload.get("atomic_points")
-        if not goal or not isinstance(points, list) or not points:
-            raise ValueError("task plan requires goal and atomic_points")
-        if len(points) > 32:
-            raise ValueError("task plan contains too many atomic_points")
-        normalized_points = []
-        points_by_signature: dict[str, dict[str, Any]] = {}
-        used_ids: set[str] = set()
-        for point in points:
-            if not isinstance(point, dict):
-                raise ValueError("each atomic point must be an object")
-            point_id = str(point.get("id") or "").strip()
-            task = str(point.get("task") or "").strip()
-            objective = str(point.get("objective") or "").strip()
-            evidence_needed = point.get("evidence_needed")
-            acceptance_criteria = point.get("acceptance_criteria")
-            if (
-                not point_id
-                or not task
-                or not objective
-                or not isinstance(evidence_needed, list)
-                or not isinstance(acceptance_criteria, list)
-                or not acceptance_criteria
-            ):
-                raise ValueError(
-                    "each atomic point requires id, task, objective, evidence_needed and acceptance_criteria"
-                )
-            signature = "\n".join(
-                re.sub(r"\s+", " ", value.casefold()).strip()
-                for value in (task, objective)
-            )
-            evidence = [str(item).strip() for item in evidence_needed if str(item).strip()]
-            criteria = [str(item).strip() for item in acceptance_criteria if str(item).strip()]
-            existing = points_by_signature.get(signature)
-            if existing is not None:
-                # RWKV occasionally repeats a point while expanding a plan.
-                # Merge the evidence and acceptance requirements instead of
-                # discarding an otherwise usable plan.  The raw model output
-                # remains in the execution record, so this normalization is
-                # auditable and does not hide the model's mistake.
-                existing["evidence_needed"] = _merge_unique(existing["evidence_needed"], evidence)
-                existing["acceptance_criteria"] = _merge_unique(
-                    existing["acceptance_criteria"], criteria
-                )
-                existing["source_ids"] = _merge_unique(existing.get("source_ids", []), [point_id])
-                continue
-            if point_id in used_ids:
-                raise ValueError("task plan point ids must be unique")
-            normalized_point = {
-                "id": point_id,
-                "task": task,
-                "objective": objective,
-                "evidence_needed": evidence,
-                "acceptance_criteria": criteria,
-                "output_format": str(point.get("output_format") or "prose").strip(),
-                "status": str(point.get("status") or "pending"),
-                "source_ids": [point_id],
-                "required_domains": list(dict.fromkeys(
-                    str(value).strip().casefold().removeprefix("www.").rstrip(".")
-                    for value in (
-                        [point.get("required_domains")]
-                        if isinstance(point.get("required_domains"), str)
-                        else point.get("required_domains") or []
-                    )
-                    if str(value).strip()
-                ))[:4],
-            }
-            normalized_points.append(normalized_point)
-            points_by_signature[signature] = normalized_point
-            used_ids.add(point_id)
-        if not normalized_points:
-            raise ValueError("task plan contains no distinct atomic points")
-        task_mode = str(payload.get("task_mode") or "lookup").strip().casefold()
-        if task_mode not in {
-            "lookup",
-            "latest_list",
-            "compare",
-            "deep_research",
-            "computation",
-            "current_time",
-            "date_arithmetic",
-        }:
-            task_mode = "lookup"
-        source_policy = str(payload.get("source_policy") or "open_web").strip().casefold()
-        if source_policy not in {"open_web", "primary_preferred", "official_required"}:
-            source_policy = "open_web"
-        required_domains = payload.get("required_domains") or []
-        if isinstance(required_domains, str):
-            required_domains = [required_domains]
-        required_domains = list(dict.fromkeys(
-            str(value).strip().casefold().removeprefix("www.").rstrip(".")
-            for value in required_domains
-            if str(value).strip()
-        ))[:12]
-        requested_fields = payload.get("requested_fields") or []
-        if isinstance(requested_fields, str):
-            requested_fields = [requested_fields]
-        requested_fields = [str(value).strip() for value in requested_fields if str(value).strip()][:32]
-        try:
-            max_items = int(payload.get("max_items") or 0)
-        except (TypeError, ValueError):
-            max_items = 0
-        max_items = max(0, min(max_items, 50))
-        return {
-            "schema_version": "task_plan.v1",
-            "goal": goal,
-            "atomic_points": normalized_points,
-            "task_mode": task_mode,
-            "source_policy": source_policy,
-            "required_domains": required_domains,
-            "requested_fields": requested_fields,
-            "max_items": max_items,
-            "completion_rule": str(payload.get("completion_rule") or "All atomic points are answered with supported evidence."),
-        }
+        return normalize_task_plan(payload, max_points=4)
 
     def create_task_plan(self, user_query: str, env_context: str = "") -> dict[str, Any]:
-        """Ask RWKV to make a generic atomic plan before any retrieval call."""
+        """Ask RWKV for factual obligations, never a prewritten workflow."""
+
         prompt = (
-            "### User\nYou are the task-planning RWKV. Decompose the user's goal into the smallest "
-            "useful independently verifiable atomic points. Do not choose a provider, tool, query, "
-            "or URL. Do not assume the local workspace is relevant unless the user explicitly asks about it. "
-            "Describe evidence as the fact that must be verified, not as a preselected source. Do not add facts, "
-            "API names, flags, values, examples, URLs, or implementation details that the user did not mention. "
-            "For each point, state the task, evidence_needed, and concise acceptance_criteria. Preserve only the "
-            "scope the user explicitly requested. Do not silently turn a request for the latest few items into a "
-            "request for a complete archive, full document, or proof that no item is missing. "
-            "For a short how-to or lookup question, use exactly one atomic point unless the user explicitly asks "
-            "for separate comparisons or multiple deliverables. Search, source discovery, cross-checking, verification, "
-            "citation, summarization, and formatting are research workflow stages, not user-requested facts: never "
-            "create atomic points for those stages. Do not create a separate example/code point unless the user "
-            "requests an example or code. Classify the task as lookup, latest_list, compare, deep_research, computation, current_time, or date_arithmetic. "
-            "Use computation for pure arithmetic, current_time for the current clock, and date_arithmetic only when exact dates are supplied or will be retrieved as facts before calculation. "
-            "These deterministic modes do not require web sources. "
-            "When the user asks for current/latest/as-of-today information, use the current UTC date supplied in "
-            "the environment summary. Never guess or copy a stale year from model memory; include a year in a "
-            "search plan only when it is present in the user request or the supplied environment. "
-            "For lookup use 1-3 points only when the question genuinely contains multiple requested facts: "
-            "authoritative source, requested facts, and one cross-check only when it materially reduces uncertainty. "
-            "When one question mixes historical events with a current/latest state, create separate atomic points "
-            "for each time anchor so evidence for an old event is not reused as evidence for the current state. "
-            "For latest_list set max_items to a small number (normally 3-5); only when the user explicitly asks for all "
-            "or a complete list set max_items to 50. "
-            "If the user names an organisation, regulator, standards body, or asks for an official source, set "
-            "source_policy to official_required. Put a domain in required_domains only when the user explicitly names "
-            "that domain or you are certain it is the organisation's actual official host; a bare brand-like domain may "
-            "belong to another entity, so leave required_domains empty when uncertain. Never treat a third-party summary "
-            "or a same-name website as an official source. "
-            "If the task requests a list or table, set output_format to list or table and preserve the requested "
-            "fields and order, but do not require every row unless the user explicitly says complete/all. "
-            "Keep distinct roles distinct, and give each requested paper or project its own exact URL. "
-            "The fields evidence_needed, requested_fields, and acceptance_criteria must describe the user's words "
-            "or generic verification needs; never propose a concrete API, command, variable, or example as a guess. "
-            "For pure arithmetic, current clock, or exact date-distance questions, plan a deterministic operation rather than web research; "
-            "the evidence_needed value may be the deterministic result and must not require a webpage. "
-            "Inside JSON string values, escape every inner double quote as \\\"; prefer single quotes in shell examples "
-            "and keep the plan compact. Use one point per distinct user-requested deliverable, normally 1-3 points; "
-            "only a genuinely complex multi-part request may use up to 8. Group larger related fact sets instead of "
-            "expanding the research workflow into points. Never create one point per URL, source, example, or repeated "
-            "wording. Never emit more than 32 points. Never put raw unescaped double quotes inside a JSON string. "
-            "Return exactly one JSON object and no explanation. "
-            "Use this fixed format: "
-            '{"schema_version":"task_plan.v1","goal":"...",'
-            '"task_mode":"lookup|latest_list|compare|deep_research|computation|current_time|date_arithmetic",'
-            '"source_policy":"open_web|primary_preferred|official_required",'
-            '"required_domains":["..."],"requested_fields":["..."],"max_items":5,'
-            '"atomic_points":[{"id":"P1","task":"...","objective":"...",'
-            '"evidence_needed":["..."],"acceptance_criteria":["..."],'
-            '"output_format":"prose|list|table|route|links|mixed","status":"pending"}],'
-            '"completion_rule":"..."}. '
-            "Every point must have a unique id, task, concrete objective, evidence_needed array, and at least one acceptance_criteria item.\n\n"
-            f"\n\nUser goal: {user_query}\n"
-            f"Current environment summary: {env_context[:2400]}\n\n"
+            "System: Return only one JSON object.\n\n"
+            "User: You are the RWKV factual-record planner. Preserve the user's exact goal. "
+            "Create one record for each distinct answer record the user requests. Start with exactly one record and "
+            "split it only when the question truly contains different subjects, a comparison, or different "
+            "historical/current identities. A record is a row, not one field or one clause. A record has one stable subject and one historical/current/version/advisory "
+            "identity. Put every requested field belonging to that same record in the same fields array. "
+            "For example, a current release's identifier, title, date and theme are one point; a latest batch's "
+            "item IDs, products and deadlines are one collection point. Do not split those fields into separate "
+            "records. Pronouns such as that version, that release, that batch, those items, or 该批 refer back to the same record and must not create new records. "
+            "subject names only the stable entity or object and must not repeat a field label. relation briefly "
+            "names the shared record identity, such as current release, historical launch, latest batch, or "
+            "procedure. A short lookup or how-to uses one point. "
+            "Never create points for search, discovery, reading, extraction, verification, cross-checking, "
+            "citation, formatting, or answer writing. Do not choose a tool, provider, query, URL, domain, source "
+            "policy, status, completion gate, or answer. Fields are short labels in the user's language, never "
+            "values. set_semantics is single for one record, collection for a required non-empty list, and "
+            "possibly_empty when an empty set is a valid answer. "
+            "Use at most four records. Return exactly one compact object in this schema and no explanation: "
+            '{"schema_version":"task_plan.v3","goal":"...",'
+            '"records":[{"id":"P1","question":"...","subject":"...",'
+            '"relation":"...","fields":["..."],'
+            '"time_scope":"current|historical|timeless|unspecified",'
+            '"set_semantics":"single|collection|possibly_empty",'
+            '"premise_requires_verification":false}]}.\n\n'
+            f"User goal: {user_query}\n"
+            f"Current environment summary: {env_context[:1200]}\n"
         )
         raw = ""
         last_nonempty_raw = ""
@@ -430,16 +282,16 @@ class Planner:
             if attempt:
                 request_prompt += (
                     "\nCorrection: the previous output was truncated or invalid. Return one compact, complete "
-                    "task_plan.v1 JSON object only. Merge repeated or overlapping points; use no more than 8 "
-                    "distinct atomic_points for this retry. For a short how-to, use one point. Do not invent API "
-                    "names, flags, values, URLs, examples, or variants. Do not enumerate URLs, sources, examples, or variants. "
-                    "Do not add explanation, markdown, or a second object. The prior validation problem was: "
+                    "task_plan.v3 object only. Merge repeated or overlapping records; use no more than four factual "
+                    "records. Default to one record. For a short how-to, use one record. Do not invent values, APIs, flags, URLs, sources, "
+                    "workflow steps, examples, or variants. Do not add explanation, Markdown, or a second object. "
+                    "The prior validation problem was: "
                     + last_error[:700]
                 )
             # Keep repair instructions in the user-side prompt.  Appending
             # them after the Assistant continuation marker makes RWKV copy
             # the repair text instead of regenerating the JSON object.
-            request_prompt += f"\n{assistant_json_prefix(enable_think=False, prefill_object=True)}"
+            request_prompt += f"\n{assistant_json_prefix(enable_think=False, prefill_object=False)}"
             try:
                 completion_budget = self._completion_budget(request_prompt)
                 if attempt:
@@ -487,13 +339,32 @@ class Planner:
                 last_error = f"{type(exc).__name__}: {exc}"
                 if classify_error(exc) == "timeout":
                     break
-        return {
-            "schema_version": "task_plan.v1",
-            "status": "error",
-            "error_class": "task_plan_invalid",
-            "message": last_error or "task plan generation failed",
-            "raw_model_output": visible_model_text(last_nonempty_raw or raw),
-        }
+        # A malformed plan must not erase an otherwise answerable user request.
+        # This fallback preserves the exact goal as one factual point; it does
+        # not choose retrieval actions, facts, sources, or the final answer.
+        fallback = normalize_task_plan(
+            {
+                "goal": user_query,
+                "atomic_points": [
+                    {
+                        "id": "P1",
+                        "question": user_query,
+                        "fields": [],
+                        "time_scope": "unspecified",
+                    }
+                ],
+            },
+            fallback_goal=user_query,
+        )
+        fallback.update(
+            {
+                "plan_fallback": True,
+                "plan_error": last_error or "task plan generation failed",
+                "raw_model_output": visible_model_text(last_nonempty_raw or raw),
+                "plan_attempts": 2,
+            }
+        )
+        return fallback
 
     @staticmethod
     def _task_plan_semantic_warnings(
@@ -535,521 +406,149 @@ class Planner:
         self._task_plan = task_plan
         self._messages = []
         self._latest_routing_observation = ""
+        self._latest_tool_call = None
         self._decision_count = 0
         self._next_decision_sampling_stage = "planner"
         self._next_decision_seed = None
         self._replan_generation = 0
         self._active_replan_review = None
-        self._queued_replan_actions = []
-        self._ensure_conversation(user_query, env_context, phase)
-        self._messages.append(
+        point_ids = [
+            str(point.get("id") or "").strip()
+            for point in task_plan.get("atomic_points") or []
+            if isinstance(point, dict) and str(point.get("id") or "").strip()
+        ]
+        self._messages = [
+            {
+                "role": "system",
+                "content": self._system_prompt(
+                    phase,
+                    task_point_example=(point_ids[0] if point_ids else "P1"),
+                ),
+            },
             {
                 "role": "user",
                 "content": (
-                    "Task plan (model-generated, fixed schema; use it to decide what to retrieve):\n"
-                    f"{json.dumps(task_plan, ensure_ascii=False, separators=(',', ':'))}"
+                    f"Question: {str(user_query or '').strip()[:3000]}\n"
+                    "Research brief (model-generated advisory context; you still decide every action and finish point):\n"
+                    f"{json.dumps(self._compact_task_plan(task_plan), ensure_ascii=False, separators=(',', ':'))}\n"
+                    f"Runtime state: {str(env_context or '').strip()}\n"
+                    f"Phase: {phase}\n\n"
+                    f"{self._decision_guidance(phase)}"
                 ),
-            }
-        )
+            },
+        ]
         self._trim_conversation()
 
     @staticmethod
-    def _validate_cross_review(
-        payload: dict[str, Any],
-        *,
-        planned_point_ids: Iterable[str] = (),
-        valid_evidence_refs: Iterable[str] | None = None,
-        valid_evidence_text_by_ref: Mapping[str, str] | None = None,
-    ) -> dict[str, Any]:
-        """Validate the RWKV review protocol without judging its conclusion."""
+    def _validate_cross_review(payload: dict[str, Any]) -> dict[str, Any]:
+        """Validate only RWKV's two-action G1i review protocol.
+
+        The controller intentionally does not inspect evidence, infer missing
+        fields, reconcile statuses, or override RWKV's decision.  A malformed
+        object receives one protocol retry in :meth:`cross_validate_research`.
+        """
 
         if not isinstance(payload, dict):
             raise ValueError("cross-validation output must be a JSON object")
-        decision = str(payload.get("decision") or "").strip().casefold()
-
-        missing_points = payload.get("missing_points") or []
-        if isinstance(missing_points, str):
-            missing_points = [missing_points]
-        if not isinstance(missing_points, list):
-            raise ValueError("cross-validation missing_points must be an array")
-
-        conflicts = payload.get("conflicts") or []
-        if isinstance(conflicts, (str, dict)):
-            conflicts = [conflicts]
-        if not isinstance(conflicts, list):
-            raise ValueError("cross-validation conflicts must be an array")
-
-        task_point_status = payload.get("task_point_status") or {}
-        if not isinstance(task_point_status, dict):
-            raise ValueError("cross-validation task_point_status must be an object")
-
-        # Some G1i continuations express the same model judgement as a state
-        # snapshot instead of duplicating it in ``decision``.  Canonicalize
-        # only fields explicitly emitted by RWKV: no source text is inspected
-        # and no controller-side evidence judgement is introduced here.
-        atomic_points = payload.get("atomic_points") or []
-        if atomic_points and not isinstance(atomic_points, (list, dict)):
-            raise ValueError("cross-validation atomic_points must be an array or object")
-        normalized_atomic_status: dict[str, Any] = {}
-        atomic_rows = (
-            list(atomic_points.items())
-            if isinstance(atomic_points, dict)
-            else [("", row) for row in atomic_points]
-        )
-        for fallback_id, row in atomic_rows[:32]:
-            if not isinstance(row, dict):
-                continue
-            point_id = str(
-                row.get("id")
-                or row.get("point_id")
-                or row.get("claim_id")
-                or fallback_id
-                or ""
-            ).strip()
-            if not point_id:
-                continue
-            normalized_atomic_status[point_id] = dict(row)
-        if not task_point_status and normalized_atomic_status:
-            task_point_status = normalized_atomic_status
-
-        incomplete_statuses = {
-            "blocked",
-            "conflict",
-            "conflicted",
-            "incomplete",
-            "missing",
-            "missing_facts",
-            "needs_more_evidence",
-            "not_supported",
-            "not_retrieved",
-            "partial",
-            "pending",
-            "uncertain",
-            "unsupported",
-            "unverified",
-        }
-        complete_statuses = {
-            "answered",
-            "complete",
-            "completed",
-            "supported",
-            "verified",
-        }
-
-        normalized_point_status: dict[str, dict[str, Any]] = {}
-        for point_id, raw_status in task_point_status.items():
-            point_key = str(point_id).strip()
-            if not point_key:
-                continue
-            row = dict(raw_status) if isinstance(raw_status, dict) else {"status": raw_status}
-            status = str(row.get("status") or "").strip().casefold()
-            if status:
-                row["status"] = status
-            refs = row.get("evidence_refs") or []
-            if isinstance(refs, str):
-                refs = [refs]
-            if not isinstance(refs, list):
-                raise ValueError(
-                    f"cross-validation evidence_refs for {point_key} must be an array"
-                )
-            row["evidence_refs"] = [
-                str(value).strip().strip("[]")[:120]
-                for value in refs[:16]
-                if str(value).strip()
-            ]
-            supported_facts = row.get("supported_facts") or []
-            if isinstance(supported_facts, (str, dict)):
-                supported_facts = [supported_facts]
-            if not isinstance(supported_facts, list):
-                raise ValueError(
-                    f"cross-validation supported_facts for {point_key} must be an array"
-                )
-            normalized_facts: list[dict[str, str]] = []
-            for fact in supported_facts[:12]:
-                value = dict(fact) if isinstance(fact, dict) else {"value": fact}
-                normalized_facts.append(
-                    {
-                        "field": str(value.get("field") or "")[:160],
-                        "value": str(value.get("value") or "")[:500],
-                        "evidence_ref": str(value.get("evidence_ref") or "")
-                        .strip()
-                        .strip("[]")[:120],
-                        "quote": str(value.get("quote") or "")[:1000],
-                    }
-                )
-            row["supported_facts"] = normalized_facts
-            missing_fields = row.get("missing_fields") or []
-            if isinstance(missing_fields, str):
-                missing_fields = [missing_fields]
-            if not isinstance(missing_fields, list):
-                raise ValueError(
-                    f"cross-validation missing_fields for {point_key} must be an array"
-                )
-            row["missing_fields"] = [
-                str(value)[:300]
-                for value in missing_fields[:12]
-                if str(value).strip()
-            ]
-            normalized_point_status[point_key] = row
-        task_point_status = normalized_point_status
-
-        expected_point_ids = list(
-            dict.fromkeys(
-                str(value).strip()
-                for value in planned_point_ids
-                if str(value).strip()
-            )
-        )
-        enforce_point_bindings = valid_evidence_refs is not None and bool(
-            expected_point_ids
-        )
-        normalized_valid_refs = {
-            str(value).strip().strip("[]")
-            for value in (valid_evidence_refs or [])
-            if str(value).strip()
-        }
-        normalized_evidence_by_ref = {
-            str(ref).strip().strip("[]"): re.sub(
-                r"\s+", " ", str(text or "")
-            )
-            .strip()
-            .casefold()
-            for ref, text in (valid_evidence_text_by_ref or {}).items()
-            if str(ref).strip()
-        }
-        enforce_fact_bindings = valid_evidence_text_by_ref is not None
-        if enforce_point_bindings:
-            omitted = [
-                point_id
-                for point_id in expected_point_ids
-                if point_id not in task_point_status
-            ]
-            if omitted:
-                raise ValueError(
-                    "cross-validation task_point_status must cover every planned point; "
-                    "missing: " + ", ".join(omitted)
-                )
-            known_statuses = incomplete_statuses | complete_statuses
-            for point_id in expected_point_ids:
-                row = task_point_status[point_id]
-                status = str(row.get("status") or "").strip().casefold()
-                if status not in known_statuses:
-                    raise ValueError(
-                        f"cross-validation status for {point_id} must be an explicit "
-                        "supported/missing/conflict/uncertain state"
-                    )
-                refs = list(row.get("evidence_refs") or [])
-                invalid_refs = [value for value in refs if value not in normalized_valid_refs]
-                if invalid_refs:
-                    raise ValueError(
-                        f"cross-validation evidence_refs for {point_id} contain unavailable refs: "
-                        + ", ".join(invalid_refs)
-                    )
-                if status in complete_statuses and not refs:
-                    raise ValueError(
-                        f"cross-validation completed status for {point_id} requires an "
-                        "available source or tool evidence ref"
-                    )
-                if status in complete_statuses and enforce_fact_bindings:
-                    facts = list(row.get("supported_facts") or [])
-                    if not facts:
-                        raise ValueError(
-                            f"cross-validation completed status for {point_id} requires "
-                            "answer-ready supported_facts"
-                        )
-                    for fact in facts:
-                        fact_ref = str(fact.get("evidence_ref") or "")
-                        value = str(fact.get("value") or "").strip()
-                        quote = str(fact.get("quote") or "").strip()
-                        if not value or not quote or fact_ref not in refs:
-                            raise ValueError(
-                                f"cross-validation supported fact for {point_id} must include "
-                                "a value, verbatim quote, and one cited evidence_ref"
-                            )
-                        normalized_quote = re.sub(r"\s+", " ", quote).strip().casefold()
-                        if normalized_quote not in normalized_evidence_by_ref.get(fact_ref, ""):
-                            raise ValueError(
-                                f"cross-validation quote for {point_id} is not present in "
-                                f"cited evidence ref {fact_ref}"
-                            )
-
-        declared_status_by_point = {
-            str(point_id): str(
-                value.get("status") if isinstance(value, dict) else value
-            )
-            .strip()
-            .casefold()
-            for point_id, value in task_point_status.items()
-            if str(value.get("status") if isinstance(value, dict) else value).strip()
-        }
-
-        progress = payload.get("progress") or {}
-        if progress and not isinstance(progress, dict):
-            raise ValueError("cross-validation progress must be an object")
-        completed_count: int | None = None
-        total_count: int | None = None
-        if isinstance(progress, dict):
-            try:
-                if progress.get("completed") is not None:
-                    completed_count = int(progress.get("completed"))
-                if progress.get("total") is not None:
-                    total_count = int(progress.get("total"))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "cross-validation progress counts must be integers"
-                ) from exc
-
-        zero_source_points: list[str] = []
-        retrieval_state = payload.get("retrieval_state") or {}
-        if retrieval_state and not isinstance(retrieval_state, dict):
-            raise ValueError("cross-validation retrieval_state must be an object")
-        retrieved_rows = (
-            retrieval_state.get("retrieved") or []
-            if isinstance(retrieval_state, dict)
-            else []
-        )
-        if isinstance(retrieved_rows, dict):
-            retrieved_rows = [
-                {"point_id": point_id, **(row if isinstance(row, dict) else {})}
-                for point_id, row in retrieved_rows.items()
-            ]
-        if not isinstance(retrieved_rows, list):
-            raise ValueError("cross-validation retrieval_state.retrieved must be an array")
-        for row in retrieved_rows[:32]:
-            if not isinstance(row, dict):
-                continue
-            point_id = str(
-                row.get("point_id") or row.get("claim_id") or row.get("id") or ""
-            ).strip()
-            try:
-                source_count = int(row.get("source_count"))
-            except (TypeError, ValueError):
-                continue
-            if point_id and source_count == 0:
-                zero_source_points.append(point_id)
-
-        derived_missing_points = [
-            point_id
-            for point_id, status in declared_status_by_point.items()
-            if status in incomplete_statuses
-        ]
-        derived_missing_points.extend(zero_source_points)
-        normalized_missing_points: list[str] = []
-        for value in [*missing_points, *derived_missing_points]:
-            point_id = _declared_task_point_id(value, expected_point_ids)
-            normalized = point_id or str(value).strip()
-            if normalized and normalized not in normalized_missing_points:
-                normalized_missing_points.append(normalized)
-        missing_points = normalized_missing_points
-
-        declared_statuses = set(declared_status_by_point.values())
-        explicit_progress_incomplete = (
-            completed_count is not None
-            and total_count is not None
-            and completed_count < total_count
-        )
-        explicit_progress_complete = (
-            completed_count is not None
-            and total_count is not None
-            and total_count >= 0
-            and completed_count >= total_count
-        )
-        has_progress_shape = bool(
-            normalized_atomic_status
-            or progress
-            or retrieval_state
-        )
-        explicit_gap_fields = bool(
-            missing_points
-            or conflicts
-            or declared_statuses.intersection(incomplete_statuses)
-            or explicit_progress_incomplete
-            or zero_source_points
-        )
-
-        # This is a protocol invariant, not an evidence gate.  RWKV remains
-        # the reviewer, but its structured fields must express one coherent
-        # decision.  Ask RWKV to correct a contradictory continuation instead
-        # of silently privileging one of its fields in controller code.
-        if decision == "finish" and explicit_gap_fields:
+        if set(payload) != {"name", "arguments"}:
             raise ValueError(
-                "cross-validation output is internally inconsistent: "
-                "decision=finish cannot include explicit missing/conflict/incomplete fields"
+                "cross-validation output must contain exactly name and arguments"
             )
-
-        decision_source = "explicit_decision"
-        if decision not in {"finish", "replan"}:
-            # G1i also emits the established cross-validation.v1 shape, where
-            # its judgement is expressed through explicit point statuses and
-            # missing_points rather than a duplicated decision field.  This
-            # is protocol canonicalization only: the controller reads RWKV's
-            # declared statuses and never evaluates evidence semantics here.
-            if explicit_gap_fields:
-                decision = "replan"
-                decision_source = (
-                    "rwkv_explicit_progress_fields"
-                    if has_progress_shape
-                    else "rwkv_explicit_gap_fields"
-                )
-            elif (
-                declared_statuses
-                and declared_statuses.issubset(complete_statuses)
-                and (not progress or explicit_progress_complete)
-            ) or (explicit_progress_complete and not declared_statuses):
-                decision = "finish"
-                decision_source = (
-                    "rwkv_explicit_progress_fields"
-                    if has_progress_shape
-                    else "rwkv_explicit_completion_fields"
-                )
-            else:
-                raise ValueError(
-                    "cross-validation decision must be finish/replan or be expressed "
-                    "through explicit status/progress fields"
-                )
-
+        action = str(payload.get("name") or "").strip().casefold()
+        if action not in {"continue_retrieval", "write_answer"}:
+            raise ValueError(
+                "cross-validation name must be continue_retrieval or write_answer"
+            )
+        arguments = payload.get("arguments")
+        if arguments != {}:
+            raise ValueError("cross-validation arguments must be an empty object")
         return {
-            "schema_version": "rwkv-cross-validation.v1",
-            "decision": decision,
-            "decision_source": decision_source,
-            "missing_points": [
-                str(value)[:500] for value in missing_points[:32] if str(value).strip()
-            ],
-            "conflicts": conflicts[:32],
-            "task_point_status": {
-                str(key)[:120]: value
-                for key, value in list(task_point_status.items())[:32]
-            },
-            "next_focus": str(payload.get("next_focus") or "")[:2000],
-            "reason": str(payload.get("reason") or "")[:2000],
+            "schema_version": "rwkv-cross-validation.v3",
+            # Keep the controller's established state vocabulary internal.
+            # This is a direct mapping of RWKV's tool choice, not a semantic
+            # rule or evidence-derived override.
+            "decision": (
+                "replan" if action == "continue_retrieval" else "finish"
+            ),
+            "selected_action": action,
             "review_owner": "rwkv",
         }
+
+    @classmethod
+    def _validate_cross_review_continuation(cls, raw: Any) -> dict[str, Any]:
+        """Validate one complete function call without semantic recovery."""
+
+        return cls._validate_cross_review(
+            _extract_json_object(visible_model_text(str(raw or "")).strip())
+        )
+
+    @staticmethod
+    def _cross_review_tools() -> list[dict[str, Any]]:
+        """Return the complete two-action catalog shown to online G1i."""
+
+        empty_arguments = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        return [
+            {
+                "name": "continue_retrieval",
+                "description": (
+                    "Choose only when another targeted search is needed before an "
+                    "accurate, useful answer: the central requested fact is absent, "
+                    "current/latest is supported only by stale material, or relevant "
+                    "records conflict."
+                ),
+                "arguments": empty_arguments,
+            },
+            {
+                "name": "write_answer",
+                "description": (
+                    "Choose when the retained source spans are sufficient for an "
+                    "accurate, useful answer. The answer may state that a minor "
+                    "requested detail is not established instead of inventing it."
+                ),
+                "arguments": empty_arguments,
+            },
+        ]
 
     def cross_validate_research(
         self,
         user_query: str,
         task_plan: dict[str, Any],
         evidence_context: str,
-        *,
-        evidence_refs: Iterable[str] | None = None,
-        evidence_text_by_ref: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Ask RWKV whether research should finish or return to planning."""
+        """Ask RWKV for one binary review action in the online G1i grammar."""
 
-        planned_point_ids = [
-            str(point.get("id") or "").strip()
-            for point in task_plan.get("atomic_points") or []
-            if isinstance(point, dict) and str(point.get("id") or "").strip()
-        ]
-        available_evidence_refs = (
-            None
-            if evidence_refs is None
-            else list(
-                dict.fromkeys(
-                    str(value).strip().strip("[]")
-                    for value in evidence_refs
-                    if str(value).strip()
-                )
-            )
-        )
-
-        point_status_contract = {
-            point_id: {
-                "status": "supported|missing|conflict|uncertain",
-                "evidence_refs": ["S1"],
-                "supported_facts": [
-                    {
-                        "field": "requested field",
-                        "value": "answer-ready value explicitly supported by the quote",
-                        "evidence_ref": "S1",
-                        "quote": "short verbatim source text",
-                    }
-                ],
-                "missing_fields": [],
-            }
-            for point_id in planned_point_ids
-        } or {
-            "P1": {
-                "status": "supported|missing|conflict|uncertain",
-                "evidence_refs": ["S1"],
-                "supported_facts": [
-                    {
-                        "field": "requested field",
-                        "value": "answer-ready value explicitly supported by the quote",
-                        "evidence_ref": "S1",
-                        "quote": "short verbatim source text",
-                    }
-                ],
-                "missing_fields": [],
-            }
-        }
-        review_contract = {
-            "schema_version": "rwkv-cross-validation.v1",
-            "decision": "finish|replan",
-            "missing_points": planned_point_ids[:1],
-            "conflicts": [],
-            "task_point_status": point_status_contract,
-            "next_focus": "concise evidence need, not a query",
-            "reason": "concise model judgement",
-        }
         projected_target = json.dumps(
             self._cross_validation_plan_projection(task_plan),
             ensure_ascii=False,
             separators=(",", ":"),
         )
         user_prompt = (
-            "You are the RWKV cross-validator inside a research loop. This is not the final answer. "
-            "Inspect the user's requested scope, the model-generated task plan, deterministic tool results, "
-            "and the original fetched source spans. Decide whether the collected material supports a useful "
-            "answer or whether another retrieval round is needed. Choose replan only for a material missing "
-            "fact or material source conflict that another search could reasonably resolve. Minor uncertainty "
-            "does not require replan because the final RWKV writer can state uncertainty. The fetched source "
-            "spans are already the extracted evidence: read their contents yourself, and choose finish when "
-            "they explicitly contain the requested facts. Review every atomic point separately. For each planned "
-            "point, treat every requested_fields value, evidence_needed item, and material acceptance_criteria "
-            "item as a required sub-obligation. A point is supported only when its cited spans jointly satisfy "
-            "all of those material sub-obligations; if even one requested field is absent, mark the owning point "
-            "missing or uncertain and name that field in next_focus. For each point, emit task_point_status with "
-            "status, evidence_refs, supported_facts, and missing_fields. For every supported point, "
-            "supported_facts must state the exact answer-ready value for the requested field, name one "
-            "of that point's evidence_refs, and copy a short verbatim quote from that same source. Do not "
-            "paraphrase the quote or infer a date/version/theme that the quote does not state. If you cannot "
-            "produce a grounded value and quote for a requested field, put that field in missing_fields and "
-            "mark the point missing or uncertain. A supported/completed point must cite at "
-            "least one available [S#] source or TOOL_RESULTS ref; never mark a point supported from the question, "
-            "general knowledge, or evidence bound only to a different fact. There is no later page-summary or semantic-extraction "
-            "tool. For current/latest questions, a historical page that says it was superseded, a prerelease, or a "
-            "different version/entity does not by itself support the current answer. A date after the supplied "
-            "current runtime cannot describe the current state unless the user explicitly asks for an upcoming "
-            "event. For a repository-specific request, matching the host alone is insufficient: bind evidence to "
-            "the exact owner/repository. Verify the exact requested entity/version/status/date combination from "
-            "the cited source span; if the fields come from different records and cannot be bound safely, request "
-            "a focused replan. "
-            "Do not choose replan merely because a checklist says retrieved instead of supported, or "
-            "because no separate summary was produced. Do not generate a "
-            "search query, URL, tool call, answer, refusal, or rewritten evidence. The next planner will choose "
-            "all retrieval actions itself. Keep the JSON internally consistent: decision=finish requires "
-            "missing_points=[] and conflicts=[]; if any material point remains missing or conflicted, use "
-            "decision=replan. Never combine decision=finish with a non-empty missing_points/conflicts list. "
-            "missing_points must contain only exact IDs from the supplied task plan; put the factual detail "
-            "in next_focus. Return exactly one JSON object with this schema: "
-            + json.dumps(review_contract, ensure_ascii=False, separators=(",", ":"))
-            + ".\n\n"
+            "Before final synthesis, perform one minimal evidence check from the retained "
+            "source spans. Choose "
+            "continue_retrieval only if the central answer would be materially wrong "
+            "or unusable without another targeted search. Otherwise choose "
+            "write_answer. Do not require perfect completeness: the Writer can state "
+            "that a minor detail is not established instead of inventing it. Body spans "
+            "are the factual material; titles and URLs identify their source records. "
+            "Do not write the answer, reason, analysis, missing field, query, URL, source "
+            "ranking, or any extra key.\n\n"
             f"USER QUESTION:\n{str(user_query or '')}\n\n"
-            "USER-FACING FACTS TO CHECK (not a planner output schema):\n"
-            f"{projected_target}\n\n"
-            "AVAILABLE EVIDENCE REFS:\n"
-            f"{json.dumps(available_evidence_refs or [], ensure_ascii=False, separators=(',', ':'))}\n\n"
-            f"SHARED RESEARCH MATERIAL:\n{str(evidence_context or '')}\n\n"
-            "FINAL TARGET REMINDER (same user goal, repeated after the evidence for RWKV working memory):\n"
-            f"{str(user_query or '')}\n"
-            "ATOMIC OBLIGATIONS:\n"
-            f"{projected_target}\n\n"
-            "Return the cross-validation JSON now."
+            f"POINTS TO REVIEW:\n{projected_target}\n\n"
+            f"RETAINED SOURCE SPANS:\n{str(evidence_context or '')}\n\n"
+            "FINAL ACTION CONTRACT:\n"
+            "Return exactly one complete JSON object now: "
+            '{"name":"continue_retrieval","arguments":{}} or '
+            '{"name":"write_answer","arguments":{}}. '
+            "Do not write the answer, reason, analysis, or any extra key."
         )
-        prompt = (
-            f"### User\n{user_prompt}\n"
-            f"{assistant_json_prefix(enable_think=False, prefill_object=True)}"
+        tools = self._cross_review_tools()
+        prompt = render_rwkv_transcript(
+            [{"role": "user", "content": user_prompt}],
+            tools=tools,
         )
         raw = ""
         last_error = ""
@@ -1059,34 +558,30 @@ class Planner:
             request_prompt = prompt
             if attempt:
                 repair_user_prompt = user_prompt + (
-                    "\n\nCorrection: the previous continuation was not one complete executable JSON object. "
-                    f"Protocol error: {last_error[:500]}. "
-                    "Return exactly one complete rwkv-cross-validation.v1 JSON object now; no Markdown, "
-                    "explanation, answer, search query, or extra text."
+                    "\n\nProtocol correction: the previous continuation was not one "
+                    f"valid function call ({last_error[:300]}). Return exactly "
+                    '{"name":"continue_retrieval","arguments":{}} or '
+                    '{"name":"write_answer","arguments":{}} with no Markdown, '
+                    "explanation, answer, query, or extra text."
                 )
-                request_prompt = (
-                    f"### User\n{repair_user_prompt}\n"
-                    f"{assistant_json_prefix(enable_think=False, prefill_object=True)}"
+                request_prompt = render_rwkv_transcript(
+                    [{"role": "user", "content": repair_user_prompt}],
+                    tools=tools,
                 )
             last_prompt = request_prompt
             try:
                 with model_sampling_parameters(
                     sampling_temperature,
                     stage="cross_validation",
-                    policy_reason="evidence_consistency_review",
+                    policy_reason="binary_evidence_review",
                 ):
                     response = self.llm.text_completion(
                         request_prompt,
-                        max_tokens=min(2048, self._completion_budget(request_prompt)),
+                        max_tokens=min(96, self._completion_budget(request_prompt)),
                         stop=JSON_CALL_STOP_SUFFIXES,
                     )
                 raw = str(response.content or "")
-                review = self._validate_cross_review(
-                    _extract_json_object(raw),
-                    planned_point_ids=planned_point_ids,
-                    valid_evidence_refs=available_evidence_refs,
-                    valid_evidence_text_by_ref=evidence_text_by_ref,
-                )
+                review = self._validate_cross_review_continuation(raw)
                 review["raw_model_output"] = raw
                 review["prompt"] = request_prompt
                 review["sampling_temperature"] = sampling_temperature
@@ -1106,7 +601,7 @@ class Planner:
                     raise
                 last_error = f"{type(exc).__name__}: {exc}"
         return {
-            "schema_version": "rwkv-cross-validation.v1",
+            "schema_version": "rwkv-cross-validation.v3",
             "decision": "protocol_error",
             "error_class": "cross_validation_protocol",
             "message": last_error[:1000],
@@ -1142,19 +637,11 @@ class Planner:
             observation,
             phase,
         )
-        replan_action = self._request_replan_action(
+        return self._request_replan_action(
             user_query,
             env_context,
             phase,
         )
-        if not replan_action.get("planner_error"):
-            generated_candidates = [
-                dict(value)
-                for value in replan_action.get("candidate_actions") or []
-                if isinstance(value, dict)
-            ]
-            self._queued_replan_actions = generated_candidates or [dict(replan_action)]
-        return replan_action
 
     def rebuild_session(
         self,
@@ -1166,7 +653,14 @@ class Planner:
         """Drop prior action history while retaining task plan and global state."""
 
         self._messages = []
-        self._latest_routing_observation = self._compact_routing_observation(observation)
+        # A rebuilt Planner request must not replay the failed Assistant call.
+        # Keeping this pointer made the supposedly fresh G1i session start with
+        # the exact duplicate query that triggered recovery, anchoring RWKV to
+        # the frozen path even though the audit message history was cleared.
+        self._latest_tool_call = None
+        self._latest_routing_observation = self._compact_rebuild_observation(
+            observation
+        )
         self._next_decision_sampling_stage = "planner_replan"
         self._replan_generation += 1
         # Replanning deliberately changes only the request-level temperature.
@@ -1184,28 +678,32 @@ class Planner:
                     review_with_routes
                 )
                 break
-        self._ensure_conversation(user_query, env_context, phase)
-        if self._task_plan:
-            self._messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "Model-generated task plan retained for this replan:\n"
-                        + json.dumps(
-                            self._compact_task_plan(self._task_plan),
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )
-                    ),
-                }
-            )
-        self._messages.append(
+        point_ids = [
+            str(point.get("id") or "").strip()
+            for point in (self._task_plan or {}).get("atomic_points") or []
+            if isinstance(point, dict) and str(point.get("id") or "").strip()
+        ]
+        # A replan is a new G1i session, not a malformed continuation that
+        # starts with a Function output lacking its prior Assistant call.
+        # The frozen session remains in the audit trace; the new User task is
+        # reconstructed from authoritative state and compact recovery data.
+        self._messages = [
             {
-                "role": "tool",
-                "content": self._compact_observation(observation),
-                "_routing_observation": True,
-            }
-        )
+                "role": "system",
+                "content": self._system_prompt(
+                    phase,
+                    task_point_example=(point_ids[0] if point_ids else "P1"),
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    self._build_isolated_decision_body(user_query, env_context, phase)
+                    + "\nRecovery state:\n"
+                    + self._latest_routing_observation
+                ),
+            },
+        ]
         self._trim_conversation()
 
     def _request_replan_action(
@@ -1214,320 +712,30 @@ class Planner:
         env_context: str,
         phase: str,
     ) -> dict[str, Any]:
-        """Ask RWKV itself for one replacement action at replan temperature."""
+        """Ask RWKV for exactly one function call in the rebuilt G1i session."""
 
-        planned_point_ids = [
-            str(point.get("id") or "").strip()
-            for point in (self._task_plan or {}).get("atomic_points") or []
-            if isinstance(point, dict) and str(point.get("id") or "").strip()
-        ]
-        review = self._active_replan_review or {}
-        missing_point_ids = list(
-            dict.fromkeys(
-                point_id
-                for value in review.get("missing_points") or []
-                if (point_id := _declared_task_point_id(value, planned_point_ids))
-            )
+        self._next_decision_sampling_stage = "planner_replan"
+        self._next_decision_seed = None
+        return self.plan_next_action(
+            user_query,
+            {},
+            env_context,
+            phase,
         )
-        frozen_paths = [
-            value
-            for value in review.get("frozen_paths") or []
-            if isinstance(value, dict)
-        ]
-        attempted_paths = self._retrieval_attempts_from_environment(env_context)
-        compact_catalog = [
-            {
-                "name": row.get("name", ""),
-                "description": str(row.get("description") or "")[:500],
-                "arguments": row.get("arguments") or {"type": "object"},
-                "capabilities": row.get("capabilities") or [],
-            }
-            for row in json.loads(
-                ToolRegistry.get_json_catalog("ALL", model_visible_only=True)
-            )
-            if isinstance(row, dict) and row.get("name") != "finish_task"
-        ]
-        point_by_id = {
-            str(point.get("id") or "").strip(): point
-            for point in (self._task_plan or {}).get("atomic_points") or []
-            if isinstance(point, dict) and str(point.get("id") or "").strip()
-        }
-        replan_points = [
-            {
-                "id": point_id,
-                "task": str((point_by_id.get(point_id) or {}).get("task") or "")[:500],
-                "evidence_needed": [
-                    str(value)[:300]
-                    for value in (
-                        (point_by_id.get(point_id) or {}).get("evidence_needed") or []
-                    )[:6]
-                ],
-            }
-            for point_id in (missing_point_ids or planned_point_ids)
-        ]
-        replan_state = {
-            "missing_points": missing_point_ids,
-            "next_focus": str(review.get("next_focus") or "")[:700],
-            "reason": str(review.get("reason") or "")[:700],
-            "conflicts": list(review.get("conflicts") or [])[:8],
-            "frozen_paths": frozen_paths[-8:],
-            "attempted_paths": attempted_paths[-12:],
-        }
-        prior_domain_hypotheses = [
-            str(value)[:240]
-            for value in (self._task_plan or {}).get("required_domains") or []
-            if str(value).strip()
-        ][:12]
-        example_point_ids = missing_point_ids or planned_point_ids or ["P1"]
-        output_contract = json.dumps(
-            {
-                "candidates": [
-                    {
-                        "name": "tool_name",
-                        "task_point_id": example_point_ids[index % len(example_point_ids)],
-                        "arguments": {},
-                    }
-                    for index in range(3)
-                ]
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        prompt_body = (
-            "You are the RWKV replanner. The prior retrieval strategy did not produce usable evidence. "
-            "Generate three materially different candidate tool calls. The application executes protocol-valid "
-            "non-frozen calls exactly as RWKV writes them; it never invents a replacement query. Choose every task "
-            "point, tool, query or URL, alias/language, and source strategy yourself. Keep the factual obligations, "
-            "but treat prior queries and domain suggestions as fallible RWKV hypotheses, not hard restrictions. "
-            "When a domain or wording already produced no evidence, test a genuinely different route instead of "
-            "merely moving the same words or assigning the same query to another task point. Target missing_points. "
-            "Do not answer the user, explain, copy the input objects, or reproduce a task plan/review.\n\n"
-            f"USER QUESTION:\n{str(user_query or '').strip()[:3000]}\n\n"
-            "CURRENT EVIDENCE STATE (bounded original spans and time):\n"
-            + self._replan_environment_projection(env_context)
-            + "\n\n"
-            "MISSING FACT OBLIGATIONS:\n"
-            + json.dumps(replan_points, ensure_ascii=False, separators=(",", ":"))
-            + "\n\nACTIVE REVIEW AND FROZEN PATHS:\n"
-            + json.dumps(replan_state, ensure_ascii=False, separators=(",", ":"))
-            + "\n\nPRIOR DOMAIN HYPOTHESES (may be wrong):\n"
-            + json.dumps(prior_domain_hypotheses, ensure_ascii=False, separators=(",", ":"))
-            + "\n\nAVAILABLE TOOL CONTRACTS:\n"
-            + json.dumps(compact_catalog, ensure_ascii=False, separators=(",", ":"))
-            + f"\n\nCURRENT PHASE: {phase}"
-            + "\nOUTPUT EXACTLY ONE JSON OBJECT WITH THIS SHAPE AND NO OTHER KEYS:\n"
-            + output_contract
-        )
-        prompt = (
-            f"### User\n{prompt_body}\n"
-            f"{assistant_json_prefix(enable_think=False, prefill_object=True)}"
-        )
-        replan_policy_reason = " ".join(
-            str(review.get(key) or "")
-            for key in ("reason", "next_focus", "decision_source")
-        ).strip()
-        if self._latest_routing_observation:
-            replan_policy_reason = (
-                replan_policy_reason
-                + " "
-                + str(self._latest_routing_observation)[:1200]
-            ).strip()
-        sampling_temperature = get_model_replan_temperature(
-            self._replan_generation,
-            replan_policy_reason,
-        )
-        raw = ""
-        last_error = ""
-        last_prompt = prompt
-        for attempt in range(2):
-            request_prompt = prompt
-            if attempt:
-                request_prompt = (
-                    "### User\n"
-                    + prompt_body
-                    + "\n\nCorrection: the prior replan continuation was not one executable, "
-                    "materially different candidate-list JSON object. Protocol error: "
-                    + last_error[:700]
-                    + ". Return three different candidate calls and do not copy a frozen query.\n"
-                    + assistant_json_prefix(enable_think=False, prefill_object=True)
-                )
-            last_prompt = request_prompt
-            try:
-                with model_sampling_parameters(
-                    sampling_temperature,
-                    stage="planner_replan",
-                    policy_reason=replan_policy_reason or "material_evidence_gap",
-                ):
-                    response = self.llm.text_completion(
-                        request_prompt,
-                        max_tokens=min(1536, self._completion_budget(request_prompt)),
-                        stop=JSON_CALL_STOP_SUFFIXES,
-                    )
-                raw = str(response.content or "")
-                payload = _extract_json_object(raw)
-                candidate_rows = payload.get("candidates")
-                if not isinstance(candidate_rows, list) or not candidate_rows:
-                    raise ValueError("replan output must contain a non-empty candidates list")
-                candidate_errors: list[str] = []
-                executable: list[dict[str, Any]] = []
-                candidate_route_keys: set[tuple[str, str, str]] = set()
-                for index, candidate in enumerate(candidate_rows[:6], start=1):
-                    if not isinstance(candidate, dict):
-                        candidate_errors.append(f"candidate {index} is not an object")
-                        continue
-                    candidate = _canonicalize_tool_payload(candidate)
-                    name = str(
-                        candidate.get("name")
-                        or candidate.get("tool_name")
-                        or candidate.get("action")
-                        or candidate.get("tool")
-                        or ""
-                    ).strip()
-                    arguments = candidate.get("arguments") or candidate.get("args") or {}
-                    if isinstance(arguments, str):
-                        arguments = json.loads(arguments) if arguments.strip() else {}
-                    task_point_id = str(
-                        candidate.get("task_point_id")
-                        or candidate.get("point_id")
-                        or ""
-                    ).strip()
-                    if len(planned_point_ids) == 1 and not task_point_id:
-                        task_point_id = planned_point_ids[0]
-                    if not name or not isinstance(arguments, dict):
-                        candidate_errors.append(
-                            f"candidate {index} lacks a tool name or arguments object"
-                        )
-                        continue
-                    if not ToolRegistry.has(name) or name == "finish_task":
-                        candidate_errors.append(
-                            f"candidate {index} is not a registered non-finish tool"
-                        )
-                        continue
-                    if missing_point_ids and task_point_id not in missing_point_ids:
-                        candidate_errors.append(
-                            f"candidate {index} does not target a missing point"
-                        )
-                        continue
-                    if len(planned_point_ids) > 1 and task_point_id not in planned_point_ids:
-                        candidate_errors.append(
-                            f"candidate {index} lacks a valid task_point_id"
-                        )
-                        continue
-                    action_target = str(
-                        arguments.get("query") or arguments.get("url") or ""
-                    ).strip()
-                    normalized_target = normalize_query(action_target)
-                    blocked_paths = [*frozen_paths, *attempted_paths]
-                    frozen = any(
-                        name == str(path.get("action") or "web_search").strip()
-                        and action_target
-                        and _same_nonempty_route_target(
-                            normalized_target,
-                            normalize_query(str(path.get("query") or "").strip()),
-                        )
-                        for path in blocked_paths
-                    )
-                    if frozen:
-                        candidate_errors.append(
-                            f"candidate {index} repeats an attempted or explicitly frozen tool path"
-                        )
-                        continue
-                    route_key = (
-                        name,
-                        normalized_target,
-                        str(arguments.get("connector") or "").strip().casefold(),
-                    )
-                    if not normalized_target:
-                        route_key = (
-                            name,
-                            json.dumps(
-                                arguments,
-                                ensure_ascii=False,
-                                sort_keys=True,
-                                separators=(",", ":"),
-                                default=str,
-                            ),
-                            route_key[2],
-                        )
-                    if route_key in candidate_route_keys:
-                        candidate_errors.append(
-                            f"candidate {index} duplicates another candidate route"
-                        )
-                        continue
-                    candidate_route_keys.add(route_key)
-                    executable.append(
-                        {
-                            "action": name,
-                            "args": dict(arguments),
-                            "task_point_id": task_point_id,
-                            "call_id": str(candidate.get("call_id") or "").strip(),
-                            "router": "model_rwkv_replan_json",
-                            "raw_model_output": visible_model_text(raw),
-                            "planner_attempts": attempt + 1,
-                            "planner_error": "",
-                            "prompt": request_prompt,
-                            "sampling_temperature": sampling_temperature,
-                            "sampling_seed": None,
-                            "sampling_policy_reason": replan_policy_reason,
-                            "replan_generation": self._replan_generation,
-                            "decision_owner": "rwkv",
-                            "candidate_index": index,
-                        }
-                    )
-                if not executable or (
-                    len(candidate_rows) > 1 and len(executable) < 2
-                ):
-                    raise ValueError(
-                        "replan candidates were not materially diverse: "
-                        + "; ".join(candidate_errors[:6])
-                    )
-                return {**executable[0], "candidate_actions": executable}
-            except Exception as exc:
-                error_class = classify_error(exc)
-                if error_class in {
-                    "timeout",
-                    "network",
-                    "auth",
-                    "quota",
-                    "rate_limit",
-                    "provider",
-                }:
-                    raise
-                last_error = f"{type(exc).__name__}: {exc}"
-        return {
-            "action": "",
-            "args": {},
-            "task_point_id": "",
-            "router": "model_rwkv_replan_protocol_error",
-            "raw_model_output": visible_model_text(raw),
-            "planner_attempts": 2,
-            "planner_error": last_error[:1000],
-            "prompt": last_prompt,
-            "sampling_temperature": sampling_temperature,
-            "sampling_seed": None,
-            "sampling_policy_reason": replan_policy_reason,
-            "replan_generation": self._replan_generation,
-            "decision_owner": "rwkv",
-        }
 
-    def mark_replan_progress(self, task_point_id: str) -> None:
-        """Clear a stale review only after its own missing point advances.
+    def mark_replan_progress(self, task_point_id: str = "") -> None:
+        """Return to the normal planner profile after any material new evidence.
 
-        The controller does not decide whether the evidence is sufficient. It
-        only prevents a new source for an unrelated point from erasing the
-        prior RWKV cross-validator's requested focus.
+        The binary reviewer no longer invents a missing-point hypothesis.  A
+        rebuilt Planner owns that diagnosis from the original goal, retained
+        evidence and frozen paths.  Once a new retrieval materially advances
+        state, keeping every later call at exploratory replan sampling only
+        adds variance.
         """
 
-        review = self._active_replan_review or {}
-        missing_ids = {
-            str(value).strip()
-            for value in review.get("missing_points") or []
-            if str(value).strip()
-        }
-        point_id = str(task_point_id or "").strip()
-        if not review or (missing_ids and point_id not in missing_ids):
+        del task_point_id
+        if not self._active_replan_review:
             return
-        self._queued_replan_actions = []
         self._active_replan_review = None
         self._next_decision_sampling_stage = "planner"
 
@@ -1551,18 +759,27 @@ class Planner:
             [
                 {
                     "name": row.get("name", ""),
-                    "description": row.get("description", ""),
+                    "description": str(row.get("description") or "").splitlines()[0],
                     "arguments": row.get("arguments") or {"type": "object"},
                 }
                 for row in catalog_rows
                 if isinstance(row, dict)
             ],
             ensure_ascii=False,
-            indent=2,
+            separators=(",", ":"),
         )
+        return f"Tools: {catalog}\nReturn only a JSON function call."
+
+    @staticmethod
+    def _decision_guidance(
+        phase: str,
+        task_point_example: str = "P1",
+    ) -> str:
+        """Return task-local guidance outside the fixed G1i System envelope."""
+
         return (
             "Retrieval decision agent.\n"
-            "Choose exactly one next action for the current question and current task plan.\n"
+            "Choose exactly one next action for the current question and research brief.\n"
             "Return one JSON object only: "
             + json.dumps(
                 {
@@ -1574,18 +791,24 @@ class Planner:
                 separators=(",", ":"),
             )
             + ".\n"
-            "Choose task_point_id from the current task plan. Keep the same id while gathering evidence for one point; "
-            "switch ids only when the next point is the actual retrieval target. For finish_task, retain the point id "
-            "that the final decision is based on.\n"
+            "task_point_id is optional route metadata. When a retrieval targets one factual record, copy that record's "
+            "existing id so the extractor can focus on it. This does not bind a fetched page as evidence. Never invent an id; omitting it never "
+            "invalidates an otherwise executable tool call.\n"
             "Use only the tool names and argument contracts in the catalog. Never emit an answer in tool arguments.\n"
-            "Tools:\n"
-            f"{catalog}\n"
-            "web_search/connector_lookup retrieve; calculator/date_diff/current_time compute or read time; "
-            "finish_task requests an RWKV cross-validation review before final synthesis.\n"
+            "Tool choice contract:\n"
+            "- connector_lookup: structured weather/current alerts, a specific GitHub repository/code/release, and scholarly arXiv/DOI paper records. Its scope is one enum value, never a comma-separated list.\n"
+            "- web_search: general Web research, exact URLs, documentation, and product or service status pages; also use it as connector fallback.\n"
+            "- calculator/date_diff/current_time: deterministic calculation or clock observations after required operands are known.\n"
+            "- finish_task: stop retrieval and ask RWKV to synthesize from all retained sources.\n"
             "Retrieval tools internally handle provider selection, URL fetching, cleaning, chunking and evidence extraction.\n"
             "Tool Output is context for your next decision. You decide whether to retrieve again, use another tool, or finish.\n"
-            "Choose calculator for arithmetic, current_time for the clock, date_diff for exact date distance, connector_lookup for structured sources, and web_search for general web research when useful.\n"
-            "When an active RWKV replan review is present, advance one of its missing_points before returning to an unrelated already-attempted point. Treat prior query wording and required_domains as revisable model hypotheses: if they produced no evidence, reconsider aliases, language, source class, domain, connector, or direct URL. If it lists frozen_paths, do not submit the same action and query or URL again; choose a materially different retrieval route yourself. The review never supplies a replacement query: choose the tool, query, and source yourself.\n"
+            "Choose calculator for arithmetic, current_time for the clock, date_diff for exact date distance, connector_lookup for structured sources, and web_search for general web research when useful. "
+            "When one connector exactly matches the request (weather, weather alerts, a named GitHub repository/code/release, or an arXiv/DOI/scholarly paper), use that structured connector before general-web fallback. A company's product or service status page is general web, not a repository lookup.\n"
+            "The shared ledger reports exact bound and candidate evidence-record counts for every factual point, including zero. These are RWKV extraction observations, not completion judgements. "
+            "Before repeating an already-covered route, compare all factual points and inspect candidate record identities; consider a materially different retrieval when exact evidence is still absent, while keeping the choice and query model-authored.\n"
+            "For a current or latest request, use the current UTC date visible in Runtime state to disambiguate the search; do not assume that an older record is current.\n"
+            "If the latest observation reports no new evidence or a frozen path, choose a materially different query, "
+            "source, tool, or finish from retained sources. The controller never supplies a replacement query.\n"
             "Avoid needless exact repeats, but make every next-step and finish decision yourself.\n"
             "For date_diff, use only exact YYYY-MM-DD values already present in the question or visible evidence.\n"
             f"Current phase: {phase}"
@@ -1593,54 +816,16 @@ class Planner:
 
     @staticmethod
     def _compact_task_plan(task_plan: dict[str, Any] | None) -> dict[str, Any]:
-        """Project the plan to routing fields instead of replaying its raw JSON."""
+        """Project only RWKV's goal and factual focuses for later decisions.
 
-        if not isinstance(task_plan, dict):
-            return {"status": "missing"}
-        compact: dict[str, Any] = {}
-        for key in (
-            "schema_version",
-            "goal",
-            "task_mode",
-            "source_policy",
-            "required_domains",
-            "requested_fields",
-            "max_items",
-            "completion_rule",
-        ):
-            if key in task_plan:
-                value = task_plan[key]
-                if isinstance(value, str):
-                    value = value[:500]
-                elif isinstance(value, list):
-                    value = [str(item)[:240] for item in value[:12]]
-                compact[key] = value
-        points = []
-        for point in list(task_plan.get("atomic_points") or [])[:8]:
-            if not isinstance(point, dict):
-                continue
-            projected = {
-                key: point.get(key)
-                for key in (
-                    "id",
-                    "task",
-                    "objective",
-                    "evidence_needed",
-                    "acceptance_criteria",
-                    "output_format",
-                    "status",
-                )
-                if key in point
-            }
-            for key in ("task", "objective", "output_format", "status"):
-                if isinstance(projected.get(key), str):
-                    projected[key] = projected[key][:400]
-            for key in ("evidence_needed", "acceptance_criteria"):
-                if isinstance(projected.get(key), list):
-                    projected[key] = [str(item)[:300] for item in projected[key][:8]]
-            points.append(projected)
-        compact["atomic_points"] = points
-        return compact
+        Source policies, mutable Claim statuses and acceptance gates are not
+        part of the decision brief.  They previously contradicted retrieved
+        material when an otherwise useful source was not explicitly bound to a
+        task-point ID, which repeatedly anchored RWKV on an already-run query.
+        The complete plan remains in the trace for provenance.
+        """
+
+        return compact_task_plan(task_plan)
 
     @staticmethod
     def _cross_validation_plan_projection(
@@ -1649,7 +834,7 @@ class Planner:
         """Project only answer obligations, without replaying task-plan protocol.
 
         Cross-validation asks RWKV for a different JSON schema.  Replaying a
-        complete ``task_plan.v1`` object in the same prompt made the recurrent
+        complete ``task_plan.v2`` object in the same prompt made the recurrent
         model continue the embedded planner schema instead of emitting the
         requested review.  This projection keeps every user-facing evidence
         obligation but removes planner-only protocol and workflow fields.
@@ -1658,14 +843,18 @@ class Planner:
         compact = Planner._compact_task_plan(task_plan)
         return {
             "goal": str(compact.get("goal") or "")[:500],
-            "source_policy": str(compact.get("source_policy") or "")[:120],
-            "required_domains": list(compact.get("required_domains") or [])[:12],
-            "requested_fields": list(compact.get("requested_fields") or [])[:12],
             "points_to_check": [
                 {
-                    key: point.get(key)
-                    for key in ("id", "task", "objective", "evidence_needed")
-                    if key in point
+                    "id": point.get("id"),
+                    "question": point_question(point)[:500],
+                    "subject": str(point.get("subject") or "")[:240],
+                    "relation": str(point.get("relation") or "")[:160],
+                    "fields": list(point.get("fields") or [])[:16],
+                    "time_scope": point.get("time_scope") or "unspecified",
+                    "set_semantics": point.get("set_semantics") or "single",
+                    "premise_requires_verification": bool(
+                        point.get("premise_requires_verification")
+                    ),
                 }
                 for point in compact.get("atomic_points") or []
                 if isinstance(point, dict)
@@ -1714,12 +903,15 @@ class Planner:
 
     @staticmethod
     def _replan_environment_projection(env_context: str) -> str:
-        """Keep current time and original source spans visible to Replan.
+        """Build valid bounded state without replaying a stalled route.
 
-        The shared state places feedback and query history before source
-        locators. Taking only its first characters therefore repeated the
-        failed route while hiding the evidence needed to change strategy.
-        Parse the labelled state sections and preserve fetched spans verbatim.
+        Replan is a fresh RWKV request.  Replaying exact query strings in both
+        the ledger and frozen paths copy-anchors the recurrent model to the
+        route that triggered recovery.  Keep observable progress counts and
+        original source spans, but leave the next query entirely to RWKV.
+
+        Every field is bounded before serialization.  Never slice serialized
+        JSON: doing that produced malformed Runtime state in real traces.
         """
 
         text = str(env_context or "").strip()
@@ -1730,6 +922,7 @@ class Planner:
         labels = {
             "Question time/freshness policy": "freshness",
             "Shared retrieval ledger": "retrieval_ledger",
+            "RWKV-bound exact evidence records": "evidence_records",
             "Bounded original source locators": "source_locators",
             "Minimal original source locators": "source_locators",
             "Persistent deterministic tool results": "deterministic_results",
@@ -1746,40 +939,220 @@ class Planner:
             except (TypeError, json.JSONDecodeError):
                 continue
 
+        freshness = labelled.get("freshness")
+        if isinstance(freshness, dict):
+            labelled["freshness"] = {
+                key: str(freshness.get(key) or "")[:160]
+                for key in (
+                    "as_of",
+                    "now",
+                    "mode",
+                    "unknown_date_policy",
+                )
+                if key in freshness
+            }
+
+        ledger = labelled.get("retrieval_ledger")
+        if isinstance(ledger, dict):
+            queries = [row for row in ledger.get("queries") or [] if isinstance(row, dict)]
+            frozen_paths = [
+                row for row in ledger.get("frozen_paths") or [] if isinstance(row, dict)
+            ]
+            route_status_counts: dict[str, int] = {}
+            for row in queries:
+                status = str(row.get("status") or "unknown")[:80]
+                route_status_counts[status] = route_status_counts.get(status, 0) + 1
+            frozen_reason_counts: dict[str, int] = {}
+            for row in frozen_paths:
+                reason = str(row.get("reason") or "unknown")[:120]
+                frozen_reason_counts[reason] = frozen_reason_counts.get(reason, 0) + 1
+            infrastructure = ledger.get("retrieval_infrastructure")
+            compact_infrastructure = {}
+            if isinstance(infrastructure, dict):
+                compact_infrastructure = {
+                    key: infrastructure.get(key)
+                    for key in (
+                        "complete",
+                        "event_count",
+                        "affected_claim_ids",
+                        "unresolved_chunk_count",
+                        "transport_error_count",
+                    )
+                    if key in infrastructure
+                }
+            labelled["retrieval_ledger"] = {
+                key: ledger.get(key)
+                for key in (
+                    "schema_version",
+                    "evidence_revision",
+                    "round_count",
+                    "source_count",
+                    "attempted_url_count",
+                    "replan_count",
+                )
+                if key in ledger
+            }
+            point_progress = []
+            for row in ledger.get("factual_point_progress") or []:
+                if not isinstance(row, dict) or not str(row.get("id") or "").strip():
+                    continue
+                point_progress.append(
+                    {
+                        "id": str(row.get("id") or "")[:120],
+                        "bound_evidence_record_count": int(
+                            row.get("bound_evidence_record_count") or 0
+                        ),
+                        "candidate_evidence_record_count": int(
+                            row.get("candidate_evidence_record_count") or 0
+                        ),
+                        "total_evidence_record_count": int(
+                            row.get("total_evidence_record_count") or 0
+                        ),
+                        "attempt_count": int(row.get("attempt_count") or 0),
+                        "retrieval_state": str(row.get("retrieval_state") or "")[:80],
+                    }
+                )
+            labelled["retrieval_ledger"]["factual_point_progress"] = point_progress[:8]
+            labelled["retrieval_ledger"]["unassigned_source_count"] = int(
+                ledger.get("unassigned_source_count") or 0
+            )
+            labelled["retrieval_ledger"].update(
+                {
+                    "previous_route_count": len(queries),
+                    "frozen_route_count": len(frozen_paths),
+                    "route_status_counts": route_status_counts,
+                    "frozen_reason_counts": frozen_reason_counts,
+                    "route_text_withheld_from_replan": bool(queries or frozen_paths),
+                }
+            )
+            if compact_infrastructure:
+                labelled["retrieval_ledger"][
+                    "retrieval_infrastructure"
+                ] = compact_infrastructure
+
         locators = labelled.get("source_locators")
         if isinstance(locators, dict):
             projected_sources = []
-            for source in list(locators.get("sources") or [])[:4]:
+            for source in list(locators.get("sources") or [])[:3]:
                 if not isinstance(source, dict):
                     continue
-                projected_sources.append(
-                    {
-                        key: source.get(key)
+                projected_source: dict[str, Any] = {}
+                for key, limit in (
+                    ("source_id", 80),
+                    ("title", 240),
+                    ("url", 500),
+                    ("published", 80),
+                    ("updated", 80),
+                    ("date", 80),
+                    ("provider", 120),
+                ):
+                    if key in source:
+                        projected_source[key] = str(source.get(key) or "")[:limit]
+                if isinstance(source.get("claim_ids"), list):
+                    projected_source["claim_ids"] = [
+                        str(value)[:80] for value in source["claim_ids"][:8]
+                    ]
+                source_freshness = source.get("freshness")
+                if isinstance(source_freshness, dict):
+                    projected_source["freshness"] = {
+                        key: source_freshness.get(key)
                         for key in (
-                            "source_id",
-                            "title",
-                            "url",
-                            "claim_ids",
-                            "published",
-                            "updated",
-                            "date",
-                            "provider",
-                            "freshness",
-                            "spans",
+                            "policy",
+                            "as_of",
+                            "source_date",
+                            "source_date_origin",
+                            "state",
                         )
-                        if key in source
+                        if key in source_freshness
                     }
-                )
+                spans = [
+                    span for span in source.get("spans") or [] if isinstance(span, dict)
+                ]
+                projected_source["source_span_count"] = len(spans)
+                projected_source["spans"] = [
+                    {
+                        "chunk_id": str(span.get("chunk_id") or "")[:120],
+                        "start_char": span.get("start_char"),
+                        "text": str(span.get("text") or "")[:520],
+                        "truncated": bool(
+                            span.get("truncated")
+                            or len(str(span.get("text") or "")) > 520
+                        ),
+                    }
+                    for span in spans[:2]
+                ]
+                projected_sources.append(projected_source)
             labelled["source_locators"] = {
                 "source_count": locators.get("source_count"),
                 "visible_source_count": len(projected_sources),
                 "sources": projected_sources,
             }
 
+        evidence_records = labelled.get("evidence_records")
+        if isinstance(evidence_records, dict):
+            projected_records = []
+            for record in list(evidence_records.get("records") or [])[:8]:
+                if not isinstance(record, dict):
+                    continue
+                projected_records.append(
+                    {
+                        "evidence_record_id": str(
+                            record.get("evidence_record_id") or ""
+                        )[:80],
+                        "task_record_id": str(
+                            record.get("task_record_id") or ""
+                        )[:80],
+                        "subject_key": str(record.get("subject_key") or "")[:240],
+                        "record_key": str(record.get("record_key") or "")[:240],
+                        "field_keys": [
+                            str(value)[:120]
+                            for value in record.get("field_keys") or []
+                            if str(value).strip()
+                        ][:16],
+                        "title": str(record.get("title") or "")[:240],
+                        "url": str(record.get("url") or "")[:500],
+                        "published": str(record.get("published") or "")[:80],
+                        "updated": str(record.get("updated") or "")[:80],
+                        "quote": str(record.get("quote") or "")[:520],
+                        "quote_truncated": bool(record.get("quote_truncated"))
+                        or len(str(record.get("quote") or "")) > 520,
+                    }
+                )
+            labelled["evidence_records"] = {
+                "schema_version": "planner-records.v1",
+                "record_count": int(evidence_records.get("record_count") or 0),
+                "visible_record_count": len(projected_records),
+                "truncated": bool(evidence_records.get("truncated"))
+                or len(projected_records)
+                < int(evidence_records.get("record_count") or 0),
+                "records": projected_records,
+            }
+
+        deterministic = labelled.get("deterministic_results")
+        if isinstance(deterministic, list):
+            labelled["deterministic_results"] = [
+                {
+                    key: (str(row.get(key) or "")[:240] if isinstance(row.get(key), str) else row.get(key))
+                    for key in (
+                        "tool",
+                        "status",
+                        "expression",
+                        "value",
+                        "result",
+                        "days",
+                        "iso",
+                        "date",
+                        "timezone",
+                    )
+                    if key in row
+                }
+                for row in deterministic[:4]
+                if isinstance(row, dict)
+            ]
+
         if not labelled:
-            return text[:2000]
-        rendered = json.dumps(labelled, ensure_ascii=False, separators=(",", ":"))
-        return rendered[:6500]
+            labelled = {"unstructured_state_summary": text[:1200]}
+        return json.dumps(labelled, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
     def _compact_replan_review(review: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1788,38 +1161,10 @@ class Planner:
         if not isinstance(review, dict):
             return None
         compact: dict[str, Any] = {}
-        for key in ("decision", "decision_source", "next_focus", "reason"):
+        for key in ("decision", "trigger"):
             value = str(review.get(key) or "").strip()
             if value:
-                compact[key] = value[:800]
-        for key in ("missing_points", "conflicts"):
-            values = review.get(key) or []
-            if isinstance(values, (str, dict)):
-                values = [values]
-            if isinstance(values, list):
-                compact[key] = [
-                    str(value)[:500]
-                    for value in values[:16]
-                    if str(value).strip()
-                ]
-        statuses = review.get("task_point_status") or {}
-        if isinstance(statuses, dict):
-            compact["task_point_status"] = {
-                str(point_id)[:120]: {
-                    "status": str(
-                        value.get("status") if isinstance(value, dict) else value
-                    )[:120],
-                    "evidence_refs": [
-                        str(ref)[:120]
-                        for ref in (
-                            value.get("evidence_refs") or []
-                            if isinstance(value, dict)
-                            else []
-                        )[:8]
-                    ],
-                }
-                for point_id, value in list(statuses.items())[:16]
-            }
+                compact[key] = value[:1000]
         frozen_rows = review.get("frozen_paths") or []
         frozen_path = review.get("frozen_path")
         if isinstance(frozen_path, dict):
@@ -1827,24 +1172,142 @@ class Planner:
         if isinstance(frozen_rows, dict):
             frozen_rows = [frozen_rows]
         if isinstance(frozen_rows, list):
-            projected_frozen = [
-                {
-                    "action": str(value.get("action") or "")[:120],
-                    "query": str(
-                        value.get("query")
-                        or (value.get("arguments") or {}).get("query")
-                        or (value.get("arguments") or {}).get("url")
-                        or ""
-                    )[:500],
-                    "task_point_id": str(value.get("task_point_id") or "")[:120],
-                    "reason": str(value.get("reason") or "")[:240],
-                }
-                for value in frozen_rows[-8:]
-                if isinstance(value, dict)
-            ]
+            projected_frozen = [value for value in frozen_rows[-8:] if isinstance(value, dict)]
             if projected_frozen:
-                compact["frozen_paths"] = projected_frozen
+                compact["frozen_route_count"] = len(projected_frozen)
+                reasons: dict[str, int] = {}
+                for value in projected_frozen:
+                    reason = str(value.get("reason") or "unknown")[:120]
+                    reasons[reason] = reasons.get(reason, 0) + 1
+                compact["frozen_reason_counts"] = reasons
+                compact["route_text_withheld_from_replan"] = True
         return compact or None
+
+    @staticmethod
+    def _compact_rebuild_observation(result: Any) -> str:
+        """Project recovery state without replaying prior route arguments.
+
+        The complete observation remains in the execution trace.  This
+        projection is only the fresh model request boundary, so it carries
+        evidence/progress metadata but never the query or URL that just
+        stalled.
+        """
+
+        value = result
+        if isinstance(result, str):
+            try:
+                value = json.loads(result)
+            except json.JSONDecodeError:
+                value = {"status": "recovery", "observation_type": "unstructured"}
+        if not isinstance(value, dict):
+            value = {"status": "recovery", "observation_type": type(value).__name__}
+
+        compact: dict[str, Any] = {
+            "route_text_withheld_from_rebuild": True,
+        }
+        for key in (
+            "schema_version",
+            "protocol_version",
+            "status",
+            "tool",
+            "error_class",
+            "repeat_count",
+            "count",
+            "candidate_count",
+            "fetched_count",
+            "evidence_ready",
+            "evidence_state",
+            "missing_point_ids",
+            "task_point_id",
+            "task_point_state",
+        ):
+            if key not in value:
+                continue
+            item = value[key]
+            if isinstance(item, str):
+                item = item[:240]
+            elif isinstance(item, list):
+                item = item[:12]
+            compact[key] = item
+
+        retrieval_delta = value.get("retrieval_delta")
+        if isinstance(retrieval_delta, dict):
+            compact["retrieval_delta"] = {
+                key: retrieval_delta.get(key)
+                for key in (
+                    "step",
+                    "branch_id",
+                    "task_point_id",
+                    "action",
+                    "phase",
+                    "query_count",
+                    "exact_repeat",
+                    "new_url_count",
+                    "evidence_count",
+                    "status",
+                    "evidence_ready",
+                )
+                if key in retrieval_delta
+            }
+
+        request = value.get("request")
+        if isinstance(request, dict):
+            arguments = request.get("arguments") or request.get("args") or {}
+            compact["previous_request"] = {
+                "tool": str(
+                    request.get("name")
+                    or request.get("action")
+                    or request.get("tool")
+                    or ""
+                )[:120],
+                "argument_names": sorted(str(key)[:120] for key in arguments)[:12]
+                if isinstance(arguments, dict)
+                else [],
+            }
+
+        frozen_rows = value.get("frozen_paths") or []
+        if isinstance(value.get("frozen_path"), dict):
+            frozen_rows = [*list(frozen_rows or []), value["frozen_path"]]
+        if isinstance(frozen_rows, dict):
+            frozen_rows = [frozen_rows]
+        if isinstance(frozen_rows, list):
+            compact["frozen_route_count"] = len(
+                [row for row in frozen_rows if isinstance(row, dict)]
+            )
+
+        ledger = value.get("retrieval_ledger")
+        if isinstance(ledger, dict):
+            compact["retrieval_ledger"] = {
+                key: ledger.get(key)
+                for key in (
+                    "total_searches",
+                    "unique_queries",
+                    "retrieved_url_count",
+                    "exact_repeat_count",
+                    "blocked_duplicate_count",
+                    "failed_request_count",
+                    "evidence_revision",
+                    "round_count",
+                    "source_count",
+                    "attempted_url_count",
+                    "replan_count",
+                )
+                if key in ledger
+            }
+            compact["retrieval_ledger"]["previous_route_count"] = len(
+                [row for row in ledger.get("queries") or [] if isinstance(row, dict)]
+            )
+            compact["retrieval_ledger"]["frozen_route_count"] = len(
+                [row for row in ledger.get("frozen_paths") or [] if isinstance(row, dict)]
+            )
+
+        review = value.get("evidence_review") or value.get("pending_replan")
+        if isinstance(review, dict):
+            projected_review = Planner._compact_replan_review(review)
+            if projected_review:
+                compact["evidence_review"] = projected_review
+
+        return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
     def _compact_routing_observation(result: Any) -> str:
@@ -1917,7 +1380,7 @@ class Planner:
                 compact[key] = item
 
         candidates = []
-        for item in list(value.get("candidate_urls") or [])[:6]:
+        for item in list(value.get("candidate_urls") or [])[:4]:
             if not isinstance(item, dict):
                 continue
             candidates.append(
@@ -1927,7 +1390,7 @@ class Planner:
                     if key in item
                 }
             )
-        for item in list(value.get("results") or [])[:6]:
+        for item in list(value.get("results") or [])[:4]:
             if not isinstance(item, dict):
                 continue
             metadata = {
@@ -1935,16 +1398,13 @@ class Planner:
                 for key in ("title", "url", "source", "scope", "path", "project", "connector")
                 if key in item
             }
-            snippet = str(item.get("snippet") or "").strip()
-            if snippet:
-                metadata["snippet"] = snippet[:220]
             if metadata:
                 candidates.append(metadata)
         if candidates:
             compact["candidates"] = candidates[:8]
 
         evidence_context = []
-        for item in list(value.get("results") or [])[:4]:
+        for item in list(value.get("results") or [])[:2]:
             if not isinstance(item, dict):
                 continue
             chunk_candidates = [
@@ -1952,39 +1412,35 @@ class Planner:
                 for candidate in list(item.get("chunk_candidates") or [])
                 if isinstance(candidate, dict)
                 and candidate.get("supported") is True
-            ][:4]
+            ][:2]
             source_by_id = {
                 str(chunk.get("chunk_id") or ""): str(chunk.get("text") or "")
                 for chunk in list(item.get("source_chunks") or [])[:8]
                 if isinstance(chunk, dict) and str(chunk.get("chunk_id") or "")
             }
             locators = []
-            for candidate in chunk_candidates[:2]:
+            for candidate in chunk_candidates[:1]:
                 chunk_id = str(candidate.get("chunk_id") or "")
                 # Generated facts are retained in the execution trace only.
                 # The recurrent planner may see the exact located source span
                 # and bounded original chunk, never an extractor paraphrase.
-                facts: list[str] = []
                 quote = str(candidate.get("quote") or "").strip()[:500]
-                source_text = source_by_id.get(chunk_id, "")[:700]
-                if facts or quote or source_text:
+                source_text = source_by_id.get(chunk_id, "")[:600]
+                if quote or source_text:
                     locators.append(
                         {
                             "chunk_id": chunk_id,
-                            "facts": facts,
                             "quote": quote,
                             "source_text": source_text,
                         }
                     )
-            compact_facts = str(item.get("model_extracted_facts") or "").strip()[:1200]
-            if locators or compact_facts:
+            if locators:
                 evidence_context.append(
                     {
                         "title": str(item.get("title") or "")[:240],
                         "url": str(item.get("url") or "")[:360],
                         "evidence_status": str(item.get("evidence_status") or "")[:80],
                         "locators": locators,
-                        "compact_facts": compact_facts,
                     }
                 )
         if evidence_context:
@@ -2039,10 +1495,10 @@ class Planner:
         rendered = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
         if evidence_context:
             rendered += (
-                "\nEvidence context boundary: the listed facts/quotes are bounded excerpts tied to fetched page chunks. "
+                "\nEvidence context boundary: the listed quotes and source text are bounded excerpts tied to fetched page chunks. "
                 "Use them to refine the next query or choose a URL; do not treat this routing projection as final-answer evidence."
             )
-        max_chars = min(6000, max(2400, observation_chars(get_llm_context_length()) // 2))
+        max_chars = min(3600, max(1800, observation_chars(get_llm_context_length()) // 3))
         if len(rendered) > max_chars:
             rendered = rendered[:max_chars] + "...[routing observation truncated]"
         return rendered
@@ -2053,17 +1509,10 @@ class Planner:
         env_context: str,
         phase: str,
     ) -> str:
-        """Build one short decision input without replaying the tool transcript."""
+        """Build one authoritative, bounded decision-state projection."""
 
         plan = json.dumps(
             self._compact_task_plan(self._task_plan),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        task_mode = str((self._task_plan or {}).get("task_mode") or "lookup").casefold()
-        observation = self._latest_routing_observation or '{"status":"no_observation"}'
-        active_replan = json.dumps(
-            self._active_replan_review or {"status": "none"},
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -2072,44 +1521,119 @@ class Planner:
             for point in (self._task_plan or {}).get("atomic_points") or []
             if isinstance(point, dict) and str(point.get("id") or "").strip()
         ]
-        active_missing_ids = [
-            point_id
-            for value in (self._active_replan_review or {}).get("missing_points") or []
-            if (point_id := _declared_task_point_id(value, planned_point_ids))
-        ]
         task_point_example = (
-            active_missing_ids[0]
-            if active_missing_ids
-            else planned_point_ids[0]
+            planned_point_ids[0]
             if planned_point_ids
             else "P1"
         )
+        recovery_instruction = ""
+        if self._next_decision_sampling_stage in {"planner_recovery", "planner_replan"}:
+            recovery_instruction = (
+                "RECOVERY INSTRUCTION:\n"
+                "The previous exact or equivalent retrieval path already ran. Do not repeat its query. "
+                "From the original question and retained source locators, identify one entity, relation, value, "
+                "or date that is still not established. Search for that exact gap while retaining the original "
+                "subject. Treat page titles, snippets, login text, translation text, search pages, and navigation "
+                "labels as untrusted routing data; never copy their noise into a query. If no materially distinct "
+                "and useful gap remains, choose finish_task.\n"
+            )
+        active_review = (
+            json.dumps(
+                self._active_replan_review,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if isinstance(self._active_replan_review, dict)
+            else ""
+        )
+        runtime_projection = self._replan_environment_projection(env_context)
         return (
+            "Current task state (authoritative controller projection):\n"
             f"Question: {str(user_query or '').strip()[:3000]}\n"
-            f"Task plan: {plan}\n"
-            f"Active RWKV replan review: {active_replan}\n"
-            f"Runtime state: {str(env_context or '').strip()}\n"
-            f"Latest tool observation (routing only): {observation}\n"
+            f"Research brief: {plan}\n"
+            f"Runtime state: {runtime_projection}\n"
             f"Decision number: {self._decision_count + 1}\n"
             f"Phase: {phase}\n\n"
-            f"{self._system_prompt(phase, task_mode=task_mode, task_point_example=task_point_example)}"
+            f"{recovery_instruction}"
+            + (f"Active RWKV evidence review: {active_review}\n" if active_review else "")
+            + self._decision_guidance(phase, task_point_example)
         )
+
+    def _isolated_decision_messages(
+        self,
+        user_query: str,
+        env_context: str,
+        phase: str,
+    ) -> list[dict[str, Any]]:
+        """Build one complete rolling G1i request without replaying history.
+
+        The request always contains one authoritative User state.  A follow-up
+        additionally contains only the immediately preceding Assistant call
+        and its latest compact Function output.  This preserves the online
+        G1i turn grammar without accumulating older action/result pairs.
+        """
+
+        point_ids = [
+            str(point.get("id") or "").strip()
+            for point in (self._task_plan or {}).get("atomic_points") or []
+            if isinstance(point, dict) and str(point.get("id") or "").strip()
+        ]
+        system_message = {
+            "role": "system",
+            "content": self._system_prompt(
+                phase,
+                task_point_example=(point_ids[0] if point_ids else "P1"),
+            ),
+        }
+        decision_body = self._build_isolated_decision_body(
+            user_query,
+            env_context,
+            phase,
+        )
+        messages: list[dict[str, Any]] = [
+            system_message,
+            {"role": "user", "content": decision_body},
+        ]
+        if self._latest_routing_observation:
+            if self._latest_tool_call:
+                messages.append(
+                    {"role": "assistant", "content": dict(self._latest_tool_call)}
+                )
+                messages.append(
+                    {"role": "tool", "content": self._latest_routing_observation}
+                )
+            else:
+                # Recovery can be reconstructed without an executable prior
+                # call.  In that case the observation belongs to the current
+                # User state rather than a syntactically orphaned Function
+                # output turn.
+                messages[1]["content"] = (
+                    f"{decision_body}\n\nRecovery observation:\n"
+                    f"{self._latest_routing_observation}"
+                )
+        return messages
 
     @staticmethod
     def _render_transcript(messages: list[dict[str, Any]]) -> str:
         return render_tool_transcript(messages)
 
     def _ensure_conversation(self, user_query: str, env_context: str, phase: str) -> None:
-        del env_context, phase
         if self._messages:
             return
         self._messages = [
             {
+                "role": "system",
+                "content": self._system_prompt(phase),
+            },
+            {
                 "role": "user",
-                # The live routing projection is supplied once in every
-                # isolated decision body. Replaying a stale 5K prefix here
-                # duplicated state and pushed replans to the 16K limit.
-                "content": str(user_query or ""),
+                "content": (
+                    f"Question: {str(user_query or '').strip()[:3000]}\n"
+                    f"Research brief: {json.dumps(self._compact_task_plan(self._task_plan), ensure_ascii=False, separators=(',', ':'))}\n"
+                    f"Runtime state: {str(env_context or '').strip()}\n"
+                    f"Phase: {phase}\n\n"
+                    f"{self._decision_guidance(phase)}"
+                ),
             },
         ]
 
@@ -2324,7 +1848,14 @@ class Planner:
         context_length = max(1024, int(get_llm_context_length()))
         prompt_limit = planner_prompt_tokens(context_length)
         while len(self._messages) > 3 and get_token_count(self._render_transcript(self._messages)) > prompt_limit:
-            self._messages.pop(2)
+            if (
+                len(self._messages) > 4
+                and str(self._messages[2].get("role") or "") == "assistant"
+                and str(self._messages[3].get("role") or "") in {"tool", "function", "observation"}
+            ):
+                del self._messages[2:4]
+            else:
+                self._messages.pop(2)
 
         # A single unusually large observation should not make the request
         # exceed the server limit. Keep its status, URLs and final tail, while
@@ -2342,7 +1873,14 @@ class Planner:
                         + content[-tail_chars:]
                     )
             while len(self._messages) > 3 and get_token_count(self._render_transcript(self._messages)) > prompt_limit:
-                self._messages.pop(2)
+                if (
+                    len(self._messages) > 4
+                    and str(self._messages[2].get("role") or "") == "assistant"
+                    and str(self._messages[3].get("role") or "") in {"tool", "function", "observation"}
+                ):
+                    del self._messages[2:4]
+                else:
+                    self._messages.pop(2)
 
     def observe_tool_result(self, result: Any) -> None:
         """Append the executor result in the rwkv-skills user-observation form."""
@@ -2358,6 +1896,29 @@ class Planner:
         )
         self._trim_conversation()
 
+    def request_recovery_turn(
+        self,
+        observation: Any,
+        *,
+        user_query: str = "",
+        env_context: str = "",
+        phase: str = "DISCOVERY",
+    ) -> None:
+        """Freeze a stalled transcript and rebuild one exploratory G1i session."""
+
+        self._latest_routing_observation = self._compact_routing_observation(
+            observation
+        )
+        self._next_decision_sampling_stage = "planner_recovery"
+        self._next_decision_seed = None
+        if str(user_query or "").strip():
+            value = observation if isinstance(observation, dict) else {
+                "status": "recovery",
+                "message": str(observation or ""),
+            }
+            self.rebuild_session(user_query, env_context, value, phase)
+            self._next_decision_sampling_stage = "planner_recovery"
+
     @staticmethod
     def _completion_budget(prompt: str) -> int:
         """Use the remaining model context, capped at a 10K planner response."""
@@ -2366,95 +1927,6 @@ class Planner:
         prompt_tokens = get_token_count(prompt)
         remaining = context_length - prompt_tokens - 1024
         return max(256, min(10000, remaining))
-
-    def _bind_existing_action_to_task_point(
-        self,
-        user_query: str,
-        *,
-        action: str,
-        arguments: dict[str, Any],
-        planned_point_ids: list[str],
-    ) -> dict[str, Any]:
-        """Let RWKV bind its existing action without regenerating that action.
-
-        ``task_point_id`` is routing metadata, not a reason to discard an
-        otherwise valid model-selected tool call.  This small request asks
-        RWKV to associate the exact action it already chose with one of its
-        own task-plan points.  The controller never changes the action or its
-        arguments, and a binding protocol failure remains non-fatal.
-        """
-
-        compact_points = [
-            {
-                key: point.get(key)
-                for key in ("id", "task", "objective", "evidence_needed")
-                if key in point
-            }
-            for point in list((self._task_plan or {}).get("atomic_points") or [])[:16]
-            if isinstance(point, dict)
-            and str(point.get("id") or "").strip() in planned_point_ids
-        ]
-        fixed_call = {"name": action, "arguments": arguments}
-        prompt = (
-            "### User\n"
-            "You are the RWKV task-point binder. The RWKV planner has already chosen the tool call below. "
-            "Do not change, regenerate, improve, or reject its name or arguments. Associate that exact call "
-            "with the one atomic point it is trying to advance. Return exactly one JSON object in the form "
-            '{"task_point_id":"P1"}; no Markdown, explanation, tool call, query, or extra fields.\n\n'
-            f"Original user question: {str(user_query or '').strip()[:3000]}\n"
-            "Model-generated atomic points: "
-            f"{json.dumps(compact_points, ensure_ascii=False, separators=(',', ':'))}\n"
-            "Fixed RWKV tool call (read-only): "
-            f"{json.dumps(fixed_call, ensure_ascii=False, separators=(',', ':'))}\n"
-            f"Valid task_point_id values: {', '.join(planned_point_ids)}\n"
-            f"{assistant_json_prefix(enable_think=False, prefill_object=False)}"
-        )
-        raw = ""
-        sampling_temperature = get_model_stage_temperature("task_point_binding")
-        try:
-            with model_sampling_parameters(
-                sampling_temperature,
-                stage="task_point_binding",
-                policy_reason="low_entropy_task_point_classification",
-            ):
-                if is_local_provider(self.llm.provider):
-                    response = self.llm.text_completion(
-                        prompt,
-                        max_tokens=256,
-                        stop=JSON_CALL_STOP_SUFFIXES,
-                    )
-                else:
-                    response = self.llm.chat_completion(
-                        [{"role": "user", "content": prompt}],
-                        max_tokens=256,
-                    )
-            raw = str(response.content or "")
-            payload = _extract_json_object(raw)
-            task_point_id = str(
-                payload.get("task_point_id") or payload.get("point_id") or ""
-            ).strip()
-            if task_point_id not in planned_point_ids:
-                raise ValueError(
-                    "task-point binding must choose one of: "
-                    + ", ".join(planned_point_ids)
-                )
-            return {
-                "task_point_id": task_point_id,
-                "binding_method": "rwkv_binding_request",
-                "raw_model_output": visible_model_text(raw),
-                "prompt": prompt,
-                "error": "",
-                "sampling_temperature": sampling_temperature,
-            }
-        except Exception as exc:
-            return {
-                "task_point_id": "",
-                "binding_method": "unassigned",
-                "raw_model_output": visible_model_text(raw),
-                "prompt": prompt,
-                "error": f"{type(exc).__name__}: {exc}",
-                "sampling_temperature": sampling_temperature,
-            }
 
     def plan_next_action(
         self,
@@ -2465,43 +1937,18 @@ class Planner:
     ) -> dict[str, Any]:
         del analysis_result  # model sees the full environment, not a static route
         self._ensure_conversation(user_query, env_context, phase)
-        if self._queued_replan_actions:
-            queued = dict(self._queued_replan_actions.pop(0))
-            if not self._queued_replan_actions:
-                self._next_decision_sampling_stage = (
-                    "planner_replan" if self._active_replan_review else "planner"
-                )
-            self._next_decision_seed = None
-            call = {
-                "name": str(queued.get("action") or ""),
-                "arguments": dict(queued.get("args") or {}),
-            }
-            if queued.get("task_point_id"):
-                call["task_point_id"] = str(queued["task_point_id"])
-            if queued.get("call_id"):
-                call["call_id"] = str(queued["call_id"])
-            self._messages.append({"role": "assistant", "content": call})
-            self._decision_count += 1
-            return queued
-        # Keep the bounded native transcript as the decision context.  The
-        # current envelope refreshes phase/tool visibility, while compact
-        # observations preserve the factual thread needed for precise follow-up
-        # queries.  Raw audit entries are excluded by the routing marker.
-        decision_body = self._build_isolated_decision_body(user_query, env_context, phase)
-        history = [
-            message
-            for message in self._messages
-            if not (
-                str(message.get("role") or "").casefold() in {"tool", "function", "observation"}
-                and not message.get("_routing_observation")
-            )
+        # Every decision is a fresh online-G1i request. The audit transcript is
+        # deliberately not replayed into the model.
+        planned_point_ids = [
+            str(point.get("id") or "").strip()
+            for point in (self._task_plan or {}).get("atomic_points") or []
+            if isinstance(point, dict) and str(point.get("id") or "").strip()
         ]
-        history.append({"role": "user", "content": decision_body})
-        prompt_limit = planner_prompt_tokens(max(1024, int(get_llm_context_length())))
-        while len(history) > 2 and get_token_count(render_tool_transcript(history)) > prompt_limit:
-            # Preserve the initial goal and the live decision envelope; remove
-            # the oldest bounded history entry first.
-            history.pop(1)
+        history = self._isolated_decision_messages(
+            user_query,
+            env_context,
+            phase,
+        )
         prompt = render_tool_transcript(history)
         raw = ""
         planner_error = ""
@@ -2513,11 +1960,6 @@ class Planner:
         task_point_binding_method = "not_required"
         task_point_binding_raw = ""
         task_point_binding_error = ""
-        planned_point_ids = [
-            str(point.get("id") or "").strip()
-            for point in (self._task_plan or {}).get("atomic_points") or []
-            if isinstance(point, dict) and str(point.get("id") or "").strip()
-        ]
         sampling_stage = self._next_decision_sampling_stage
         sampling_temperature = (
             get_model_replan_temperature(
@@ -2534,19 +1976,12 @@ class Planner:
         for attempt in range(2):
             request_prompt = prompt
             if attempt:
-                point_protocol = (
-                    " For this multi-point task, include task_point_id and choose exactly one of: "
-                    + ", ".join(planned_point_ids)
-                    + "."
-                    if len(planned_point_ids) > 1
-                    else ""
-                )
                 correction = (
                     "Correction: the previous continuation was not one complete executable JSON object. "
+                    f"Protocol error: {planner_error[:500]}. "
                     "Return exactly one complete JSON object now; no Markdown, explanation, thinking, or extra text. "
-                    'Use {"name":"tool_name","task_point_id":"P1","arguments":{}} and choose the tool '
-                    "from the current catalog."
-                    + point_protocol
+                    'Use {"name":"tool_name","arguments":{}} and choose the tool from the current catalog. '
+                    "task_point_id is optional trace metadata."
                 )
                 request_prompt = render_tool_transcript(
                     [*history, {"role": "user", "content": correction}]
@@ -2602,6 +2037,7 @@ class Planner:
                     raise ValueError("tool call arguments must be a JSON object")
                 if not name:
                     raise ValueError("tool call name is empty")
+                ToolRegistry.validate_model_call(name, parsed_arguments)
                 arguments = parsed_arguments
                 task_point_id = str(
                     payload.get("task_point_id") or payload.get("point_id") or ""
@@ -2635,24 +2071,13 @@ class Planner:
                 "sampling_seed": sampling_seed,
             }
 
-        if len(planned_point_ids) > 1 and name != "finish_task":
-            if task_point_id in planned_point_ids:
-                task_point_binding_method = "inline_rwkv"
-            else:
-                binding = self._bind_existing_action_to_task_point(
-                    user_query,
-                    action=name,
-                    arguments=arguments,
-                    planned_point_ids=planned_point_ids,
-                )
-                task_point_id = str(binding.get("task_point_id") or "").strip()
-                task_point_binding_method = str(
-                    binding.get("binding_method") or "unassigned"
-                )
-                task_point_binding_raw = str(binding.get("raw_model_output") or "")
-                task_point_binding_error = str(binding.get("error") or "")
-        elif task_point_id and task_point_id in planned_point_ids:
+        if task_point_id and task_point_id in planned_point_ids:
             task_point_binding_method = "inline_rwkv"
+        elif task_point_id:
+            # Invalid optional metadata is discarded without changing or
+            # regenerating RWKV's otherwise executable tool call.
+            task_point_id = ""
+            task_point_binding_method = "invalid_optional_id_ignored"
 
         call = {"name": name, "arguments": arguments}
         call_id = str(payload.get("call_id") or "").strip()
@@ -2660,6 +2085,7 @@ class Planner:
             call["task_point_id"] = task_point_id
         if call_id:
             call["call_id"] = call_id
+        self._latest_tool_call = dict(call)
         self._messages.append({"role": "assistant", "content": call})
         self._decision_count += 1
         return {
@@ -2674,10 +2100,9 @@ class Planner:
             "task_point_binding_raw_model_output": task_point_binding_raw,
             "task_point_binding_error": task_point_binding_error,
             "task_point_binding_temperature": (
-                binding.get("sampling_temperature")
-                if task_point_binding_method in {"rwkv_binding_request", "unassigned"}
-                else None
+                None
             ),
+            "sampling_stage": sampling_stage,
             "sampling_temperature": sampling_temperature,
             "sampling_seed": sampling_seed,
         }

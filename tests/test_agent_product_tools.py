@@ -21,15 +21,21 @@ class AgentProductToolTests(unittest.TestCase):
         names = ToolRegistry.model_visible_names("ALL")
         for name in ("web_search", "connector_lookup", "calculator", "date_diff", "current_time", "finish_task"):
             self.assertIn(name, names)
+        self.assertLess(names.index("connector_lookup"), names.index("web_search"))
+        self.assertEqual(names[-1], "finish_task")
 
     def test_every_model_tool_has_description_and_argument_contract(self):
         catalog = json.loads(
             ToolRegistry.get_json_catalog("ALL", model_visible_only=True)
         )
+        catalog_names = [row["name"] for row in catalog]
         self.assertEqual(
-            {row["name"] for row in catalog},
+            set(catalog_names),
             set(ToolRegistry.model_visible_names("ALL")),
         )
+        self.assertEqual(catalog_names, ToolRegistry.model_visible_names("ALL"))
+        self.assertEqual(catalog_names[0], "connector_lookup")
+        self.assertEqual(catalog_names[-1], "finish_task")
         for row in catalog:
             self.assertTrue(row["description"].strip(), row["name"])
             self.assertEqual(row["arguments"].get("type"), "object")
@@ -49,6 +55,35 @@ class AgentProductToolTests(unittest.TestCase):
             {"query", "max_results"},
         )
 
+    def test_connector_catalog_exposes_exact_rwkv_enum_contract(self):
+        catalog = json.loads(
+            ToolRegistry.get_json_catalog("ALL", model_visible_only=True)
+        )
+        connector = next(row for row in catalog if row["name"] == "connector_lookup")
+        schema = connector["arguments"]
+
+        self.assertEqual(schema["required"], ["connector", "query"])
+        self.assertEqual(
+            schema["properties"]["connector"]["enum"],
+            ["weather", "weather_alerts", "github", "papers"],
+        )
+        self.assertEqual(
+            schema["properties"]["scope"]["enum"],
+            ["current", "repositories", "code", "latest_release", "paper"],
+        )
+        self.assertFalse(schema["additionalProperties"])
+
+    def test_model_call_validation_rejects_combined_enum_without_rewriting_it(self):
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            ToolRegistry.validate_model_call(
+                "connector_lookup",
+                {
+                    "connector": "github",
+                    "query": "repository release",
+                    "scope": "repositories,code,latest_release",
+                },
+            )
+
     def test_planner_prompt_contains_each_model_tool_description(self):
         catalog = json.loads(
             ToolRegistry.get_json_catalog("ALL", model_visible_only=True)
@@ -56,13 +91,18 @@ class AgentProductToolTests(unittest.TestCase):
         prompt = Planner._system_prompt("ALL")
         for row in catalog:
             self.assertIn(row["description"].splitlines()[0], prompt)
+        self.assertLess(
+            prompt.index('"name":"connector_lookup"'),
+            prompt.index('"name":"web_search"'),
+        )
+        self.assertLess(
+            prompt.index('"name":"current_time"'),
+            prompt.index('"name":"finish_task"'),
+        )
 
     def test_rwkv_cross_validator_owns_finish_or_replan_decision(self):
         planner = Planner()
-        raw = (
-            '"decision":"replan","missing_points":["P2"],"conflicts":[],'
-            '"next_focus":"confirm the current version","reason":"P2 is missing"}'
-        )
+        raw = '{"name":"continue_retrieval","arguments":{}}'
         planner.llm = Mock()
         planner.llm.text_completion.return_value = Mock(content=raw)
         review = planner.cross_validate_research(
@@ -81,13 +121,16 @@ class AgentProductToolTests(unittest.TestCase):
         )
 
         self.assertEqual(review["decision"], "replan")
-        self.assertEqual(review["missing_points"], ["P2"])
+        self.assertEqual(review["selected_action"], "continue_retrieval")
+        self.assertEqual(review["schema_version"], "rwkv-cross-validation.v3")
         self.assertEqual(review["raw_model_output"], raw)
         prompt = planner.llm.text_completion.call_args.args[0]
         self.assertIn("ORIGINAL_SOURCE_SPAN", prompt)
-        self.assertIn("There is no later page-summary", prompt)
-        self.assertIn("read their contents yourself", prompt)
-        self.assertNotIn("search query for P2", review["next_focus"])
+        self.assertIn('"name":"continue_retrieval"', prompt)
+        self.assertIn('"name":"write_answer"', prompt)
+        self.assertIn("minimal evidence check", prompt)
+        self.assertTrue(prompt.endswith("Assistant: ```json\n"))
+        self.assertNotIn('{"decision":"', prompt)
 
     def test_rebuilt_planner_uses_request_level_replan_profile(self):
         planner = Planner()
@@ -123,10 +166,13 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertEqual(first["sampling_temperature"], 0.8)
         self.assertIsNone(first["sampling_seed"])
         self.assertIsNone(seen[0]["seed"])
-        self.assertEqual(seen[0]["profile"]["top_k"], 50)
-        self.assertEqual(seen[0]["profile"]["top_p"], 0.6)
-        self.assertEqual(seen[0]["profile"]["presence_penalty"], 0.65)
-        self.assertEqual(seen[0]["profile"]["frequency_penalty"], 0.25)
+        self.assertEqual(seen[0]["profile"], {
+            "temperature": 0.8,
+            "top_p": 0.6,
+            "presence_penalty": 0.65,
+            "frequency_penalty": 0.25,
+            "top_k": 50,
+        })
         self.assertEqual(second["sampling_temperature"], 0.1)
         self.assertIsNone(second["sampling_seed"])
         self.assertIsNone(seen[1]["seed"])
@@ -165,11 +211,14 @@ class AgentProductToolTests(unittest.TestCase):
 
         self.assertEqual(
             [round(row["sampling_temperature"], 2) for row in decisions],
-            [0.8, 0.8, 0.8, 0.8, 0.8],
+            [0.8, 0.9, 0.9, 0.9, 0.9],
         )
         seeds = [row["sampling_seed"] for row in decisions]
         self.assertEqual(seeds, [None, None, None, None, None])
-        self.assertEqual([row["temperature"] for row in seen], [0.8] * 5)
+        self.assertEqual(
+            [row["temperature"] for row in seen],
+            [0.8, 0.9, 0.9, 0.9, 0.9],
+        )
         self.assertEqual([row["seed"] for row in seen], seeds)
 
     def test_planner_repairs_invalid_tool_json_once_at_the_same_temperature(self):
@@ -202,10 +251,151 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertIn("Correction:", seen[1]["prompt"])
         self.assertLess(
             seen[1]["prompt"].rfind("Correction:"),
-            seen[1]["prompt"].rfind("### Assistant"),
+            seen[1]["prompt"].rfind("Assistant: ```json"),
         )
 
-    def test_multi_point_tool_call_repairs_missing_task_point_id(self):
+    def test_planner_repairs_invalid_enum_once_without_selecting_a_replacement(self):
+        planner = Planner()
+        seen = []
+
+        class RepairingRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                seen.append((prompt, config.get_llm_temperature()))
+                if len(seen) == 1:
+                    return Mock(
+                        content=(
+                            '{"name":"connector_lookup","arguments":'
+                            '{"connector":"github","query":"release",'
+                            '"scope":"repositories,code,latest_release"}}'
+                        )
+                    )
+                return Mock(
+                    content=(
+                        '{"name":"connector_lookup","arguments":'
+                        '{"connector":"github","query":"release",'
+                        '"scope":"latest_release"}}'
+                    )
+                )
+
+        planner.llm = RepairingRWKV()
+        decision = planner.plan_next_action("question", {}, "state", "DISCOVERY")
+
+        self.assertEqual(decision["action"], "connector_lookup")
+        self.assertEqual(decision["args"]["scope"], "latest_release")
+        self.assertEqual(decision["planner_attempts"], 2)
+        self.assertEqual([temperature for _, temperature in seen], [0.1, 0.1])
+        self.assertIn("must be one of", seen[1][0])
+
+    def test_planner_uses_complete_rolling_online_g1i_function_requests(self):
+        planner = Planner()
+        prompts = []
+        outputs = [
+            '{"name":"web_search","arguments":{"query":"RWKV release"}}',
+            '{"name":"finish_task","arguments":{}}',
+        ]
+
+        class G1IRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                prompts.append(prompt)
+                return Mock(content=outputs.pop(0))
+
+        planner.llm = G1IRWKV()
+        planner.begin_task(
+            "Find the RWKV release.",
+            "runtime",
+            {
+                "goal": "Find the RWKV release.",
+                "atomic_points": [
+                    {"id": "P1", "task": "release", "objective": "find release"}
+                ],
+            },
+        )
+        first = planner.plan_next_action(
+            "Find the RWKV release.", {}, "runtime", "DISCOVERY"
+        )
+        planner.observe_tool_result(
+            {"status": "ok", "query": "RWKV release", "results": [{"url": "https://example.test"}]}
+        )
+        second = planner.plan_next_action(
+            "Find the RWKV release.", {}, "runtime", "DISCOVERY"
+        )
+
+        self.assertEqual(first["action"], "web_search")
+        self.assertEqual(second["action"], "finish_task")
+        self.assertTrue(prompts[0].startswith("System: Tools: ["))
+        self.assertIn("\nReturn only a JSON function call.\n\nUser: ", prompts[0])
+        self.assertTrue(prompts[0].endswith("Assistant: ```json\n"))
+        self.assertEqual(prompts[1].count("System:"), 1)
+        self.assertIn("\n\nUser: Function output: ", prompts[1])
+        self.assertIn('"query":"RWKV release"', prompts[1])
+        self.assertIn("Find the RWKV release.", prompts[1])
+        self.assertIn(
+            'Assistant: ```json\n{"name":"web_search","arguments":{"query":"RWKV release"}}',
+            prompts[1],
+        )
+        self.assertEqual(prompts[1].count("Assistant: ```json"), 2)
+        self.assertTrue(prompts[1].endswith("Assistant: ```json\n"))
+        for prompt in prompts:
+            self.assertNotIn("### User", prompt)
+            self.assertNotIn("### Assistant", prompt)
+            self.assertNotIn("**Tool Call:**", prompt)
+            self.assertNotIn("### Tool Output", prompt)
+
+    def test_recovery_rebuild_drops_failed_assistant_call_and_keeps_g1i_contract(self):
+        planner = Planner()
+        prompts = []
+
+        class G1IRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                prompts.append(prompt)
+                if len(prompts) == 1:
+                    return Mock(content='{"name":"web_search","arguments":{"query":"same route"}}')
+                return Mock(content='{"name":"web_search","arguments":{"query":"different exact gap"}}')
+
+        planner.llm = G1IRWKV()
+        task_plan = {
+            "goal": "Find two facts.",
+            "atomic_points": [{"id": "P1", "task": "facts", "objective": "find facts"}],
+        }
+        planner.begin_task("Find two facts.", "runtime", task_plan)
+        planner.plan_next_action("Find two facts.", {}, "runtime", "DISCOVERY")
+        planner.observe_tool_result({"status": "no_new_evidence", "query": "same route"})
+        planner.request_recovery_turn(
+            {
+                "status": "no_new_evidence",
+                "frozen_path": {"action": "web_search", "query": "same route"},
+            },
+            user_query="Find two facts.",
+            env_context="authoritative state",
+            phase="DISCOVERY",
+        )
+        decision = planner.plan_next_action(
+            "Find two facts.", {}, "authoritative state", "DISCOVERY"
+        )
+
+        self.assertEqual(decision["args"]["query"], "different exact gap")
+        self.assertTrue(prompts[1].startswith("System: Tools: ["))
+        self.assertIn("RECOVERY INSTRUCTION", prompts[1])
+        self.assertNotIn("same route", prompts[1])
+        self.assertIn('"route_text_withheld_from_rebuild":true', prompts[1])
+        self.assertNotIn(
+            'Assistant: ```json\n{"name":"web_search","arguments":{"query":"same route"}}',
+            prompts[1],
+        )
+        self.assertIn("Recovery observation:", prompts[1])
+        self.assertEqual(prompts[1].count("Assistant: ```json"), 1)
+        self.assertTrue(prompts[1].endswith("Assistant: ```json\n"))
+
+    def test_multi_point_tool_call_keeps_optional_task_point_unassigned_without_second_call(self):
         planner = Planner()
         planner.begin_task(
             "mixed question",
@@ -219,10 +409,6 @@ class AgentProductToolTests(unittest.TestCase):
                 ],
             },
         )
-        outputs = [
-            '{"name":"web_search","arguments":{"query":"launch date"}}',
-            '{"task_point_id":"P1"}',
-        ]
         seen = []
 
         class RepairingRWKV:
@@ -231,7 +417,7 @@ class AgentProductToolTests(unittest.TestCase):
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
                 seen.append(prompt)
-                return Mock(content=outputs[len(seen) - 1])
+                return Mock(content='{"name":"web_search","arguments":{"query":"launch date"}}')
 
         planner.llm = RepairingRWKV()
         decision = planner.plan_next_action(
@@ -243,14 +429,13 @@ class AgentProductToolTests(unittest.TestCase):
 
         self.assertEqual(decision["action"], "web_search")
         self.assertEqual(decision["args"], {"query": "launch date"})
-        self.assertEqual(decision["task_point_id"], "P1")
+        self.assertEqual(decision["task_point_id"], "")
         self.assertEqual(decision["planner_attempts"], 1)
-        self.assertEqual(decision["task_point_binding_method"], "rwkv_binding_request")
-        self.assertIn("P1, P2, P3", seen[1])
-        self.assertIn('"query":"launch date"', seen[1])
-        self.assertNotIn("Correction:", seen[1])
+        self.assertEqual(decision["task_point_binding_method"], "not_required")
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].endswith("Assistant: ```json\n"))
 
-    def test_multi_point_binding_failure_keeps_original_rwkv_action_unassigned(self):
+    def test_invalid_optional_task_point_is_ignored_without_regenerating_action(self):
         planner = Planner()
         planner.begin_task(
             "mixed question",
@@ -263,10 +448,6 @@ class AgentProductToolTests(unittest.TestCase):
                 ],
             },
         )
-        outputs = [
-            '{"name":"web_search","arguments":{"query":"current theme"}}',
-            "not valid binding JSON",
-        ]
         seen = []
 
         class BindingFailureRWKV:
@@ -275,7 +456,12 @@ class AgentProductToolTests(unittest.TestCase):
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
                 seen.append(prompt)
-                return Mock(content=outputs[len(seen) - 1])
+                return Mock(
+                    content=(
+                        '{"name":"web_search","task_point_id":"PX",'
+                        '"arguments":{"query":"current theme"}}'
+                    )
+                )
 
         planner.llm = BindingFailureRWKV()
         decision = planner.plan_next_action(
@@ -289,8 +475,12 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertEqual(decision["args"], {"query": "current theme"})
         self.assertEqual(decision["task_point_id"], "")
         self.assertNotIn("planner_error", decision)
-        self.assertEqual(decision["task_point_binding_method"], "unassigned")
-        self.assertIn("ValueError", decision["task_point_binding_error"])
+        self.assertEqual(
+            decision["task_point_binding_method"],
+            "invalid_optional_id_ignored",
+        )
+        self.assertEqual(decision["task_point_binding_error"], "")
+        self.assertEqual(len(seen), 1)
 
     def test_cross_validator_repairs_invalid_json_once_at_the_same_temperature(self):
         planner = Planner()
@@ -305,10 +495,7 @@ class AgentProductToolTests(unittest.TestCase):
                 if len(seen) == 1:
                     return Mock(content="not valid JSON")
                 return Mock(
-                    content=(
-                        '{"decision":"finish","missing_points":[],"conflicts":[],'
-                        '"next_focus":"","reason":"enough"}'
-                    )
+                    content='{"name":"write_answer","arguments":{}}'
                 )
 
         planner.llm = RepairingRWKV()
@@ -316,14 +503,14 @@ class AgentProductToolTests(unittest.TestCase):
 
         self.assertEqual(review["decision"], "finish")
         self.assertEqual(review["review_attempts"], 2)
-        self.assertEqual([temperature for _, temperature in seen], [0.05, 0.05])
-        self.assertIn("Correction:", seen[1][0])
+        self.assertEqual([temperature for _, temperature in seen], [0.1, 0.1])
+        self.assertIn("Protocol correction:", seen[1][0])
         self.assertLess(
-            seen[1][0].rfind("Correction:"),
-            seen[1][0].rfind("### Assistant"),
+            seen[1][0].rfind("Protocol correction:"),
+            seen[1][0].rfind("Assistant: ```json"),
         )
 
-    def test_cross_validator_reasks_rwkv_for_a_consistent_finish_decision(self):
+    def test_cross_validator_repairs_extra_keys_at_the_same_temperature(self):
         planner = Planner()
         seen = []
 
@@ -336,17 +523,12 @@ class AgentProductToolTests(unittest.TestCase):
                 if len(seen) == 1:
                     return Mock(
                         content=(
-                            '{"decision":"finish","missing_points":["P2"],'
-                            '"conflicts":[],"next_focus":"P2",'
+                            '{"name":"write_answer","arguments":{},'
                             '"reason":"P2 is not retrieved"}'
                         )
                     )
                 return Mock(
-                    content=(
-                        '{"decision":"replan","missing_points":["P2"],'
-                        '"conflicts":[],"next_focus":"P2",'
-                        '"reason":"P2 is not retrieved"}'
-                    )
+                    content='{"name":"write_answer","arguments":{}}'
                 )
 
         planner.llm = ContradictoryThenConsistentRWKV()
@@ -356,17 +538,12 @@ class AgentProductToolTests(unittest.TestCase):
             "P1 evidence only",
         )
 
-        self.assertEqual(review["decision"], "replan")
-        self.assertEqual(review["missing_points"], ["P2"])
+        self.assertEqual(review["decision"], "finish")
         self.assertEqual(review["review_attempts"], 2)
-        self.assertEqual([temperature for _, temperature in seen], [0.05, 0.05])
-        self.assertIn("internally inconsistent", seen[1][0])
-        self.assertLess(
-            seen[1][0].rfind("Protocol error:"),
-            seen[1][0].rfind("### Assistant"),
-        )
+        self.assertEqual([temperature for _, temperature in seen], [0.1, 0.1])
+        self.assertEqual(len(seen), 2)
 
-    def test_cross_validator_rejects_unbound_multi_point_finish_shortcut(self):
+    def test_cross_validator_accepts_rwkv_owned_finish_without_hidden_gate(self):
         planner = Planner()
         seen = []
 
@@ -378,18 +555,12 @@ class AgentProductToolTests(unittest.TestCase):
                 seen.append(prompt)
                 if len(seen) == 1:
                     return Mock(
-                        content=(
-                            '{"decision":"finish","missing_points":[],"conflicts":[],'
-                            '"next_focus":"","reason":"all points are covered"}'
-                        )
+                        content='{"name":"write_answer","arguments":{}}'
                     )
                 return Mock(
                     content=(
-                        '{"decision":"replan","missing_points":["P2"],"conflicts":[],'
-                        '"task_point_status":{'
-                        '"P1":{"status":"supported","evidence_refs":["S1"]},'
-                        '"P2":{"status":"missing","evidence_refs":[]}},'
-                        '"next_focus":"P2","reason":"P2 has no bound evidence"}'
+                        '{"name":"continue_retrieval","arguments":{},'
+                        '"reason":"P2 has no bound evidence"}'
                     )
                 )
 
@@ -398,16 +569,12 @@ class AgentProductToolTests(unittest.TestCase):
             "two-point question",
             {"atomic_points": [{"id": "P1"}, {"id": "P2"}]},
             "[S1] evidence for P1 only",
-            evidence_refs=["S1"],
         )
 
-        self.assertEqual(review["decision"], "replan")
-        self.assertEqual(review["missing_points"], ["P2"])
-        self.assertEqual(review["review_attempts"], 2)
-        self.assertIn("must cover every planned point", seen[1])
-        self.assertEqual(
-            review["task_point_status"]["P1"]["evidence_refs"], ["S1"]
-        )
+        self.assertEqual(review["decision"], "finish")
+        self.assertEqual(review["review_attempts"], 1)
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn("task_point_status", seen[0])
 
     def test_cross_validator_does_not_replay_task_plan_protocol_schema(self):
         planner = Planner()
@@ -420,52 +587,38 @@ class AgentProductToolTests(unittest.TestCase):
                 del max_tokens, stop
                 prompts.append(prompt)
                 return Mock(
-                    content=(
-                        '{"schema_version":"rwkv-cross-validation.v1",'
-                        '"decision":"finish","missing_points":[],"conflicts":[],'
-                        '"task_point_status":{"P1":{"status":"supported",'
-                        '"evidence_refs":["S1"]}},"next_focus":"",'
-                        '"reason":"the requested fact is supported"}'
-                    )
+                    content='{"name":"write_answer","arguments":{}}'
                 )
 
         planner.llm = CapturingRWKV()
         review = planner.cross_validate_research(
             "short how-to",
             {
-                "schema_version": "task_plan.v1",
+                "schema_version": "task_plan.v2",
                 "goal": "complete the how-to",
                 "atomic_points": [
                     {
                         "id": "P1",
-                        "task": "steps",
-                        "evidence_needed": ["direct steps"],
+                        "question": "steps",
+                        "fields": [],
+                        "time_scope": "timeless",
                     }
                 ],
             },
             "[S1] direct source steps",
-            evidence_refs=["S1"],
         )
 
         self.assertEqual(review["decision"], "finish")
-        self.assertIn("USER-FACING FACTS TO CHECK", prompts[0])
+        self.assertIn("POINTS TO REVIEW", prompts[0])
         self.assertIn('"points_to_check"', prompts[0])
-        self.assertIn("every requested_fields value", prompts[0])
-        self.assertIn("date after the supplied current runtime", prompts[0])
-        self.assertIn("exact owner/repository", prompts[0])
-        self.assertNotIn('"schema_version":"task_plan.v1"', prompts[0])
-        self.assertEqual(prompts[0].count("short how-to"), 2)
-        self.assertEqual(prompts[0].count('"points_to_check"'), 2)
-        self.assertLess(
-            prompts[0].rfind("SHARED RESEARCH MATERIAL"),
-            prompts[0].rfind("FINAL TARGET REMINDER"),
-        )
-        self.assertLess(
-            prompts[0].rfind("FINAL TARGET REMINDER"),
-            prompts[0].rfind("Return the cross-validation JSON now."),
-        )
+        self.assertIn("RETAINED SOURCE SPANS", prompts[0])
+        self.assertIn("minimal evidence check", prompts[0])
+        self.assertNotIn('"schema_version":"task_plan.v2"', prompts[0])
+        self.assertEqual(prompts[0].count("short how-to"), 1)
+        self.assertEqual(prompts[0].count('"points_to_check"'), 1)
+        self.assertTrue(prompts[0].endswith("Assistant: ```json\n"))
 
-    def test_rebuilt_planner_mounts_rwkv_replan_review_and_compact_task_plan(self):
+    def test_rebuilt_planner_requests_one_rwkv_function_call_with_replan_state(self):
         planner = Planner()
         prompts = []
         sampling_profiles = []
@@ -491,26 +644,20 @@ class AgentProductToolTests(unittest.TestCase):
                 )
                 return Mock(
                     content=(
-                        '{"candidates":['
                         '{"name":"web_search","task_point_id":"P2",'
-                        '"arguments":{"query":"already attempted P1 query"}},'
-                        '{"name":"web_search","task_point_id":"P2",'
-                        '"arguments":{"query":"model-selected P2 route"}},'
-                        '{"name":"connector_lookup","task_point_id":"P2",'
-                        '"arguments":{"connector":"github","query":"P2"}}]}'
+                        '"arguments":{"query":"model-selected P2 route"}}'
                     )
                 )
 
         planner.llm = CapturingRWKV()
         planner.begin_task("mixed question", "", task_plan, "DISCOVERY")
-        planner.rebuild_session_after_review(
+        decision = planner.rebuild_session_after_review(
             "mixed question",
             "shared state",
             {
                 "decision": "replan",
-                "missing_points": ["P2"],
-                "conflicts": [],
-                "next_focus": "current fact",
+                "missing_point_id": "P2",
+                "evidence_needed": "current fact",
             },
             "REPLAN",
             routing_observation={
@@ -522,71 +669,42 @@ class AgentProductToolTests(unittest.TestCase):
                 }
             },
         )
-        decision = planner.plan_next_action(
-            "mixed question", {}, "shared state", "REPLAN"
-        )
 
         self.assertEqual(len(prompts), 1)
-        self.assertIn("You are the RWKV replanner", prompts[0])
-        self.assertIn("MISSING FACT OBLIGATIONS", prompts[0])
-        self.assertIn("ACTIVE REVIEW AND FROZEN PATHS", prompts[0])
-        self.assertIn("PRIOR DOMAIN HYPOTHESES (may be wrong)", prompts[0])
-        self.assertIn('"missing_points":["P2"]', prompts[0])
-        self.assertIn('"id":"P2"', prompts[0])
-        self.assertIn('"frozen_paths":[', prompts[0])
-        self.assertIn("already attempted P1 query", prompts[0])
-        self.assertIn(
-            '"candidates":[{"name":"tool_name","task_point_id":"P2","arguments":{}},'
-            '{"name":"tool_name","task_point_id":"P2","arguments":{}},'
-            '{"name":"tool_name","task_point_id":"P2","arguments":{}}]',
-            prompts[0],
-        )
-        self.assertEqual(decision["router"], "model_rwkv_replan_json")
+        self.assertTrue(prompts[0].startswith("System: Tools: ["))
+        self.assertIn("\nReturn only a JSON function call.\n\nUser: ", prompts[0])
+        self.assertIn("RECOVERY INSTRUCTION", prompts[0])
+        self.assertIn('"decision":"replan"', prompts[0])
+        self.assertNotIn('"missing_point_id"', prompts[0])
+        self.assertNotIn('"evidence_needed"', prompts[0])
+        self.assertNotIn("already attempted P1 query", prompts[0])
+        self.assertIn('"frozen_route_count":1', prompts[0])
+        self.assertIn('"route_text_withheld_from_replan":true', prompts[0])
+        self.assertNotIn('"candidates"', prompts[0])
+        self.assertTrue(prompts[0].endswith("Assistant: ```json\n"))
+        self.assertEqual(decision["router"], "model_rwkv_json")
         self.assertEqual(decision["task_point_id"], "P2")
         self.assertEqual(decision["args"]["query"], "model-selected P2 route")
-        second_candidate = planner.plan_next_action(
-            "mixed question", {}, "no evidence from first candidate", "REPLAN"
-        )
-        self.assertEqual(len(prompts), 1)
-        self.assertEqual(second_candidate["action"], "connector_lookup")
-        self.assertEqual(second_candidate["args"]["connector"], "github")
-        self.assertIn("CURRENT EVIDENCE STATE", prompts[0])
-        self.assertIn('"description":', prompts[0])
-        self.assertIn("weather|weather_alerts|github|papers", prompts[0])
         self.assertEqual(sampling_profiles[0]["stage"], "planner_replan")
         self.assertEqual(sampling_profiles[0]["temperature"], 0.8)
-        self.assertEqual(sampling_profiles[0]["top_k"], 50)
-        self.assertEqual(sampling_profiles[0]["top_p"], 0.6)
-        self.assertEqual(sampling_profiles[0]["presence_penalty"], 0.65)
-        self.assertEqual(sampling_profiles[0]["frequency_penalty"], 0.25)
-        self.assertEqual(
-            sampling_profiles[0]["no_penalty_token_ids"],
-            (33, 10, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58),
-        )
-        self.assertEqual(planner._next_decision_sampling_stage, "planner_replan")
+        self.assertEqual(sampling_profiles[0], {
+            "stage": "planner_replan",
+            "temperature": 0.8,
+            "top_p": 0.6,
+            "presence_penalty": 0.65,
+            "frequency_penalty": 0.25,
+            "top_k": 50,
+        })
         planner.mark_replan_progress("P2")
         self.assertEqual(planner._next_decision_sampling_stage, "planner")
 
-    def test_replan_rejects_attempted_ledger_paths_and_rwkv_corrects_once(self):
+    def test_replan_protocol_repair_keeps_route_count_without_replaying_query(self):
         planner = Planner()
         outputs = [
+            '{"candidates":[{"name":"web_search","arguments":{"query":"already searched route"}}]}',
             (
-                '{"candidates":['
                 '{"name":"web_search","task_point_id":"P1",'
-                '"arguments":{"query":"already searched route"}},'
-                '{"name":"web_search","task_point_id":"P1",'
-                '"arguments":{"query":"already searched route"}},'
-                '{"name":"web_search","task_point_id":"P1",'
-                '"arguments":{"query":"already searched route"}}]}'
-            ),
-            (
-                '{"candidates":['
-                '{"name":"web_search","task_point_id":"P1",'
-                '"arguments":{"query":"novel official release archive"}},'
-                '{"name":"web_search","task_point_id":"P1",'
-                '"arguments":{"query":"alternate language release announcement"}},'
-                '{"name":"web_search","task_point_id":"P1",'
-                '"arguments":{"query":"structured version history source"}}]}'
+                '"arguments":{"query":"novel official release archive"}}'
             ),
         ]
         prompts = []
@@ -600,50 +718,43 @@ class AgentProductToolTests(unittest.TestCase):
                 return Mock(content=outputs.pop(0))
 
         planner.llm = CorrectingRWKV()
-        planner.begin_task(
-            "find the current release",
-            "",
-            {
-                "goal": "find the current release",
-                "atomic_points": [{"id": "P1", "task": "current release"}],
-            },
-            "DISCOVERY",
-        )
-        planner._active_replan_review = {
-            "missing_points": ["P1"],
-            "reason": "missing current release evidence",
+        planner._task_plan = {
+            "goal": "find the current release",
+            "atomic_points": [{"id": "P1", "task": "current release"}],
         }
-        env_context = "\n".join(
-            [
-                "Shared retrieval ledger (compact progress metadata; not a finish gate):",
-                json.dumps(
-                    {
-                        "queries": [
-                            {
-                                "query": "already searched route",
-                                "task_point_id": "P1",
-                                "status": "ok",
-                            }
-                        ]
-                    }
-                ),
-            ]
+        planner.rebuild_session(
+            "find the current release",
+            "shared evidence state",
+            {
+                "status": "cross_validation_replan",
+                "evidence_review": {
+                    "decision": "replan",
+                    "missing_point_id": "P1",
+                    "evidence_needed": "missing current release evidence",
+                },
+                "frozen_path": {
+                    "action": "web_search",
+                    "query": "already searched route",
+                },
+            },
+            "REPLAN",
         )
 
-        decision = planner._request_replan_action(
-            "find the current release", env_context, "REPLAN"
+        decision = planner.plan_next_action(
+            "find the current release", {}, "shared evidence state", "REPLAN"
         )
 
         self.assertEqual(len(prompts), 2)
-        self.assertIn("attempted_paths", prompts[0])
-        self.assertIn("already searched route", prompts[0])
+        self.assertNotIn("already searched route", prompts[0])
+        self.assertIn('"frozen_route_count":1', prompts[0])
         self.assertIn("Correction:", prompts[1])
+        self.assertTrue(prompts[1].endswith("Assistant: ```json\n"))
         self.assertEqual(decision["args"]["query"], "novel official release archive")
-        self.assertEqual(decision["decision_owner"], "rwkv")
+        self.assertEqual(decision["router"], "model_rwkv_json")
         self.assertEqual(decision["planner_attempts"], 2)
-        self.assertEqual(len(decision["candidate_actions"]), 3)
+        self.assertNotIn("candidate_actions", decision)
 
-    def test_regular_planner_schema_example_tracks_active_missing_point(self):
+    def test_regular_planner_schema_example_does_not_inherit_cv_hypothesis(self):
         planner = Planner()
         planner._task_plan = {
             "atomic_points": [
@@ -651,7 +762,7 @@ class AgentProductToolTests(unittest.TestCase):
                 {"id": "P2", "task": "current fact"},
             ]
         }
-        planner._active_replan_review = {"missing_points": ["P2"]}
+        planner._active_replan_review = {"decision": "replan"}
 
         body = planner._build_isolated_decision_body(
             "mixed question",
@@ -661,7 +772,7 @@ class AgentProductToolTests(unittest.TestCase):
 
         self.assertIn(
             'Return one JSON object only: {"name":"tool_name",'
-            '"task_point_id":"P2","arguments":{}}.',
+            '"task_point_id":"P1","arguments":{}}.',
             body,
         )
 
@@ -699,10 +810,107 @@ class AgentProductToolTests(unittest.TestCase):
         )
 
         projected = Planner._replan_environment_projection(context)
+        decoded = json.loads(projected)
 
         self.assertIn("LATE_CURRENT_SOURCE_SPAN", projected)
         self.assertIn("2026-08-10T00:00:00Z", projected)
         self.assertNotIn("x" * 100, projected)
+        self.assertNotIn("old route", projected)
+        self.assertEqual(decoded["retrieval_ledger"]["previous_route_count"], 1)
+        self.assertTrue(
+            decoded["retrieval_ledger"]["route_text_withheld_from_replan"]
+        )
+
+    def test_rebuilt_runtime_state_is_valid_json_after_bounding_large_spans(self):
+        planner = Planner()
+        planner._task_plan = {
+            "goal": "find current release",
+            "atomic_points": [{"id": "P1", "task": "current release"}],
+        }
+        context = "\n".join(
+            [
+                "Shared retrieval ledger (compact progress metadata; not a finish gate):",
+                json.dumps(
+                    {
+                        "queries": [{"query": "OLD_QUERY_SHOULD_NOT_REPLAY", "status": "ok"}],
+                        "frozen_paths": [
+                            {
+                                "query": "OLD_QUERY_SHOULD_NOT_REPLAY",
+                                "reason": "equivalent_duplicate_query",
+                            }
+                        ],
+                        "source_count": 3,
+                    }
+                ),
+                "Bounded original source locators for routing (not final-answer evidence):",
+                json.dumps(
+                    {
+                        "source_count": 3,
+                        "sources": [
+                            {
+                                "source_id": f"R{index}",
+                                "title": f"source {index}",
+                                "url": f"https://example.com/{index}",
+                                "spans": [
+                                    {
+                                        "chunk_id": f"chunk-{index}",
+                                        "text": "ORIGINAL_BOUND_SPAN " + ("x" * 5000),
+                                    }
+                                ],
+                            }
+                            for index in range(3)
+                        ],
+                    }
+                ),
+            ]
+        )
+        planner.rebuild_session(
+            "find current release",
+            context,
+            {
+                "status": "cross_validation_replan",
+                "request": {
+                    "name": "web_search",
+                    "arguments": {"query": "OLD_QUERY_SHOULD_NOT_REPLAY"},
+                },
+                "retrieval_delta": {
+                    "step": 2,
+                    "action": "web_search",
+                    "query": "OLD_QUERY_SHOULD_NOT_REPLAY",
+                    "query_key": "old_query_should_not_replay",
+                    "urls": ["https://example.com/old-route"],
+                    "new_url_count": 0,
+                    "evidence_count": 0,
+                    "status": "no_new_evidence",
+                },
+                "frozen_path": {
+                    "query": "OLD_QUERY_SHOULD_NOT_REPLAY",
+                    "reason": "equivalent_duplicate_query",
+                },
+                "evidence_review": {"decision": "replan", "trigger": "duplicate"},
+            },
+            "REPLAN",
+        )
+
+        body = planner._build_isolated_decision_body(
+            "find current release", context, "REPLAN"
+        )
+        runtime_text = body.split("Runtime state: ", 1)[1].split(
+            "\nDecision number:", 1
+        )[0]
+        runtime = json.loads(runtime_text)
+
+        self.assertNotIn("OLD_QUERY_SHOULD_NOT_REPLAY", body)
+        self.assertEqual(runtime["retrieval_ledger"]["previous_route_count"], 1)
+        self.assertEqual(runtime["retrieval_ledger"]["frozen_route_count"], 1)
+        self.assertEqual(len(runtime["source_locators"]["sources"]), 3)
+        self.assertIn(
+            "ORIGINAL_BOUND_SPAN",
+            runtime["source_locators"]["sources"][0]["spans"][0]["text"],
+        )
+        self.assertTrue(
+            runtime["source_locators"]["sources"][0]["spans"][0]["truncated"]
+        )
 
     def test_replan_temperature_is_selected_by_failure_type(self):
         self.assertEqual(config.get_model_replan_temperature(1, "material missing"), 0.8)
@@ -715,42 +923,28 @@ class AgentProductToolTests(unittest.TestCase):
         planner = Planner()
         outputs = [
             {
-                "schema_version": "task_plan.v1",
+                "schema_version": "task_plan.v2",
                 "goal": "answer current release",
-                "task_mode": "lookup",
-                "source_policy": "open_web",
-                "required_domains": [],
-                "requested_fields": ["version"],
-                "max_items": 0,
                 "atomic_points": [
                     {
                         "id": "P1",
-                        "task": "find the 2024 release",
-                        "objective": "identify the 2024 release",
-                        "evidence_needed": ["release version"],
-                        "acceptance_criteria": ["version is stated"],
+                        "question": "find the 2024 release",
+                        "fields": ["version"],
+                        "time_scope": "current",
                     }
                 ],
-                "completion_rule": "answer the question",
             },
             {
-                "schema_version": "task_plan.v1",
+                "schema_version": "task_plan.v2",
                 "goal": "answer current release",
-                "task_mode": "lookup",
-                "source_policy": "open_web",
-                "required_domains": [],
-                "requested_fields": ["version"],
-                "max_items": 0,
                 "atomic_points": [
                     {
                         "id": "P1",
-                        "task": "find the current release",
-                        "objective": "identify the current release",
-                        "evidence_needed": ["release version"],
-                        "acceptance_criteria": ["version is stated"],
+                        "question": "find the current release",
+                        "fields": ["version"],
+                        "time_scope": "current",
                     }
                 ],
-                "completion_rule": "answer the question",
             },
         ]
         seen = []
@@ -776,17 +970,21 @@ class AgentProductToolTests(unittest.TestCase):
             "Current UTC date: 2026-08-09",
         )
 
-        self.assertEqual(result["atomic_points"][0]["task"], "find the current release")
+        self.assertEqual(result["atomic_points"][0]["question"], "find the current release")
+        self.assertEqual(result["schema_version"], "task_plan.v2")
         self.assertEqual(result["plan_attempts"], 2)
         self.assertEqual([row["temperature"] for row in seen], [0.1, 0.1])
         self.assertEqual(
             [row["stage"] for row in seen],
             ["task_plan", "task_plan_repair"],
         )
-        self.assertEqual(seen[1]["sampling"]["top_k"], 40)
-        self.assertEqual(seen[1]["sampling"]["top_p"], 0.3)
-        self.assertEqual(seen[1]["sampling"]["presence_penalty"], 0.00001)
-        self.assertEqual(seen[1]["sampling"]["frequency_penalty"], 0.00001)
+        self.assertEqual(seen[1]["sampling"], {
+            "temperature": 0.1,
+            "top_p": 0.3,
+            "presence_penalty": 0.00001,
+            "frequency_penalty": 0.00001,
+            "top_k": 40,
+        })
         self.assertIn("unexpected_year:2024", seen[1]["prompt"])
 
     def test_task_plan_allows_one_same_temperature_repair_then_keeps_warning(self):
@@ -794,23 +992,16 @@ class AgentProductToolTests(unittest.TestCase):
 
         def plan(task: str) -> dict:
             return {
-                "schema_version": "task_plan.v1",
+                "schema_version": "task_plan.v2",
                 "goal": "answer current release",
-                "task_mode": "lookup",
-                "source_policy": "open_web",
-                "required_domains": [],
-                "requested_fields": ["version"],
-                "max_items": 0,
                 "atomic_points": [
                     {
                         "id": "P1",
-                        "task": task,
-                        "objective": task,
-                        "evidence_needed": ["release version"],
-                        "acceptance_criteria": ["version is stated"],
+                        "question": task,
+                        "fields": ["version"],
+                        "time_scope": "current",
                     }
                 ],
-                "completion_rule": "answer the question",
             }
 
         outputs = [plan("find the 2024 release"), plan("find the 2025 release"), plan("find the current release")]
@@ -835,7 +1026,7 @@ class AgentProductToolTests(unittest.TestCase):
             "Current UTC date: 2026-08-09",
         )
 
-        self.assertEqual(result["atomic_points"][0]["task"], "find the 2025 release")
+        self.assertEqual(result["atomic_points"][0]["question"], "find the 2025 release")
         self.assertEqual(result["plan_attempts"], 2)
         self.assertEqual(result["semantic_warnings"], ["unexpected_year:2025"])
         self.assertEqual(
@@ -846,228 +1037,92 @@ class AgentProductToolTests(unittest.TestCase):
             ],
         )
 
-    def test_cross_validator_accepts_rwkv_explicit_point_status_schema(self):
-        planner = Planner()
-
-        class StatusSchemaRWKV:
-            provider = "local_13b"
-
-            def text_completion(self, prompt, max_tokens=0, stop=None):
-                del prompt, max_tokens, stop
-                return Mock(
-                    content=(
-                        '{"schema_version":"cross-validation.v1",'
-                        '"task_point_status":{'
-                        '"P1":{"status":"completed"},'
-                        '"P2":{"status":"not_retrieved"}},'
-                        '"missing_points":["P2"],"conflicts":[],'
-                        '"next_focus":"retrieve P2 evidence",'
-                        '"reason":"P2 is missing"}'
-                    )
-                )
-
-        planner.llm = StatusSchemaRWKV()
-        review = planner.cross_validate_research(
-            "mixed question",
-            {"atomic_points": [{"id": "P1"}, {"id": "P2"}]},
-            "P1 evidence only",
-        )
-
-        self.assertEqual(review["decision"], "replan")
-        self.assertEqual(review["decision_source"], "rwkv_explicit_gap_fields")
-        self.assertEqual(review["missing_points"], ["P2"])
-        self.assertEqual(review["task_point_status"]["P1"]["status"], "completed")
-        self.assertEqual(review["review_attempts"], 1)
-
-    def test_cross_validator_canonicalizes_explicit_verbose_missing_point_id(self):
-        planner = Planner()
-
-        class VerboseMissingPointRWKV:
-            provider = "local_13b"
-
-            def text_completion(self, prompt, max_tokens=0, stop=None):
-                del prompt, max_tokens, stop
-                return Mock(
-                    content=(
-                        '{"schema_version":"rwkv-cross-validation.v1",'
-                        '"decision":"replan",'
-                        '"missing_points":["P2: current release date is missing"],'
-                        '"conflicts":[],"task_point_status":{'
-                        '"P1":{"status":"supported","evidence_refs":["S1"]},'
-                        '"P2":{"status":"missing","evidence_refs":[]}},'
-                        '"next_focus":"current release date",'
-                        '"reason":"P2 lacks a source"}'
-                    )
-                )
-
-        planner.llm = VerboseMissingPointRWKV()
-        review = planner.cross_validate_research(
-            "mixed question",
-            {"atomic_points": [{"id": "P1"}, {"id": "P2"}]},
-            "P1 evidence only",
-            evidence_refs=["S1"],
-        )
-
-        self.assertEqual(review["decision"], "replan")
-        self.assertEqual(review["missing_points"], ["P2"])
-
-    def test_cross_validator_requires_answer_ready_fact_with_verbatim_source_quote(self):
+    def test_cross_validator_does_not_derive_decision_from_legacy_status_fields(self):
         planner = Planner()
         calls = []
-        outputs = [
-            {
-                "schema_version": "rwkv-cross-validation.v1",
-                "decision": "finish",
-                "missing_points": [],
-                "conflicts": [],
-                "task_point_status": {
-                    "P1": {
-                        "status": "supported",
-                        "evidence_refs": ["S1"],
-                        "supported_facts": [
-                            {
-                                "field": "current version theme",
-                                "value": "Long Goodbye",
-                                "evidence_ref": "S1",
-                                "quote": "invented quote not in the source",
-                            }
-                        ],
-                        "missing_fields": [],
-                    }
-                },
-                "next_focus": "",
-                "reason": "the source states the value",
-            },
-            {
-                "schema_version": "rwkv-cross-validation.v1",
-                "decision": "finish",
-                "missing_points": [],
-                "conflicts": [],
-                "task_point_status": {
-                    "P1": {
-                        "status": "supported",
-                        "evidence_refs": ["S1"],
-                        "supported_facts": [
-                            {
-                                "field": "current version theme",
-                                "value": "Long Goodbye",
-                                "evidence_ref": "S1",
-                                "quote": "Version 3.1 theme: Long Goodbye",
-                            }
-                        ],
-                        "missing_fields": [],
-                    }
-                },
-                "next_focus": "",
-                "reason": "the cited source states the exact value",
-            },
-        ]
 
-        class QuoteCorrectingRWKV:
+        class LegacySchemaRWKV:
             provider = "local_13b"
 
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
                 calls.append(prompt)
-                return Mock(content=json.dumps(outputs[len(calls) - 1]))
+                return Mock(
+                    content=(
+                        '{"task_point_status":{"P1":{"status":"completed"},'
+                        '"P2":{"status":"not_retrieved"}},'
+                        '"missing_points":["P2"]}'
+                    )
+                )
 
-        planner.llm = QuoteCorrectingRWKV()
+        planner.llm = LegacySchemaRWKV()
+        review = planner.cross_validate_research(
+            "mixed question",
+            {"atomic_points": [{"id": "P1"}, {"id": "P2"}]},
+            "P1 evidence only",
+        )
+
+        self.assertEqual(review["decision"], "protocol_error")
+        self.assertEqual(review["review_attempts"], 2)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("exactly name and arguments", calls[1])
+
+    def test_cross_validator_rejects_replan_hypotheses_and_keeps_binary_decision(self):
+        planner = Planner()
+
+        class ReplanRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del prompt, max_tokens, stop
+                return Mock(content='{"name":"continue_retrieval","arguments":{}}')
+
+        planner.llm = ReplanRWKV()
+        review = planner.cross_validate_research(
+            "mixed question",
+            {"atomic_points": [{"id": "P1"}, {"id": "P2"}]},
+            "P1 evidence only",
+        )
+
+        self.assertEqual(
+            review,
+            {
+                "schema_version": "rwkv-cross-validation.v3",
+                "decision": "replan",
+                "selected_action": "continue_retrieval",
+                "review_owner": "rwkv",
+                "raw_model_output": '{"name":"continue_retrieval","arguments":{}}',
+                "prompt": review["prompt"],
+                "sampling_temperature": 0.1,
+                "sampling_seed": None,
+                "review_attempts": 1,
+            },
+        )
+        self.assertNotIn("task_point_status", review)
+
+    def test_cross_validator_never_fact_checks_or_rewrites_rwkv_decision(self):
+        planner = Planner()
+        calls = []
+
+        class FinishRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                calls.append(prompt)
+                return Mock(content='{"name":"write_answer","arguments":{}}')
+
+        planner.llm = FinishRWKV()
         review = planner.cross_validate_research(
             "What is the current version theme?",
             {"atomic_points": [{"id": "P1", "task": "current version theme"}]},
-            "[S1] Official release\nVersion 3.1 theme: Long Goodbye",
-            evidence_refs=["S1"],
-            evidence_text_by_ref={
-                "S1": "Official release\nVersion 3.1 theme: Long Goodbye"
-            },
+            "[S1] Version 3.1 theme: Long Goodbye",
         )
 
         self.assertEqual(review["decision"], "finish")
-        self.assertEqual(review["review_attempts"], 2)
-        self.assertEqual(
-            review["task_point_status"]["P1"]["supported_facts"][0]["value"],
-            "Long Goodbye",
-        )
-        self.assertIn("not present in cited evidence ref S1", calls[1])
-        self.assertIn("supported_facts", calls[0])
-
-    def test_cross_validator_accepts_rwkv_explicit_progress_state_schema(self):
-        planner = Planner()
-
-        class ProgressSchemaRWKV:
-            provider = "local_13b"
-
-            def text_completion(self, prompt, max_tokens=0, stop=None):
-                del prompt, max_tokens, stop
-                return Mock(
-                    content=(
-                        '{"schema_version":"rwkv-cross-validation.v1",'
-                        '"atomic_points":['
-                        '{"id":"P1","status":"pending"},'
-                        '{"id":"P2","status":"pending"},'
-                        '{"id":"P3","status":"pending"}],'
-                        '"progress":{"completed":0,"total":3,"percent":0},'
-                        '"retrieval_state":{"retrieved":['
-                        '{"point_id":"P1","source_count":3},'
-                        '{"point_id":"P2","source_count":0},'
-                        '{"point_id":"P3","source_count":0}]},'
-                        '"next_focus":"obtain the exact P1 date",'
-                        '"reason":"research is unfinished","final_answer":null}'
-                    )
-                )
-
-        planner.llm = ProgressSchemaRWKV()
-        review = planner.cross_validate_research(
-            "mixed historical and current question",
-            {
-                "atomic_points": [
-                    {"id": "P1"},
-                    {"id": "P2"},
-                    {"id": "P3"},
-                ]
-            },
-            "P1 source spans only",
-        )
-
-        self.assertEqual(review["decision"], "replan")
-        self.assertEqual(
-            review["decision_source"], "rwkv_explicit_progress_fields"
-        )
-        self.assertEqual(review["missing_points"], ["P1", "P2", "P3"])
-        self.assertEqual(review["task_point_status"]["P2"]["status"], "pending")
         self.assertEqual(review["review_attempts"], 1)
-
-    def test_cross_validator_accepts_rwkv_missing_facts_status(self):
-        planner = Planner()
-
-        class MissingFactsRWKV:
-            provider = "local_13b"
-
-            def text_completion(self, prompt, max_tokens=0, stop=None):
-                del prompt, max_tokens, stop
-                return Mock(
-                    content=(
-                        '"schema_version":"rwkv-cross-validation.v1",'
-                        '"decision":"replan",'
-                        '"missing_points":["P1"],"conflicts":[],'
-                        '"task_point_status":{'
-                        '"P1":{"status":"missing_facts","evidence_refs":[]}},'
-                        '"next_focus":"find a source span",'
-                        '"reason":"the current source does not bind the requested fact"}'
-                    )
-                )
-
-        planner.llm = MissingFactsRWKV()
-        review = planner.cross_validate_research(
-            "question",
-            {"atomic_points": [{"id": "P1"}]},
-            "No usable source spans",
-            evidence_refs=["S1"],
-        )
-
-        self.assertEqual(review["decision"], "replan")
-        self.assertEqual(review["task_point_status"]["P1"]["status"], "missing_facts")
-        self.assertEqual(review["review_attempts"], 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(set(review).intersection({"supported_facts", "reason"}), set())
 
     def test_multiple_deterministic_tools_run_in_one_model_owned_loop(self):
         orchestrator = Orchestrator()
@@ -1200,6 +1255,25 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["evidence_origin"], "structured_api_record")
         self.assertEqual(result["freshness_policy"]["mode"], "retrieval_time_only")
 
+    @patch("tools.connectors.get_current_weather_alerts")
+    def test_weather_alert_connector_accepts_natural_current_scope(self, alerts):
+        alerts.return_value = json.dumps(
+            {"status": "ok", "results": [], "sources": []}
+        )
+        result = json.loads(
+            ToolRegistry.execute(
+                "connector_lookup",
+                {
+                    "connector": "weather_alerts",
+                    "query": "上海市",
+                    "scope": "current",
+                },
+                {"agentic_tool_loop": True},
+                phase="ALL",
+            )
+        )
+        self.assertNotEqual(result.get("error_class"), "invalid_arguments")
+
     @patch("tools.connectors.get_current_weather")
     def test_weather_not_found_is_not_promoted_to_structured_evidence(self, weather):
         weather.return_value = json.dumps(
@@ -1226,6 +1300,37 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertEqual(within["freshness"]["state"], "within_cutoff")
         self.assertEqual(after["freshness"]["state"], "after_cutoff")
         self.assertEqual(unknown["freshness"]["state"], "unknown_date")
+
+    def test_search_snippet_date_is_not_promoted_to_source_date(self):
+        policy = build_freshness_policy("What is the latest release?")
+        row = annotate_freshness(
+            {
+                "url": "https://example.com/releases",
+                "title": "Release history",
+                "snippet": "A nearby record was published on 2026-07-31.",
+            },
+            policy,
+        )
+
+        self.assertIsNone(row["freshness"]["source_date"])
+        self.assertIsNone(row["freshness"]["source_date_origin"])
+
+    def test_dated_record_url_is_safe_source_date_metadata(self):
+        policy = build_freshness_policy("What is the latest bulletin?")
+        row = annotate_freshness(
+            {
+                "url": "https://source.example/bulletin/2026/2026-08-01",
+                "snippet": "Patch level 2026-08-05 fixes the listed issues.",
+            },
+            policy,
+        )
+
+        self.assertEqual(row["freshness"]["source_date"], "2026-08-01")
+        self.assertEqual(
+            row["freshness"]["source_date_origin"], "url_record_identity"
+        )
+
+    def test_chinese_freshness_cutoff_is_parsed(self):
         chinese_policy = build_freshness_policy("截至 2026 年 7 月 29 日，查询最新稳定版本")
         self.assertEqual(chinese_policy["as_of"], "2026-07-29")
         self.assertEqual(chinese_policy["mode"], "explicit_cutoff")

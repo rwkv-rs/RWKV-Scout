@@ -195,11 +195,11 @@ class RetrievalEpisodeState:
                 if not isinstance(item, dict):
                     continue
                 item = dict(item)
-                if task_point_id:
-                    claim_ids = [str(value) for value in item.get("claim_ids") or [] if str(value).strip()]
-                    if task_point_id not in claim_ids:
-                        claim_ids.append(task_point_id)
-                    item["claim_ids"] = claim_ids
+                # Route scope and evidence binding are separate contracts.
+                # ``task_point_id`` records what RWKV tried to retrieve; only
+                # the chunk extractor may bind an ordinary web span to a
+                # factual record via ``claim_ids``.
+                item.setdefault("attempt_task_point_id", str(task_point_id or ""))
                 item.setdefault("retrieval_query", query_text)
                 item.setdefault("retrieval_strategy", str(strategy or ""))
                 key = self.source_key(item)
@@ -272,8 +272,13 @@ class RetrievalEpisodeState:
                     if locator_text and locator_text != str(current.get("model_locator_facts") or ""):
                         current["model_locator_facts"] = locator_text
                         material_changed = True
-                if task_point_id:
-                    point_sources = self.sources_by_claim.setdefault(task_point_id, {})
+                bound_claim_ids = [
+                    str(value).strip()
+                    for value in item.get("claim_ids") or []
+                    if str(value).strip()
+                ]
+                for claim_id in bound_claim_ids:
+                    point_sources = self.sources_by_claim.setdefault(claim_id, {})
                     current_point_source = point_sources.get(key)
                     if (
                         current_point_source is None
@@ -300,7 +305,9 @@ class RetrievalEpisodeState:
         )
         material_changed = material_changed or int(
             claim_delta.get("added_source_bindings") or 0
-        ) > 0 or int(claim_delta.get("added_unassigned_sources") or 0) > 0
+        ) > 0 or int(claim_delta.get("added_evidence_records") or 0) > 0 or int(
+            claim_delta.get("added_unassigned_sources") or 0
+        ) > 0
         with self._lock:
             if material_changed:
                 self.evidence_revision += 1
@@ -457,6 +464,99 @@ class RetrievalEpisodeState:
             "sources": projected,
         }
 
+    def planner_record_snapshot(
+        self,
+        *,
+        max_records: int = 8,
+        max_quote_chars: int = 600,
+        max_total_chars: int = 3200,
+    ) -> dict[str, Any]:
+        """Project exact RWKV-bound records for the next RWKV decision.
+
+        Records are interleaved across task points. This is persistent working
+        memory, not a deterministic finish decision: RWKV still decides
+        whether the visible records satisfy the user's requested fields.
+        """
+
+        snapshot = self.claims.snapshot(max_spans_per_claim=0)
+        per_point: list[list[dict[str, Any]]] = []
+        for claim in snapshot.get("claims") or []:
+            if not isinstance(claim, dict):
+                continue
+            rows = [
+                {
+                    "evidence_record_id": str(
+                        record.get("evidence_record_id") or ""
+                    )[:80],
+                    "task_record_id": str(
+                        record.get("task_record_id")
+                        or claim.get("claim_id")
+                        or ""
+                    )[:80],
+                    "subject_key": str(record.get("subject_key") or "")[:240],
+                    "record_key": str(record.get("record_key") or "")[:240],
+                    "field_keys": [
+                        str(value)[:120]
+                        for value in record.get("field_keys") or []
+                        if str(value).strip()
+                    ][:16],
+                    "support_state": str(record.get("support_state") or "")[:80],
+                    "record_match": str(record.get("record_match") or "")[:80],
+                    "field_contract_valid": bool(
+                        record.get("field_contract_valid", True)
+                    ),
+                    "title": str(record.get("title") or "")[:240],
+                    "url": str(record.get("url") or "")[:500],
+                    "published": str(
+                        record.get("published")
+                        or record.get("published_at")
+                        or ""
+                    )[:80],
+                    "updated": str(
+                        record.get("updated")
+                        or record.get("updated_at")
+                        or ""
+                    )[:80],
+                    "quote": str(record.get("quote") or ""),
+                }
+                for record in claim.get("evidence_records") or []
+                if isinstance(record, dict)
+                and str(record.get("quote") or "").strip()
+            ]
+            if rows:
+                per_point.append(rows)
+
+        selected: list[dict[str, Any]] = []
+        cursor = 0
+        remaining = max(256, int(max_total_chars or 256))
+        while (
+            len(selected) < max(1, int(max_records or 1))
+            and any(cursor < len(rows) for rows in per_point)
+            and remaining > 0
+        ):
+            for rows in per_point:
+                if cursor >= len(rows) or len(selected) >= max_records:
+                    continue
+                row = dict(rows[cursor])
+                quote = str(row.get("quote") or "")
+                visible = quote[: min(max_quote_chars, remaining)]
+                if not visible:
+                    continue
+                row["quote"] = visible
+                row["quote_truncated"] = len(visible) < len(quote)
+                selected.append(row)
+                remaining -= len(visible)
+            cursor += 1
+
+        total_records = sum(len(rows) for rows in per_point)
+        return {
+            "schema_version": "planner-records.v1",
+            "record_count": total_records,
+            "visible_record_count": len(selected),
+            "truncated": len(selected) < total_records,
+            "records": selected,
+        }
+
     def infrastructure_report(self, *, claim_ids: list[str] | None = None) -> dict[str, Any]:
         """Return unresolved retrieval/model failures, optionally by Claim."""
 
@@ -540,14 +640,39 @@ class RetrievalEpisodeState:
         actual replan instruction out of a 16K context window.
         """
 
-        claim_snapshot = self.claims.snapshot(max_spans_per_claim=0)
         with self._lock:
             infrastructure = self.infrastructure_report()
+            claim_snapshot = self.claims.snapshot(max_spans_per_claim=0)
+            factual_point_progress = [
+                {
+                    "id": str(row.get("claim_id") or "")[:120],
+                    "bound_evidence_record_count": int(
+                        row.get("exact_record_count") or 0
+                    ),
+                    "candidate_evidence_record_count": int(
+                        row.get("candidate_record_count") or 0
+                    ),
+                    "total_evidence_record_count": int(
+                        row.get("evidence_record_count") or 0
+                    ),
+                    "attempt_count": int(row.get("attempt_count") or 0),
+                    "retrieval_state": str(row.get("retrieval_state") or "")[:80],
+                }
+                for row in claim_snapshot.get("claims") or []
+                if isinstance(row, dict) and str(row.get("claim_id") or "").strip()
+            ]
             return {
                 "schema_version": "planner-routing.v1",
                 "evidence_revision": self.evidence_revision,
                 "round_count": len(self.query_history),
                 "source_count": len(self.sources),
+                # Observable exact-span counts only. Zero means that RWKV has
+                # not yet bound a grounded record to this factual point; it is
+                # not a truth, sufficiency, or completion decision.
+                "factual_point_progress": factual_point_progress,
+                "unassigned_source_count": int(
+                    claim_snapshot.get("unassigned_source_count") or 0
+                ),
                 "queries": [
                     {
                         "query": str(item.get("query") or "")[:500],
@@ -577,26 +702,7 @@ class RetrievalEpisodeState:
                         -max(1, int(max_sources or 1)) :
                     ]
                 ],
-                "claims": [
-                    {
-                        "claim_id": str(item.get("claim_id") or "")[:120],
-                        "retrieval_state": str(
-                            item.get("retrieval_state") or "not_retrieved"
-                        )[:80],
-                        "attempt_count": int(item.get("attempt_count") or 0),
-                        "source_count": int(item.get("source_count") or 0),
-                    }
-                    for item in claim_snapshot.get("claims") or []
-                    if isinstance(item, dict)
-                ],
-                "unassigned_source_count": int(
-                    claim_snapshot.get("unassigned_source_count") or 0
-                ),
                 "attempted_url_count": len(self.attempted_urls),
-                "claim_source_counts": {
-                    point_id: len(values)
-                    for point_id, values in self.sources_by_claim.items()
-                },
                 "frozen_paths": [
                     {
                         "query": str(item.get("query") or "")[:500],
@@ -788,29 +894,15 @@ class AgentState:
         """
         def compact_review(value: Any) -> dict[str, Any]:
             review = value if isinstance(value, dict) else {}
-            point_status = review.get("task_point_status") or {}
-            if not isinstance(point_status, dict):
-                point_status = {}
             return {
                 key: review.get(key)
                 for key in (
                     "decision",
-                    "decision_source",
-                    "missing_points",
-                    "conflicts",
-                    "next_focus",
-                    "reason",
+                    "missing_point_id",
+                    "evidence_needed",
+                    "trigger",
                 )
                 if key in review
-            } | {
-                "task_point_status": {
-                    str(point_id)[:120]: (
-                        {"status": str(status.get("status") or "")[:120]}
-                        if isinstance(status, dict)
-                        else {"status": str(status)[:120]}
-                    )
-                    for point_id, status in list(point_status.items())[:32]
-                }
             }
 
         def compact_feedback(raw: str) -> dict[str, Any] | str:
@@ -827,6 +919,8 @@ class AgentState:
                     "error_class",
                     "repeat_count",
                     "replan_count",
+                    "missing_point_id",
+                    "evidence_needed",
                     "stalled_actions_after_replan",
                     "max_stalled_actions_after_replan",
                     "replan_rebuilds_without_progress",
@@ -899,13 +993,21 @@ class AgentState:
                 separators=(",", ":"),
             )
         )
+        lines.append("RWKV-bound exact evidence records (working memory, not a finish gate):")
+        lines.append(
+            json.dumps(
+                self.retrieval.planner_record_snapshot(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
         lines.append("Bounded original source locators for routing (not final-answer evidence):")
         lines.append(
             json.dumps(
                 self.retrieval.planner_evidence_snapshot(
-                    max_sources=4,
-                    max_chars_per_source=700,
-                    max_total_chars=2200,
+                    max_sources=2,
+                    max_chars_per_source=350,
+                    max_total_chars=700,
                 ),
                 ensure_ascii=False,
                 separators=(",", ":"),

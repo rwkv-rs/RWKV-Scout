@@ -13,20 +13,18 @@ def render_rwkv_transcript(
     *,
     tools: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render the native G1i User/Assistant and Tool Call contract.
+    """Render the online G1i System/User/function-output contract.
 
-    Tool metadata is folded into a user block.  The renderer appends the
-    explicit ``**Tool Call:**`` continuation marker and never emits a separate
-    ``System:`` turn.
+    Tool metadata lives in the System turn.  The renderer appends the exact
+    ``Assistant: ```json`` continuation used by the online G1i service.
     """
 
     rendered_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
     if tools:
         tool_content = (
-            "Select a tool only when the request requires it. Continue after "
-            "**Tool Call:** with one fenced JSON object containing name and arguments. "
-            "Do not write Tool Output; the controller supplies it. Available tools:\n"
-            f"{json.dumps(tools, ensure_ascii=False, separators=(',', ':'))}"
+            "Tools: "
+            f"{json.dumps(tools, ensure_ascii=False, separators=(',', ':'))}\n"
+            "Return only a JSON function call."
         )
         existing_system = next(
             (
@@ -37,8 +35,9 @@ def render_rwkv_transcript(
             None,
         )
         if existing_system is not None:
+            existing_content = str(existing_system.get("content") or "").strip()
             existing_system["content"] = (
-                f"{str(existing_system.get('content') or '').strip()}\n\n{tool_content}"
+                f"{tool_content}\n\n{existing_content}"
             ).strip()
         else:
             rendered_messages.insert(

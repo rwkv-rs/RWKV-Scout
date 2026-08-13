@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 from utils.evidence_quality import date_mentions, evidence_kind, evidence_text
 from utils.source_authority import authority_for_url, resolve_source_policy
+from agent.task_plan_contract import point_question, task_points
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u3400-\u9fff]{2,}")
@@ -255,27 +256,15 @@ def source_quality(item: dict[str, Any]) -> dict[str, Any]:
 
 def _point_rows(constraints: dict[str, Any] | None, query: str) -> list[dict[str, Any]]:
     plan = (constraints or {}).get("task_plan") or {}
-    raw_points = plan.get("atomic_points") if isinstance(plan, dict) else []
-    points = [point for point in raw_points or [] if isinstance(point, dict)]
+    points = task_points(plan, fallback_query=query)
     if points:
         return [
             {
                 "id": str(point.get("id") or f"P{index}"),
                 "text": " ".join(
-                    str(point.get(key) or "")
-                    for key in ("task", "objective", "question", "output_format")
-                ).strip()
-                + " "
-                + " ".join(
-                    str(value)
-                    for value in point.get("evidence_needed") or []
-                    if str(value).strip()
-                ),
-                "acceptance": [
-                    str(value)
-                    for value in point.get("acceptance_criteria") or []
-                    if str(value).strip()
-                ],
+                    [point_question(point), *[str(value) for value in point.get("fields") or []]]
+                ).strip(),
+                "acceptance": [],
             }
             for index, point in enumerate(points, start=1)
         ]

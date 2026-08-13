@@ -110,195 +110,118 @@ class Orchestrator:
     def _deterministic_results(self) -> list[dict[str, Any]]:
         return [*self._calculation_results, *self._time_results, *self._arithmetic_results]
 
+    def _current_retrieval_data(
+        self,
+        user_query: str,
+        action: str,
+        rounds: list[tuple[str, dict[str, Any]]] | None = None,
+    ) -> dict[str, Any]:
+        """Build the one evidence record consumed by CV and the Writer.
+
+        Round 19 let cross-validation inspect a smaller, differently ordered
+        projection than final synthesis.  A binary review cannot be meaningful
+        when the two RWKV calls see different source records.  This helper is
+        intentionally mechanical: it merges retrieval rounds and attaches
+        state, but it never decides whether any fact is true or sufficient.
+        """
+
+        active_rounds = list(
+            self.state.retrieval.rounds if rounds is None else rounds
+        )
+        if active_rounds:
+            data = merge_retrieval_results(
+                user_query,
+                action,
+                active_rounds,
+                ranking_strategy=self._ranking_strategy(),
+            )
+            if not data.get("results"):
+                data["results"] = self.state.retrieval.source_records()
+        else:
+            data = {
+                "query": user_query,
+                "status": "no_retrieval",
+                "results": self.state.retrieval.source_records(),
+                "sources": [],
+                "citation_refs": [],
+                "round_count": 0,
+                "real_network": True,
+            }
+        data["calculation_results"] = self._deterministic_results()
+        data["claim_ledger"] = self.state.retrieval.claims.snapshot()
+        return data
+
     def _cross_validate_research(
         self,
         user_query: str,
         task_plan: dict[str, Any],
         *,
         step: int,
+        trigger: str = "planner_finish",
     ) -> dict[str, Any]:
-        """Let RWKV decide whether to finish research or replan."""
+        """Let RWKV make one binary finish-or-replan decision."""
 
         claim_snapshot = self.state.retrieval.claims.snapshot()
+        freshness_policy = self.state.run_metadata.get("freshness_policy")
+        if not isinstance(freshness_policy, dict) or not freshness_policy:
+            freshness_policy = build_freshness_policy(user_query, task_plan)
         context = build_evidence_context(
-            {
-                "results": self.state.retrieval.source_records(),
-                "calculation_results": self._deterministic_results(),
-                "claim_ledger": claim_snapshot,
+            self._current_retrieval_data(
+                user_query,
+                "cross_validation",
+            ),
+            constraints={
+                "freshness_policy": freshness_policy,
+                "task_plan": task_plan,
             },
-            constraints=self.state.run_metadata,
             query=user_query,
-            max_sources=6,
-            token_budget=3200,
-            max_chunks_per_source=2,
-            source_locator_char_limit=800,
+            # Cross-validation and the final Writer must inspect the same
+            # evidence projection.  Round 19 used a separate 4-source,
+            # 1-chunk view that hid decisive spans and let CV terminate a
+            # task before the evidence later shown to Writer was reviewed.
         )
-        routing_snapshot = self.state.retrieval.planner_routing_snapshot()
-        review_context = (
-            "CURRENT RUNTIME:\n"
-            + str(self.state.run_metadata.get("runtime_environment") or planner_environment_context())
-            + "\n\n"
-            + context["text"]
-            + "\n\nSHARED RETRIEVAL STATE:\n"
-            + json.dumps(
-                routing_snapshot,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        )
+        review_context = str(context["text"])
         validation_context_stats = {
             **context["context_stats"],
             "review_context_tokens": get_token_count(review_context),
-            "routing_snapshot_schema": str(
-                routing_snapshot.get("schema_version") or ""
-            ),
         }
-        available_evidence_refs = [
-            str(item.get("ref_id") or "").strip()
-            for item in context.get("citation_refs") or []
-            if isinstance(item, dict) and str(item.get("ref_id") or "").strip()
-        ]
-        if self._deterministic_results():
-            available_evidence_refs.append("TOOL_RESULTS")
-        evidence_text_by_ref = {
-            str(item.get("ref_id") or ""): "\n".join(
-                value
-                for value in (
-                    str(item.get("title") or ""),
-                    str(item.get("url") or ""),
-                    str(item.get("evidence_text") or ""),
-                )
-                if value
-            )
-            for item in context.get("selected_evidence") or []
-            if isinstance(item, dict) and str(item.get("ref_id") or "").strip()
-        }
-        if self._deterministic_results():
-            evidence_text_by_ref["TOOL_RESULTS"] = json.dumps(
-                self._deterministic_results(), ensure_ascii=False
-            )
         review = self.planner.cross_validate_research(
             user_query,
             task_plan,
             review_context,
-            evidence_refs=available_evidence_refs,
-            evidence_text_by_ref=evidence_text_by_ref,
         )
-        evidence_ref_map = {
-            str(item.get("ref_id") or ""): {
-                "title": str(item.get("title") or ""),
-                "url": str(item.get("url") or ""),
-            }
-            for item in context.get("citation_refs") or []
-            if isinstance(item, dict) and str(item.get("ref_id") or "").strip()
-        }
-        validated_source_urls: list[str] = []
-        point_status = review.get("task_point_status") or {}
-        if isinstance(point_status, dict):
-            for value in point_status.values():
-                if not isinstance(value, dict):
-                    continue
-                if str(value.get("status") or "").casefold() not in {
-                    "answered",
-                    "complete",
-                    "completed",
-                    "supported",
-                    "verified",
-                }:
-                    continue
-                for ref in value.get("evidence_refs") or []:
-                    url = str((evidence_ref_map.get(str(ref)) or {}).get("url") or "").strip()
-                    if url and url not in validated_source_urls:
-                        validated_source_urls.append(url)
-        review["evidence_ref_map"] = evidence_ref_map
-        review["validated_source_urls"] = validated_source_urls
         evidence_revision = int(self.state.retrieval.evidence_revision or 0)
         review["evidence_revision"] = evidence_revision
-        point_status_projection: dict[str, dict[str, Any]] = {}
-        if isinstance(point_status, dict):
-            for point_id, value in point_status.items():
-                if not isinstance(value, dict):
-                    continue
-                review_refs = [
-                    str(ref)
-                    for ref in value.get("evidence_refs") or []
-                    if str(ref).strip()
-                ][:8]
-                point_status_projection[str(point_id)] = {
-                    "status": str(value.get("status") or "")[:120],
-                    # [S#] identifiers are local to the validation context and
-                    # may be renumbered by final evidence packing. Persist the
-                    # bound URLs instead so the final writer cannot confuse a
-                    # review-local S1 with a different final S1.
-                    "evidence_urls": [
-                        str((evidence_ref_map.get(ref) or {}).get("url") or "")[:1000]
-                        for ref in review_refs
-                        if str((evidence_ref_map.get(ref) or {}).get("url") or "").strip()
-                    ],
-                    "supported_facts": [
-                        {
-                            "field": str(fact.get("field") or "")[:160],
-                            "value": str(fact.get("value") or "")[:500],
-                            "evidence_url": str(
-                                (
-                                    evidence_ref_map.get(
-                                        str(fact.get("evidence_ref") or "")
-                                    )
-                                    or {}
-                                ).get("url")
-                                or ""
-                            )[:1000],
-                            "quote": str(fact.get("quote") or "")[:1000],
-                        }
-                        for fact in value.get("supported_facts") or []
-                        if isinstance(fact, dict)
-                    ][:12],
-                    "missing_fields": [
-                        str(field)[:300]
-                        for field in value.get("missing_fields") or []
-                        if str(field).strip()
-                    ][:12],
-                }
+        review["trigger"] = str(trigger or "planner_finish")[:120]
+
+        # The review is audit/routing state only.  It never supplies facts,
+        # validates sources, reorders evidence, or enters the final Writer
+        # context.
+        self.state.run_metadata.pop("validated_source_urls", None)
         self.state.run_metadata["last_cross_validation"] = {
             "schema_version": str(
-                review.get("schema_version") or "rwkv-cross-validation.v1"
+                review.get("schema_version") or "rwkv-cross-validation.v3"
             ),
             "decision": str(review.get("decision") or "")[:120],
-            "missing_points": [
-                str(value)[:120]
-                for value in review.get("missing_points") or []
-                if str(value).strip()
-            ][:16],
-            "conflicts": [
-                str(value)[:500]
-                for value in review.get("conflicts") or []
-                if str(value).strip()
-            ][:8],
-            "task_point_status": point_status_projection,
-            "next_focus": str(review.get("next_focus") or "")[:1000],
-            "reason": str(review.get("reason") or "")[:1000],
+            "trigger": str(trigger or "planner_finish")[:120],
             "evidence_revision": evidence_revision,
         }
         if str(review.get("decision") or "").casefold() in {"finish", "replan"}:
             self.state.run_metadata["last_cross_validation_evidence_revision"] = (
                 evidence_revision
             )
-            self.state.run_metadata["validated_source_urls"] = validated_source_urls[:24]
         append_task_event(
             self.state.task_id,
             "cross_validation",
             step=step,
             phase="VALIDATION",
+            trigger=str(trigger or "planner_finish"),
             decision=review.get("decision", ""),
-            missing_points=review.get("missing_points") or [],
-            conflicts=review.get("conflicts") or [],
-            next_focus=review.get("next_focus", ""),
-            reason=review.get("reason", ""),
             error_class=review.get("error_class", ""),
             message=review.get("message", ""),
             sampling_temperature=review.get("sampling_temperature"),
             sampling_seed=review.get("sampling_seed"),
-            task_point_status=point_status_projection,
+            review_attempts=review.get("review_attempts"),
             raw_model_output=review.get("raw_model_output", ""),
             prompt=review.get("prompt", ""),
             context_text=review_context,
@@ -315,6 +238,7 @@ class Orchestrator:
         task_plan: dict[str, Any],
         *,
         step: int,
+        trigger: str = "planner_finish",
     ) -> dict[str, Any] | None:
         """Review one material evidence revision at most once before synthesis."""
 
@@ -333,6 +257,7 @@ class Orchestrator:
             user_query,
             task_plan,
             step=step,
+            trigger=trigger,
         )
 
     def _retrieval_context(self) -> dict[str, Any]:
@@ -477,29 +402,8 @@ class Orchestrator:
                 evidence_rounds=len(rounds),
             )
 
-        if rounds:
-            merged = merge_retrieval_results(
-                user_query,
-                action,
-                rounds,
-                ranking_strategy=self._ranking_strategy(),
-            )
-            if not merged.get("results"):
-                merged["results"] = self.state.retrieval.source_records()
-        else:
-            merged = {
-                "query": user_query,
-                "status": "no_retrieval",
-                "results": self.state.retrieval.source_records(),
-                "sources": [],
-                "citation_refs": [],
-                "round_count": 0,
-                "real_network": True,
-            }
-
-        merged["calculation_results"] = self._deterministic_results()
+        merged = self._current_retrieval_data(user_query, action, rounds)
         claim_snapshot = self.state.retrieval.claims.snapshot()
-        merged["claim_ledger"] = claim_snapshot
         self.state.run_metadata["claim_ledger"] = claim_snapshot
         self._record_final_ranking(action, merged, step)
 
@@ -558,11 +462,18 @@ class Orchestrator:
             model_output_available=True,
             claim_ledger=claim_snapshot,
         )
+        report_data = {
+            **merged,
+            "citation_refs": synthesis.get("citation_refs") or [],
+            "selected_evidence": synthesis.get("selected_evidence") or [],
+            "context_stats": synthesis.get("context_stats") or {},
+            "context_text": synthesis.get("context_text", ""),
+        }
         self._write_agentic_report(
             user_query,
             action,
             answer,
-            data=merged,
+            data=report_data,
             mode="rwkv_final",
         )
         return answer

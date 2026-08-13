@@ -18,6 +18,116 @@ from utils.source_authority import (
     infer_candidate_authority_domains,
     resolve_source_policy,
 )
+from utils.web_retrieval import retrieval_url_identity
+
+
+def test_official_subdomain_of_code_host_can_be_inferred_without_trusting_repo_pages():
+    inferred = infer_candidate_authority_domains(
+        "GitHub official CODEOWNERS documentation",
+        [
+            {
+                "provider": "provider",
+                "results": [
+                    {
+                        "title": "Official GitHub documentation: CODEOWNERS",
+                        "url": "https://docs.github.com/repositories/about-code-owners",
+                        "snippet": "GitHub documentation for CODEOWNERS",
+                    },
+                    {
+                        "title": "Example repository",
+                        "url": "https://github.com/example/repository",
+                        "snippet": "GitHub repository",
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert [row["domain"] for row in inferred] == ["docs.github.com"]
+
+
+def test_authority_bootstrap_uses_owner_identity_not_unrelated_subdomain():
+    inferred = infer_candidate_authority_domains(
+        "FINAL FANTASY XIV official patch notes",
+        [
+            {
+                "provider": "one",
+                "results": [
+                    {
+                        "title": "FINAL audio official store",
+                        "url": "https://final-inc.com/",
+                        "snippet": "FINAL products",
+                    },
+                    {
+                        "title": "FINAL FANTASY XIV Patch Notes",
+                        "url": "https://na.finalfantasyxiv.com/lodestone/topics/detail/release",
+                        "snippet": "FINAL FANTASY XIV official patch notes",
+                    },
+                    {
+                        "title": "FINAL FANTASY XIV community wiki",
+                        "url": "https://ffxiv.consolegameswiki.com/wiki/Patch",
+                        "snippet": "FINAL FANTASY XIV patch notes",
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert [row["domain"] for row in inferred] == ["na.finalfantasyxiv.com"]
+
+
+def test_community_owner_domain_is_not_inferred_as_rust_first_party():
+    inferred = infer_candidate_authority_domains(
+        "Rust official release documentation",
+        [
+            {
+                "provider": "one",
+                "results": [
+                    {
+                        "title": "Rust documentation mirror",
+                        "url": "https://rustwiki.org/zh-CN/reference",
+                        "snippet": "Rust documentation",
+                    },
+                    {
+                        "title": "Announcing Rust 1.97.1",
+                        "url": "https://blog.rust-lang.org/2026/07/16/Rust-1.97.1/",
+                        "snippet": "Rust official release announcement",
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert [row["domain"] for row in inferred] == ["blog.rust-lang.org"]
+
+
+def test_model_search_domain_is_not_promoted_to_user_required_domain():
+    candidates = _merge_candidates(
+        "site:nginx.org ngx_http_limit_req_module",
+        [
+            {
+                "provider": "provider",
+                "results": [
+                    {
+                        "title": "Request limiting",
+                        "url": "https://nginx.org/en/docs/http/ngx_http_limit_req_module.html",
+                        "snippet": "limit_req_zone rate burst",
+                    }
+                ],
+            }
+        ],
+        task_plan={
+            "goal": "按照 nginx 官方文档设置请求速率限制",
+            "preferred_domains": ["nginx.org"],
+        },
+        constraint_query="nginx request rate limit",
+        policy_query="按照 nginx 官方文档设置请求速率限制",
+    )
+
+    authority = candidates[0]["authority"]
+    assert authority["required_domains"] == []
+    assert authority["label"] == "third_party"
+    assert authority["satisfied"] is False
 
 
 class SourceAuthorityTests(unittest.TestCase):
@@ -32,17 +142,55 @@ class SourceAuthorityTests(unittest.TestCase):
             self.calls.append((prompt, max_tokens, kwargs))
             return SimpleNamespace(content=self.content)
 
+    def test_retrieval_url_identity_only_collapses_non_root_trailing_slash(self):
+        assert retrieval_url_identity("https://Docs.Example/page/") == (
+            "https://docs.example/page"
+        )
+        assert retrieval_url_identity("https://docs.example/") == (
+            "https://docs.example/"
+        )
+
+    def test_candidate_merge_deduplicates_trailing_slash_aliases(self):
+        candidates = _merge_candidates(
+            "Widget official release notes",
+            [
+                {
+                    "provider": "one",
+                    "results": [
+                        {
+                            "title": "Widget release notes",
+                            "url": "https://docs.example/release-notes",
+                            "snippet": "Widget releases",
+                        }
+                    ],
+                },
+                {
+                    "provider": "two",
+                    "results": [
+                        {
+                            "title": "Widget release notes",
+                            "url": "https://docs.example/release-notes/",
+                            "snippet": "Official Widget release dates",
+                        }
+                    ],
+                },
+            ],
+            limit=8,
+        )
+
+        assert len(candidates) == 1
+        assert candidates[0]["discovery_providers"] == ["one", "two"]
+
     def test_required_domain_is_not_satisfied_by_third_party_summary(self):
         plan = {
-            "source_policy": "official_required",
-            "required_domains": ["miit.gov.cn"],
+            "schema_version": "task_plan.v2",
+            "goal": "Use the official miit.gov.cn source for the latest MIIT telecom statistics",
             "atomic_points": [
                 {
                     "id": "P1",
-                    "task": "MIIT official telecom statistics",
-                    "objective": "find the official statistics",
-                    "evidence_needed": ["official source"],
-                    "acceptance_criteria": ["official domain"],
+                    "question": "latest MIIT telecom statistics from miit.gov.cn",
+                    "fields": ["statistics"],
+                    "time_scope": "current",
                 }
             ],
         }
@@ -57,7 +205,7 @@ class SourceAuthorityTests(unittest.TestCase):
                     }
                 ]
             },
-            query="latest MIIT telecommunications industry statistics",
+            query="Use the official miit.gov.cn page for latest MIIT telecommunications industry statistics",
             constraints={"task_plan": plan},
         )
         row = report["subquestion_coverage"][0]
@@ -101,8 +249,8 @@ class SourceAuthorityTests(unittest.TestCase):
     def test_official_domain_satisfies_policy(self):
         authority = authority_for_url(
             "https://www.miit.gov.cn/report",
-            "latest MIIT telecommunications industry statistics",
-            {"task_plan": {"source_policy": "official_required", "required_domains": ["miit.gov.cn"]}},
+            "Use the official miit.gov.cn source for latest MIIT telecommunications industry statistics",
+            {},
         )
         self.assertTrue(authority["satisfied"])
         self.assertEqual(authority["label"], "official_required")
@@ -126,6 +274,42 @@ class SourceAuthorityTests(unittest.TestCase):
         self.assertEqual(policy["required_domains"], ["docs.djangoproject.com"])
         self.assertEqual(policy["domain_source"], "explicit_query")
         self.assertTrue(policy["required"])
+
+    def test_explicit_official_request_survives_compact_open_web_brief(self):
+        policy = resolve_source_policy(
+            "Use the Ubisoft official announcement for the current season",
+            {
+                "task_plan": {
+                    "goal": "Use the Ubisoft official announcement",
+                    "source_policy": "open_web",
+                    "required_domains": [],
+                }
+            },
+        )
+
+        self.assertEqual(policy["mode"], "official_required")
+        self.assertTrue(policy["required"])
+        self.assertEqual(policy["required_domains"], [])
+
+    def test_entity_host_and_result_text_bootstrap_unknown_official_domain(self):
+        inferred = infer_candidate_authority_domains(
+            "Use Ubisoft official material",
+            [
+                {
+                    "provider": "search",
+                    "results": [
+                        {
+                            "url": "https://www.ubisoft.com/game/example",
+                            "title": "Example seasons | Ubisoft",
+                            "snippet": "Season information",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        self.assertEqual(inferred[0]["domain"], "ubisoft.com")
+        self.assertIn("entity_in_result_text", inferred[0]["reasons"])
 
     def test_unseen_official_domain_can_be_bootstrapped_by_strong_signals(self):
         inferred = infer_candidate_authority_domains(
@@ -164,18 +348,13 @@ class SourceAuthorityTests(unittest.TestCase):
     def test_unverified_hostname_alias_does_not_satisfy_policy(self):
         authority = authority_for_url(
             "https://docs.example-project.test/release",
-            "official project documentation",
-            {
-                "task_plan": {
-                    "source_policy": "official_required",
-                    "required_domains": ["legacy.example-project.test"],
-                }
-            },
+            "Use the official legacy.example-project.test project documentation",
+            {},
         )
         self.assertFalse(authority["satisfied"])
         self.assertEqual(authority["label"], "third_party")
 
-    def test_plan_keeps_task_scope_fields(self):
+    def test_plan_keeps_only_factual_scope_fields(self):
         plan = Planner._validate_task_plan(
             {
                 "goal": "latest notices",
@@ -187,39 +366,36 @@ class SourceAuthorityTests(unittest.TestCase):
                 "atomic_points": [
                     {
                         "id": "P1",
-                        "task": "find notices",
-                        "objective": "find latest notices",
-                        "evidence_needed": ["notice rows"],
-                        "acceptance_criteria": ["date ordered"],
-                        "required_domains": ["security.ubuntu.com"],
+                        "question": "find latest notices",
+                        "fields": ["notice_id", "title"],
+                        "time_scope": "current",
                     }
                 ],
             }
         )
-        self.assertEqual(plan["task_mode"], "latest_list")
-        self.assertEqual(plan["source_policy"], "official_required")
-        self.assertEqual(plan["required_domains"], ["ubuntu.com"])
-        self.assertEqual(
-            plan["atomic_points"][0]["required_domains"],
-            ["security.ubuntu.com"],
-        )
-        self.assertEqual(plan["max_items"], 5)
+        self.assertEqual(plan["schema_version"], "task_plan.v2")
+        self.assertEqual(plan["atomic_points"][0]["fields"], ["notice_id", "title"])
+        self.assertEqual(plan["atomic_points"][0]["time_scope"], "current")
+        self.assertNotIn("source_policy", plan)
+        self.assertNotIn("required_domains", plan)
+        self.assertNotIn("task_mode", plan)
 
     def test_web_search_scopes_official_adapter_and_hard_query_to_active_claim(self):
         plan = {
-            "source_policy": "official_required",
-            "required_domains": ["docs.djangoproject.com", "python.org"],
-            "answer_requirements": [{"type": "date", "label": "all dates"}],
+            "schema_version": "task_plan.v2",
+            "goal": "Compare official docs.djangoproject.com and python.org release dates",
             "atomic_points": [
                 {
                     "id": "P1",
-                    "task": "Django 5.2 official release date",
-                    "answer_requirements": [{"type": "date", "label": "Django date"}],
+                    "question": "Django 5.2 official release date from docs.djangoproject.com",
+                    "fields": ["date"],
+                    "time_scope": "historical",
                 },
                 {
                     "id": "P2",
-                    "task": "Python 3.13 official release date",
-                    "answer_requirements": [{"type": "date", "label": "Python date"}],
+                    "question": "Python 3.13 official release date from python.org",
+                    "fields": ["date"],
+                    "time_scope": "historical",
                 },
             ],
         }
@@ -237,17 +413,20 @@ class SourceAuthorityTests(unittest.TestCase):
                 "Python 3.13 release date",
                 task_plan=plan,
                 task_point_id="P2",
-                original_goal="Compare Django 5.2 and Python 3.13 release dates",
+                original_goal=(
+                    "Compare official docs.djangoproject.com and python.org release dates "
+                    "for Django 5.2 and Python 3.13"
+                ),
                 task_id="CLAIM_DOMAIN_SCOPE_TEST",
             )
 
         args, kwargs = discover.call_args
         self.assertEqual(args[1], ["python.org"])
-        self.assertEqual(kwargs["constraint_query"], "Python 3.13 official release date")
         self.assertEqual(
-            kwargs["answer_requirements"],
-            [{"type": "date", "label": "Python date"}],
+            kwargs["constraint_query"],
+            "Python 3.13 official release date from python.org",
         )
+        self.assertNotIn("answer_requirements", kwargs)
 
     def test_model_cannot_override_runtime_context(self):
         load_builtin_tools()
@@ -344,11 +523,8 @@ class SourceAuthorityTests(unittest.TestCase):
         )
         self.assertIn("/2026/08/05/", candidates[0]["url"])
 
-    def test_community_policy_fetches_threads_instead_of_board_navigation(self):
-        plan = {
-            "source_policy": "community_required",
-            "required_domains": ["v2ex.com"],
-        }
+    def test_community_detail_ranks_before_board_navigation_without_plan_policy(self):
+        plan = {"goal": "V2EX macOS 升级体验", "atomic_points": []}
         candidates = _merge_candidates(
             "V2EX macOS 升级体验",
             [
@@ -370,7 +546,7 @@ class SourceAuthorityTests(unittest.TestCase):
             ],
             task_plan=plan,
         )
-        self.assertEqual([row["url"] for row in candidates], ["https://www.v2ex.com/t/1229637"])
+        self.assertEqual(candidates[0]["url"], "https://www.v2ex.com/t/1229637")
 
     def test_official_adapter_relevance_survives_provider_candidate_merge(self):
         plan = {
@@ -642,7 +818,7 @@ class SourceAuthorityTests(unittest.TestCase):
         self.assertTrue(result["selected_evidence"])
         self.assertIn("WebSocket proxying", llm_prompt_text(llm))
 
-    def test_user_explicit_official_domain_gate_skips_third_party_page_fetches(self):
+    def test_user_explicit_official_domain_is_soft_policy_not_fetch_gate(self):
         plan = {
             "source_policy": "official_required",
             "required_domains": ["miit.gov.cn"],
@@ -657,6 +833,17 @@ class SourceAuthorityTests(unittest.TestCase):
                 }
             ],
         }
+        body = "A third-party report discussing the requested MIIT statistic. " * 20
+        record = {
+            "title": "Third-party MIIT report",
+            "url": "https://www.researchandmarkets.com/report",
+            "content": body,
+            "page_excerpt": body,
+            "source_excerpt": body,
+            "body_verified": True,
+            "evidence_origin": "fetched_page_body",
+            "authority": {"satisfied": False},
+        }
         with (
             patch("tools.web_search_generic.search_web_keyless", return_value=provider_result),
             patch("tools.web_search_generic.search_web_tavily", return_value=provider_result),
@@ -664,7 +851,24 @@ class SourceAuthorityTests(unittest.TestCase):
                 "tools.web_search_generic.discover_official_urls",
                 return_value={"status": "no_results", "provider": "official site adapter", "results": []},
             ),
-            patch("tools.web_search_generic._fetch_candidate") as fetch_candidate,
+            patch(
+                "tools.web_search_generic._fetch_candidate",
+                return_value={
+                    "status": "ok",
+                    "results": [
+                        {
+                            "title": record["title"],
+                            "url": record["url"],
+                            "page_excerpt": body,
+                            "body_verified": True,
+                        }
+                    ],
+                },
+            ) as fetch_candidate,
+            patch(
+                "tools.web_search_generic._compact_page",
+                return_value=(record, {"status": "ok", "url": record["url"]}),
+            ),
             patch("tools.web_search_generic.append_task_event"),
         ):
             result = json.loads(
@@ -674,11 +878,12 @@ class SourceAuthorityTests(unittest.TestCase):
                     task_id="SOURCE_AUTHORITY_GATE_TEST",
                 )
             )
-        self.assertTrue(result["authority_missing"])
-        self.assertFalse(result["evidence_ready"])
-        fetch_candidate.assert_not_called()
+        self.assertNotIn("authority_missing", result)
+        self.assertTrue(result["evidence_ready"])
+        self.assertEqual(result["results"][0]["url"], record["url"])
+        fetch_candidate.assert_called_once()
 
-    def test_model_planned_domain_is_a_discovery_hypothesis_not_a_hard_domain(self):
+    def test_model_planned_domain_fields_do_not_control_retrieval(self):
         plan = {
             "source_policy": "official_required",
             "required_domains": ["miit.gov.cn"],
@@ -711,15 +916,13 @@ class SourceAuthorityTests(unittest.TestCase):
             )
 
         self.assertNotIn("required_domains", result)
-        self.assertEqual(
-            result["source_resolution"]["domain_source"],
-            "model_hypothesis_unverified",
-        )
-        self.assertEqual(result["source_resolution"]["preferred_domains"], ["miit.gov.cn"])
-        self.assertEqual(discover.call_args.args[1], ["miit.gov.cn"])
+        self.assertEqual(result["source_resolution"]["domain_source"], "unresolved")
+        self.assertNotIn("preferred_domains", result["source_resolution"])
+        if discover.call_args is not None:
+            self.assertEqual(discover.call_args.args[1], [])
         fetch_candidate.assert_not_called()
 
-    def test_unseen_official_task_bootstraps_domain_before_page_fetch(self):
+    def test_unseen_official_task_keeps_bootstrap_inference_shadow_only(self):
         plan = {
             "source_policy": "official_required",
             "required_domains": [],
@@ -771,9 +974,110 @@ class SourceAuthorityTests(unittest.TestCase):
                 )
             )
         self.assertEqual(plan["required_domains"], [])
-        self.assertEqual(result["source_resolution"]["domain_source"], "provider_bootstrap")
+        self.assertEqual(result["source_resolution"]["domain_source"], "unresolved")
+        self.assertEqual(result["source_resolution"]["required_domains"], [])
+        self.assertNotIn("preferred_domains", result["source_resolution"])
         self.assertTrue(result["evidence_ready"])
-        discover.assert_called_once()
+        discover.assert_not_called()
+
+    def test_soft_bootstrap_does_not_suppress_generic_provider_candidate(self):
+        plan = {
+            "source_policy": "official_required",
+            "required_domains": [],
+        }
+        suggested = {
+            "title": "Widget community documentation",
+            "url": "https://widget-docs.example/releases",
+            "snippet": "Widget release documentation mirror.",
+        }
+        generic = {
+            "title": "Widget security bulletin",
+            "url": "https://vendor.example/security/bulletin",
+            "snippet": "Current Widget security bulletin and patch details.",
+        }
+        discovered = {
+            "status": "ok",
+            "provider": "provider",
+            "results": [suggested, generic],
+        }
+        official = {
+            "status": "ok",
+            "provider": "official site adapter",
+            "results": [suggested],
+        }
+
+        def fetched(candidate, _task_id):
+            body = f"Fetched evidence from {candidate['url']}. " * 12
+            return {
+                "status": "ok",
+                "results": [
+                    {
+                        "title": candidate["title"],
+                        "url": candidate["url"],
+                        "page_excerpt": body,
+                        "body_verified": True,
+                    }
+                ],
+            }
+
+        def compacted(candidate, payload, **_kwargs):
+            page = payload["results"][0]
+            body = page["page_excerpt"]
+            return (
+                {
+                    "title": candidate["title"],
+                    "url": candidate["url"],
+                    "content": body,
+                    "source_excerpt": body,
+                    "body_verified": True,
+                    "evidence_origin": "fetched_page_body",
+                },
+                {"status": "ok", "url": candidate["url"]},
+            )
+
+        with (
+            patch("tools.web_search_generic.search_web_keyless", return_value=discovered),
+            patch("tools.web_search_generic.search_web_tavily", return_value=discovered),
+            patch(
+                "tools.web_search_generic.infer_candidate_authority_domains",
+                return_value=[
+                    {
+                        "domain": "widget-docs.example",
+                        "score": 9,
+                        "reasons": ["entity_in_host", "first_party_content_label"],
+                        "providers": ["provider"],
+                    }
+                ],
+            ),
+            patch(
+                "tools.web_search_generic.discover_official_urls",
+                return_value=official,
+            ),
+            patch(
+                "tools.web_search_generic._fetch_candidate",
+                side_effect=fetched,
+            ) as fetch_candidate,
+            patch(
+                "tools.web_search_generic._compact_page",
+                side_effect=compacted,
+            ),
+            patch("tools.web_search_generic.append_task_event"),
+        ):
+            result = json.loads(
+                web_search(
+                    "Widget official security bulletin",
+                    max_results=2,
+                    task_plan=plan,
+                    task_id="SOFT_AUTHORITY_BOOTSTRAP_TEST",
+                )
+            )
+
+        fetched_urls = {
+            call.args[0]["url"] for call in fetch_candidate.call_args_list
+        }
+        self.assertIn(generic["url"], fetched_urls)
+        self.assertEqual(result["source_resolution"]["required_domains"], [])
+        self.assertNotIn("preferred_domains", result["source_resolution"])
 
     def test_verified_sitemap_alias_reaches_fetch_and_authority_gate(self):
         plan = {
@@ -820,7 +1124,7 @@ class SourceAuthorityTests(unittest.TestCase):
         ):
             result = json.loads(
                 web_search(
-                    "Project 5.2 official release date",
+                    "Project 5.2 official release date site:project.example",
                     task_plan=plan,
                     task_id="SITEMAP_ALIAS_TEST",
                 )
@@ -911,6 +1215,73 @@ class SourceAuthorityTests(unittest.TestCase):
         compact.assert_called_once()
         self.assertTrue(result["reextracted_cached_sources"])
         self.assertEqual(result["results"][0]["locator_claim_id"], "P2")
+
+    def test_unbound_multi_point_search_extracts_against_complete_user_goal(self):
+        search_query = "Titans arXiv latest revision"
+        original_goal = "Find the latest Titans revision and list its architecture variants"
+        url = "https://arxiv.org/abs/2501.00663"
+        body = (original_goal + ". ") * 24
+        provider = {
+            "status": "ok",
+            "provider": "test",
+            "results": [
+                {
+                    "title": "Titans: Learning to Memorize at Test Time",
+                    "url": url,
+                    "snippet": original_goal,
+                }
+            ],
+        }
+        record = {
+            "title": "Titans",
+            "url": url,
+            "content": body,
+            "source_excerpt": body,
+            "body_verified": True,
+            "evidence_origin": "fetched_page_body",
+        }
+        plan = {
+            "schema_version": "task_plan.v2",
+            "goal": original_goal,
+            "atomic_points": [
+                {"id": "P1", "question": "latest revision", "fields": ["date"]},
+                {"id": "P2", "question": "architecture variants", "fields": ["names"]},
+            ],
+        }
+        with (
+            patch("tools.web_search_generic.search_web_keyless", return_value=provider),
+            patch("tools.web_search_generic.search_web_tavily", return_value=provider),
+            patch(
+                "tools.web_search_generic._fetch_candidate",
+                return_value={
+                    "status": "ok",
+                    "results": [
+                        {
+                            "title": "Titans",
+                            "url": url,
+                            "page_excerpt": body,
+                            "body_verified": True,
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "tools.web_search_generic._compact_page",
+                return_value=(record, {"status": "ok", "url": url}),
+            ) as compact,
+            patch("tools.web_search_generic.append_task_event"),
+        ):
+            result = json.loads(
+                web_search(
+                    search_query,
+                    task_plan=plan,
+                    original_goal=original_goal,
+                    task_id="FULL_GOAL_EXTRACTION_TEST",
+                )
+            )
+
+        self.assertTrue(result["evidence_ready"])
+        self.assertEqual(compact.call_args.args[0], original_goal)
 
 
 def llm_prompt_text(llm):
