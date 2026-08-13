@@ -1323,12 +1323,16 @@ def build_evidence_context(
                         separators=(",", ":"),
                     )
                 )
-            alignment = record_metadata.get("object_alignment")
-            if isinstance(alignment, dict) and alignment:
+            alignment_observations = merge_mapping_rows(
+                record_metadata.get("object_alignments"),
+                record_metadata.get("object_alignment"),
+            )
+            if alignment_observations:
                 lines.append(
-                    "Literal object-identifier alignment (transport comparison only): "
+                    "Literal object-identifier alignment observations "
+                    "(transport comparisons across retrieval routes only): "
                     + json.dumps(
-                        alignment,
+                        alignment_observations,
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )

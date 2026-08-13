@@ -996,6 +996,9 @@ def test_object_identity_survives_round_merge_state_ledger_and_writer_context():
         == "exact"
     )
     assert "owner/project release v2.0" in context["text"]
+    assert "alignment observations" in context["text"]
+    assert '"relation":"unresolved"' in context["text"]
+    assert '"relation":"exact"' in context["text"]
 
 
 def test_round_merge_preserves_later_candidates_and_all_object_alignments():
