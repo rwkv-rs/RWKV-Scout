@@ -1,10 +1,13 @@
-"""Single factual task-record contract shared by the retrieval pipeline.
+"""Canonical Task Plan contract for the complete retrieval pipeline.
 
-RWKV writes the plan.  This module only validates and projects that model
-output so every downstream component reads the same meaning.  An atomic point
-is one user-requested factual *record*, not a search/verification workflow
-stage.  Record identity fields are model-authored routing metadata; this module
-never infers their values from the question.
+There is exactly one runtime representation. Historical version-labelled
+payloads are accepted only by :func:`normalize_task_plan` and are immediately
+rewritten. Downstream stages never need to know which legacy shape produced a
+plan.
+
+Record and field identifiers are transport identity owned by the controller.
+RWKV supplies semantics (question, subject, relation and field names); it does
+not get to preserve, reuse or invent runtime identifiers.
 """
 
 from __future__ import annotations
@@ -13,27 +16,48 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from agent.runtime_contracts import TASK_PLAN_CONTRACT
 
-TASK_PLAN_SCHEMA_VERSION = "task_plan.v2"
+
+LEGACY_TASK_PLAN_SCHEMA_VERSIONS = frozenset(
+    {"task_plan.v1", "task_plan.v2", "task_plan.v3", "task_plan.v4"}
+)
 TIME_SCOPES = {"current", "historical", "timeless", "unspecified"}
 SET_SEMANTICS = {"single", "collection", "possibly_empty"}
+MAX_MODEL_TASK_RECORDS = 4
+MAX_RECORD_FIELDS = 16
 
 
-def _strings(value: Any, *, limit: int = 16) -> list[str]:
+def _text(value: Any, limit: int) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def _strings(value: Any, *, limit: int = MAX_RECORD_FIELDS) -> list[str]:
     values = [value] if isinstance(value, str) else list(value or [])
-    return list(
-        dict.fromkeys(
-            text
-            for item in values
-            if (text := re.sub(r"\s+", " ", str(item or "")).strip())
-        )
-    )[: max(0, int(limit))]
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if isinstance(item, Mapping):
+            item = item.get("name") or item.get("field_name") or item.get("type")
+        text = _text(item, 160)
+        key = text.casefold()
+        if text and key not in seen:
+            seen.add(key)
+            output.append(text)
+        if len(output) >= max(0, int(limit)):
+            break
+    return output
 
 
-def point_question(point: Mapping[str, Any] | None, fallback: str = "") -> str:
-    """Read one point through the v2 contract or the legacy trace boundary."""
+def record_id(record: Mapping[str, Any] | None) -> str:
+    row = record if isinstance(record, Mapping) else {}
+    return _text(row.get("record_id"), 120)
 
-    row = point if isinstance(point, Mapping) else {}
+
+def record_question(record: Mapping[str, Any] | None, fallback: str = "") -> str:
+    """Return the question carried by one Task Record."""
+
+    row = record if isinstance(record, Mapping) else {}
     return str(
         row.get("question")
         or row.get("task")
@@ -43,136 +67,255 @@ def point_question(point: Mapping[str, Any] | None, fallback: str = "") -> str:
     ).strip()
 
 
-def point_fields(point: Mapping[str, Any] | None) -> list[str]:
-    row = point if isinstance(point, Mapping) else {}
-    fields = _strings(row.get("fields") or row.get("requested_fields"), limit=16)
+def record_fields(record: Mapping[str, Any] | None) -> list[str]:
+    """Return ordered semantic field names from a canonical record."""
+
+    row = record if isinstance(record, Mapping) else {}
+    fields = _strings(row.get("fields") or row.get("requested_fields"))
+    fields.extend(_strings(row.get("evidence_needed")))
     for requirement in row.get("answer_requirements") or []:
         if isinstance(requirement, Mapping):
             fields.extend(_strings(requirement.get("type"), limit=1))
-    return list(dict.fromkeys(fields))[:16]
+    return _strings(fields)
 
 
-def point_time_scope(point: Mapping[str, Any] | None) -> str:
-    row = point if isinstance(point, Mapping) else {}
+def record_field_records(record: Mapping[str, Any] | None) -> list[dict[str, str]]:
+    """Return canonical field identities for one Task Plan record."""
+
+    row = record if isinstance(record, Mapping) else {}
+    parent_id = record_id(row) or "P1"
+    raw_fields = row.get("fields")
+    raw_rows = raw_fields if isinstance(raw_fields, list) else []
+    output: list[dict[str, str]] = []
+    for index, name in enumerate(record_fields(row), start=1):
+        raw = raw_rows[index - 1] if index <= len(raw_rows) else None
+        supplied_id = (
+            _text(raw.get("field_id"), 160)
+            if isinstance(raw, Mapping)
+            else ""
+        )
+        output.append(
+            {
+                "field_id": supplied_id or f"{parent_id}:F{index}",
+                "name": name,
+            }
+        )
+    return output
+
+
+def field_name_by_id(record: Mapping[str, Any] | None) -> dict[str, str]:
+    return {
+        field["field_id"].casefold(): field["name"]
+        for field in record_field_records(record)
+    }
+
+
+def field_ids(record: Mapping[str, Any] | None) -> list[str]:
+    return [field["field_id"] for field in record_field_records(record)]
+
+
+def record_time_scope(record: Mapping[str, Any] | None) -> str:
+    row = record if isinstance(record, Mapping) else {}
     value = str(row.get("time_scope") or "unspecified").strip().casefold()
     return value if value in TIME_SCOPES else "unspecified"
 
 
-def point_subject(point: Mapping[str, Any] | None) -> str:
-    """Return RWKV's subject label without inventing a missing entity."""
-
-    row = point if isinstance(point, Mapping) else {}
-    return re.sub(r"\s+", " ", str(row.get("subject") or "")).strip()[:400]
+def record_subject(record: Mapping[str, Any] | None) -> str:
+    row = record if isinstance(record, Mapping) else {}
+    return _text(row.get("subject"), 400)
 
 
-def point_relation(point: Mapping[str, Any] | None) -> str:
-    """Return RWKV's requested relation label."""
-
-    row = point if isinstance(point, Mapping) else {}
-    return re.sub(r"\s+", " ", str(row.get("relation") or "")).strip()[:240]
+def record_relation(record: Mapping[str, Any] | None) -> str:
+    row = record if isinstance(record, Mapping) else {}
+    return _text(row.get("relation"), 240)
 
 
-def point_set_semantics(point: Mapping[str, Any] | None) -> str:
-    row = point if isinstance(point, Mapping) else {}
+def record_set_semantics(record: Mapping[str, Any] | None) -> str:
+    row = record if isinstance(record, Mapping) else {}
     value = str(row.get("set_semantics") or "single").strip().casefold()
     return value if value in SET_SEMANTICS else "single"
 
 
-def point_premise_requires_verification(point: Mapping[str, Any] | None) -> bool:
-    row = point if isinstance(point, Mapping) else {}
+def record_premise_requires_verification(record: Mapping[str, Any] | None) -> bool:
+    row = record if isinstance(record, Mapping) else {}
     value = row.get("premise_requires_verification", False)
     if isinstance(value, str):
         return value.strip().casefold() in {"true", "yes", "1", "是"}
     return bool(value)
 
 
-def task_points(
-    task_plan: Mapping[str, Any] | None,
+def _raw_records(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    raw = payload.get("records")
+    if raw is None:
+        raw = payload.get("atomic_points")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("task plan records must be an array")
+    return [item for item in raw if isinstance(item, Mapping)]
+
+
+def _canonical_records(
+    payload: Mapping[str, Any],
     *,
-    fallback_query: str = "",
-    max_points: int = 4,
+    fallback_query: str,
+    max_records: int | None,
+    preserve_runtime_ids: bool,
 ) -> list[dict[str, Any]]:
-    """Return canonical factual points without inventing missing semantics."""
+    raw_records = _raw_records(payload)
+    if max_records is not None and len(raw_records) > max_records:
+        raise ValueError("task plan contains too many records")
+    if not raw_records and fallback_query.strip():
+        raw_records = [{"question": fallback_query.strip()}]
 
-    plan = task_plan if isinstance(task_plan, Mapping) else {}
-    raw_points = [
-        value
-        for value in plan.get("records") or plan.get("atomic_points") or []
-        if isinstance(value, Mapping)
-    ]
-    if not raw_points and str(fallback_query or "").strip():
-        raw_points = [{"id": "P1", "question": str(fallback_query).strip()}]
-
-    legacy_global_fields = _strings(plan.get("requested_fields"), limit=16)
-    normalized: list[dict[str, Any]] = []
-    by_signature: dict[str, dict[str, Any]] = {}
-    used_ids: set[str] = set()
-    for raw in raw_points[: max(1, int(max_points))]:
-        question = point_question(raw, fallback_query)
+    global_fields = _strings(payload.get("requested_fields"))
+    semantics: list[dict[str, Any]] = []
+    for raw in raw_records:
+        explicit_question = _text(raw.get("question"), 1200)
+        legacy_task = _text(raw.get("task"), 800)
+        legacy_objective = _text(raw.get("objective"), 800)
+        if explicit_question:
+            question = explicit_question
+        elif legacy_task and legacy_objective and legacy_objective.casefold() != legacy_task.casefold():
+            question = _text(f"{legacy_task} — {legacy_objective}", 1200)
+        else:
+            question = _text(legacy_task or legacy_objective or fallback_query, 1200)
         if not question:
             continue
-        signature = re.sub(r"\s+", " ", question.casefold()).strip()
-        fields = point_fields(raw)
-        if not fields and len(raw_points) == 1:
-            fields = list(legacy_global_fields)
-        source_id = str(raw.get("id") or f"P{len(normalized) + 1}").strip()
-        existing = by_signature.get(signature)
-        if existing is not None:
-            existing["fields"] = list(
-                dict.fromkeys([*existing.get("fields", []), *fields])
-            )[:16]
-            existing["source_ids"] = list(
-                dict.fromkeys([*existing.get("source_ids", []), source_id])
-            )
-            continue
-        point_id = source_id or f"P{len(normalized) + 1}"
-        if point_id in used_ids:
-            raise ValueError("task plan point ids must be unique")
-        row = {
-            "id": point_id,
-            "question": question[:1200],
-            "subject": point_subject(raw),
-            "relation": point_relation(raw),
-            "fields": fields,
-            "time_scope": point_time_scope(raw),
-            "set_semantics": point_set_semantics(raw),
-            "premise_requires_verification": point_premise_requires_verification(raw),
-            "source_ids": [point_id],
+        names = record_fields(raw)
+        if not names and len(raw_records) == 1:
+            names = list(global_fields)
+        semantic = {
+            "_record_id": _text(raw.get("record_id") or raw.get("id"), 120),
+            "_field_ids": [
+                _text(item.get("field_id"), 160)
+                if isinstance(item, Mapping)
+                else ""
+                for item in (
+                    raw.get("fields") if isinstance(raw.get("fields"), list) else []
+                )
+            ],
+            "question": question,
+            "subject": record_subject(raw),
+            "relation": record_relation(raw),
+            "_field_names": names,
+            "time_scope": record_time_scope(raw),
+            "set_semantics": record_set_semantics(raw),
+            "premise_requires_verification": record_premise_requires_verification(raw),
         }
-        normalized.append(row)
-        by_signature[signature] = row
-        used_ids.add(point_id)
-    return normalized
+        # Contract normalization is a representation change, never a semantic
+        # deduplicator.  Two rows that happen to have equal wording may carry
+        # different historical identities, evidence and downstream bindings.
+        semantics.append(semantic)
+
+    output: list[dict[str, Any]] = []
+    used_record_ids: set[str] = set()
+    for record_index, semantic in enumerate(semantics, start=1):
+        supplied_record_id = str(semantic.pop("_record_id") or "").strip()
+        if preserve_runtime_ids:
+            canonical_id = supplied_record_id or f"P{record_index}"
+            if canonical_id in used_record_ids:
+                raise ValueError("canonical Task Plan record IDs must be unique")
+        else:
+            canonical_id = f"P{record_index}"
+        used_record_ids.add(canonical_id)
+        names = list(semantic.pop("_field_names"))
+        supplied_field_ids = list(semantic.pop("_field_ids"))
+        fields: list[dict[str, str]] = []
+        used_field_ids: set[str] = set()
+        for field_index, name in enumerate(names, start=1):
+            supplied_field_id = (
+                supplied_field_ids[field_index - 1]
+                if field_index <= len(supplied_field_ids)
+                else ""
+            )
+            if preserve_runtime_ids:
+                canonical_field_id = (
+                    supplied_field_id or f"{canonical_id}:F{field_index}"
+                )
+                if canonical_field_id in used_field_ids:
+                    raise ValueError("canonical Task Plan field IDs must be unique")
+            else:
+                canonical_field_id = f"{canonical_id}:F{field_index}"
+            used_field_ids.add(canonical_field_id)
+            fields.append({"field_id": canonical_field_id, "name": name})
+        output.append(
+            {
+                "record_id": canonical_id,
+                "question": semantic["question"],
+                "subject": semantic["subject"],
+                "relation": semantic["relation"],
+                "fields": fields,
+                "time_scope": semantic["time_scope"],
+                "set_semantics": semantic["set_semantics"],
+                "premise_requires_verification": semantic[
+                    "premise_requires_verification"
+                ],
+            }
+        )
+    return output
 
 
 def normalize_task_plan(
     payload: Mapping[str, Any],
     *,
     fallback_goal: str = "",
-    max_points: int = 4,
+    max_records: int | None = None,
+    preserve_runtime_ids: bool = False,
 ) -> dict[str, Any]:
-    """Validate RWKV output and return the only runtime plan representation."""
+    """Rewrite a plan into the sole canonical runtime representation.
+
+    ``max_records`` is a model-output admission limit, not a runtime storage
+    limit.  Historical and already-admitted plans therefore default to no
+    record-count cap so migration cannot silently erase state.
+    """
 
     if not isinstance(payload, Mapping):
         raise ValueError("task plan must be a JSON object")
+    supplied_contract = str(payload.get("contract") or "").strip()
+    legacy_schema = str(payload.get("schema_version") or "").strip()
+    if supplied_contract and legacy_schema:
+        raise ValueError("task plan cannot contain contract and schema_version together")
+    if supplied_contract and supplied_contract != TASK_PLAN_CONTRACT:
+        raise ValueError("unsupported Task Plan contract")
+    if legacy_schema and legacy_schema not in LEGACY_TASK_PLAN_SCHEMA_VERSIONS:
+        raise ValueError("unsupported historical Task Plan schema")
     goal = str(payload.get("goal") or fallback_goal or "").strip()
     if not goal:
         raise ValueError("task plan requires goal")
-    raw_points = payload.get("records")
-    if raw_points is None:
-        raw_points = payload.get("atomic_points")
-    if raw_points is not None and not isinstance(raw_points, list):
-        raise ValueError("task plan records must be an array")
-    if isinstance(raw_points, list) and len(raw_points) > max_points:
-        raise ValueError("task plan contains too many records")
-    points = task_points(payload, fallback_query=goal, max_points=max_points)
-    if not points:
-        raise ValueError("task plan contains no factual points")
+    records = _canonical_records(
+        payload,
+        fallback_query=goal,
+        max_records=(max(1, int(max_records)) if max_records is not None else None),
+        preserve_runtime_ids=bool(preserve_runtime_ids),
+    )
+    if not records:
+        raise ValueError("task plan contains no factual records")
     return {
-        "schema_version": TASK_PLAN_SCHEMA_VERSION,
+        "contract": TASK_PLAN_CONTRACT,
         "goal": goal[:2400],
-        "atomic_points": points,
+        "records": records,
     }
+
+
+def task_records(
+    task_plan: Mapping[str, Any] | None,
+    *,
+    fallback_query: str = "",
+    max_records: int | None = None,
+) -> list[dict[str, Any]]:
+    """Read canonical records, migrating a historical boundary if necessary."""
+
+    plan = task_plan if isinstance(task_plan, Mapping) else {}
+    goal = str(plan.get("goal") or fallback_query or "").strip()
+    if not goal:
+        return []
+    return normalize_task_plan(
+        plan,
+        fallback_goal=goal,
+        max_records=max_records,
+        preserve_runtime_ids=str(plan.get("contract") or "") == TASK_PLAN_CONTRACT,
+    )["records"]
 
 
 def plan_fields(task_plan: Mapping[str, Any] | None) -> list[str]:
@@ -181,49 +324,67 @@ def plan_fields(task_plan: Mapping[str, Any] | None) -> list[str]:
     for requirement in plan.get("answer_requirements") or []:
         if isinstance(requirement, Mapping):
             fields.extend(_strings(requirement.get("type"), limit=1))
-    for point in task_points(plan):
-        fields.extend(point_fields(point))
-    return list(dict.fromkeys(fields))[:32]
+    for record in task_records(plan):
+        fields.extend(record_fields(record))
+    return _strings(fields, limit=32)
 
 
 def compact_task_plan(task_plan: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(task_plan, Mapping):
         return {"status": "missing"}
     goal = str(task_plan.get("goal") or "").strip()
+    if not goal:
+        return {"status": "missing"}
+    try:
+        canonical = normalize_task_plan(
+            task_plan,
+            fallback_goal=goal,
+            preserve_runtime_ids=str(task_plan.get("contract") or "")
+            == TASK_PLAN_CONTRACT,
+        )
+    except ValueError:
+        return {"status": "invalid"}
     return {
-        "schema_version": TASK_PLAN_SCHEMA_VERSION,
-        "goal": goal[:800],
-        "atomic_points": [
+        "contract": TASK_PLAN_CONTRACT,
+        "goal": canonical["goal"][:800],
+        "records": [
             {
-                "id": point["id"],
-                "question": point["question"][:500],
-                "subject": point.get("subject") or "",
-                "relation": point.get("relation") or "",
-                "fields": list(point.get("fields") or [])[:16],
-                "time_scope": point.get("time_scope") or "unspecified",
-                "set_semantics": point.get("set_semantics") or "single",
+                "record_id": record["record_id"],
+                "question": record["question"][:500],
+                "subject": record["subject"],
+                "relation": record["relation"],
+                "fields": list(record["fields"]),
+                "time_scope": record["time_scope"],
+                "set_semantics": record["set_semantics"],
                 "premise_requires_verification": bool(
-                    point.get("premise_requires_verification")
+                    record["premise_requires_verification"]
                 ),
             }
-            for point in task_points(task_plan, fallback_query=goal)
+            for record in canonical["records"]
         ],
     }
 
 
 __all__ = [
-    "TASK_PLAN_SCHEMA_VERSION",
+    "LEGACY_TASK_PLAN_SCHEMA_VERSIONS",
+    "MAX_RECORD_FIELDS",
+    "MAX_MODEL_TASK_RECORDS",
     "SET_SEMANTICS",
+    "TASK_PLAN_CONTRACT",
     "TIME_SCOPES",
     "compact_task_plan",
+    "field_ids",
+    "field_name_by_id",
     "normalize_task_plan",
     "plan_fields",
-    "point_fields",
-    "point_question",
-    "point_premise_requires_verification",
-    "point_relation",
-    "point_set_semantics",
-    "point_subject",
-    "point_time_scope",
-    "task_points",
+    "record_field_records",
+    "record_fields",
+    "record_premise_requires_verification",
+    "record_question",
+    "record_relation",
+    "record_set_semantics",
+    "record_subject",
+    "record_time_scope",
+    "record_id",
+    "task_records",
 ]

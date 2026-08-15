@@ -40,7 +40,7 @@ def test_discovery_metadata_never_enters_final_evidence_context():
     assert context["text"] == "RETRIEVED SOURCES:\nNo source text was retrieved."
 
 
-def test_date_query_keeps_multiple_substantive_sources_and_separates_page_date():
+def test_unbound_date_pages_never_enter_writer_context():
     context = build_evidence_context(
         {
             "query": "\u53d1\u5e03\u65e5\u671f\u3001\u5468\u5e74\u5e86\u65e5\u671f\u3001\u6700\u65b0\u7248\u672c\u4e3b\u9898",
@@ -51,11 +51,11 @@ def test_date_query_keeps_multiple_substantive_sources_and_separates_page_date()
             ],
         }
     )
-    assert len(context["selected_evidence"]) == 3
+    assert context["selected_evidence"] == []
+    assert "unbound_fallback_source_limit" not in context["context_stats"]
     assert "Published:" not in context["text"]
     assert "unsupported summary" not in context["text"].casefold()
     assert "2026-07-30" not in context["text"]
-    assert all(item["evidence_text"] for item in context["selected_evidence"])
 
 
 def test_merge_discards_title_only_results_before_ranking():
@@ -143,7 +143,7 @@ def test_shared_state_retains_replan_selected_chunks_for_same_source():
                     }
                 ],
             },
-            task_point_id="",
+            task_record_id="",
         )
 
     selected = state.retrieval.source_records()[0]["selected_source_chunks"]
@@ -159,14 +159,14 @@ def test_model_extraction_is_not_the_final_evidence_body():
                     "url": "https://example.com/body",
                     "page_excerpt": _body("The original source body"),
                     "chunk_candidates": [
-                        {"supported": True, "facts": ["A model-only unsupported claim"], "quote": ""}
+                        {"supported": True, "facts": ["A model-only unsupported task_record"], "quote": ""}
                     ],
                 }
             ],
         }
     )
-    assert "The original source body" in context["text"]
-    assert "model-only unsupported claim" not in context["text"]
+    assert "The original source body" not in context["text"]
+    assert "model-only unsupported task_record" not in context["text"]
 
 
 def test_final_context_repeats_only_grounded_locator_spans():
@@ -184,8 +184,8 @@ def test_final_context_repeats_only_grounded_locator_spans():
         }
     )
 
-    assert "VERBATIM SOURCE LOCATORS" in context["text"]
-    assert "tool --version" in context["text"]
+    assert "VERBATIM SOURCE LOCATORS" not in context["text"]
+    assert "tool --version" not in context["text"]
     assert "other --version" not in context["text"]
 
 

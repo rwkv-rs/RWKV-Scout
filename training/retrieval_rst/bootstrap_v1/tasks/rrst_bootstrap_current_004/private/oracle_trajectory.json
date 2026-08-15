@@ -4,14 +4,20 @@
     {
       "type": "task_plan",
       "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
         "goal": "Answer every requested field from frozen evidence without inventing facts.",
-        "atomic_points": [
+        "records": [
           {
-            "id": "P1",
-            "objective": "Bind the current release fields to the newest official source."
+            "record_id": "P1",
+            "question": "Bind the current release fields to the newest official source.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
           }
-        ],
-        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote."
+        ]
       }
     },
     {
@@ -48,7 +54,7 @@
       }
     },
     {
-      "type": "cross_validation",
+      "type": "oracle_evidence_assessment",
       "content": {
         "decision": "finish",
         "missing_points": [],

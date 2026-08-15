@@ -26,6 +26,142 @@ from utils.source_authority import annotate_source
 from utils.network_fetch import fetch_json
 
 
+_OPERATION_CONTRACT = {
+    "weather_current": ("weather", "current"),
+    "weather_alerts": ("weather_alerts", "alerts"),
+    "github_repository": ("github", "repository"),
+    "github_code": ("github", "code"),
+    "github_release": ("github", "release"),
+    "paper": ("paper", "paper"),
+    "paper_series": ("paper", "series"),
+    "crates_release": ("crates", "release"),
+    "pypi_release": ("pypi", "release"),
+    "npm_release": ("npm", "release"),
+}
+
+_ACCEPTED_OBJECT_TYPES = {
+    "weather_current": ("location",),
+    "weather_alerts": ("location",),
+    "github_repository": ("github_repository", "repository_search"),
+    "github_code": ("github_repository", "github_code_search"),
+    "github_release": ("github_repository",),
+    "paper": ("scholarly_work", "doi", "arxiv_id", "paper_search"),
+    "paper_series": ("scholarly_series", "author", "research_topic"),
+    "crates_release": ("crates_package",),
+    "pypi_release": ("pypi_package",),
+    "npm_release": ("npm_package",),
+}
+
+_CONNECTOR_COOLDOWN_SECONDS = {
+    "invalid_identity": 300,
+    "rate_limited": 300,
+    "temporarily_unavailable": 60,
+    "network_error": 30,
+}
+
+
+def _connector_runtime_status(
+    payload: dict[str, Any],
+    *,
+    connector: str,
+    operation: str,
+) -> dict[str, Any]:
+    """Project provider availability without selecting a replacement tool."""
+
+    payload_status = str(payload.get("status") or "").strip().casefold()
+    error_class = str(payload.get("error_class") or "").strip().casefold()
+    messages = [
+        str(payload.get("message") or ""),
+        *(str(value) for value in payload.get("provider_errors") or []),
+    ]
+    error_text = " ".join(messages).casefold()
+    runtime_status = "available"
+    if payload_status in {"error", "failed", "unavailable", "unauthorized"}:
+        if error_class in {
+            "object_type_mismatch",
+            "unsupported_operation",
+            "empty_query",
+        }:
+            runtime_status = "available"
+        elif error_class in _CONNECTOR_COOLDOWN_SECONDS:
+            runtime_status = error_class
+        elif (
+            "rate limit" in error_text
+            or "too many requests" in error_text
+            or re.search(r"\b429\b", error_text)
+            or connector == "github" and re.search(r"\b403\b", error_text)
+        ):
+            runtime_status = "rate_limited"
+        elif (
+            "bad credentials" in error_text
+            or "unauthorized" in error_text
+            or "authentication" in error_text
+            or re.search(r"\b401\b", error_text)
+            or re.search(r"\b403\b", error_text)
+        ):
+            runtime_status = "invalid_identity"
+        elif any(
+            marker in error_text
+            for marker in (
+                "networkfetcherror",
+                "connection",
+                "timed out",
+                "timeout",
+                "name resolution",
+                "dns",
+            )
+        ):
+            runtime_status = "network_error"
+        else:
+            runtime_status = "temporarily_unavailable"
+    return {
+        "provider": f"connector.{connector}" if connector else "connector",
+        "operation": operation,
+        "status": runtime_status,
+        "available": runtime_status == "available",
+        "cooldown_seconds": _CONNECTOR_COOLDOWN_SECONDS.get(runtime_status, 0),
+        "error_class": error_class,
+        "message": " ".join(messages).strip()[:500],
+    }
+
+
+def _finalize_connector_payload(
+    payload: dict[str, Any],
+    *,
+    connector: str,
+    operation: str,
+    real_network: bool,
+) -> dict[str, Any]:
+    result = dict(payload)
+    capability_error = str(result.get("error_class") or "").casefold() in {
+        "object_type_mismatch",
+        "unsupported_operation",
+        "empty_query",
+    }
+    result.update(
+        {
+            "tool": "connector_lookup",
+            "connector": connector,
+            "operation": operation,
+            "accepted_object_types": list(_ACCEPTED_OBJECT_TYPES.get(operation, ())),
+            "real_network": bool(real_network and not capability_error),
+        }
+    )
+    runtime = _connector_runtime_status(
+        result,
+        connector=connector,
+        operation=operation,
+    )
+    result["connector_runtime"] = runtime
+    if (
+        runtime["status"] != "available"
+        and str(result.get("error_class") or "").casefold()
+        not in {"object_type_mismatch", "unsupported_operation", "empty_query"}
+    ):
+        result["error_class"] = runtime["status"]
+    return result
+
+
 def _payload(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
@@ -138,7 +274,8 @@ def _package_release_payload(registry: str, query: str) -> dict[str, Any]:
     if not package:
         return {
             "status": "error",
-            "error_class": "invalid_package_identifier",
+            "error_class": "object_type_mismatch",
+            "identity_error_class": "invalid_package_identifier",
             "query": query,
             "results": [],
             "provider_errors": [
@@ -242,7 +379,13 @@ def _package_release_payload(registry: str, query: str) -> dict[str, Any]:
     retrieval_role="discovery",
     model_visible=True,
     category="connector",
-    description="Structured lookup with one unambiguous operation for weather, GitHub, package-registry, or scholarly records; product status pages and ordinary websites belong to web_search.",
+    description=(
+        "Structured lookup for current weather/alerts, GitHub repositories/code/releases, "
+        "one exact crates.io/PyPI/npm package, or scholarly records. It does not read product "
+        "status pages, ordinary websites, game/service documentation, forums, or arbitrary URLs; "
+        "those object types are supported by web_search."
+    ),
+    accepted_object_types=_ACCEPTED_OBJECT_TYPES,
     argument_schema={
         "type": "object",
         "properties": {
@@ -271,7 +414,9 @@ def _package_release_payload(registry: str, query: str) -> dict[str, Any]:
 - Function: use one curated structured connector rather than general web search.
 - Parameters: operation (weather_current|weather_alerts|github_repository|github_code|github_release|paper|paper_series|crates_release|pypi_release|npm_release), query, max_results (optional).
 - The result is structured evidence with provider/source metadata; it is not a final answer.
-- Use weather for current conditions, github for repositories/files/releases, package operations for one exact registry package identifier, and paper for scholarly records.""",
+- Positive boundary: weather operations accept locations; github_release accepts one explicit owner/repository; package release operations accept one exact registry package identifier; paper operations accept scholarly identities or searches.
+- Negative boundary: this connector does not accept product status pages, ordinary sites, game/service documentation, forums, or arbitrary non-GitHub URLs. Those remain available through web_search.
+- A capability or runtime error reports the mismatch/unavailability to RWKV and never chooses a fallback tool or query.""",
 )
 def connector_lookup(
     operation: str,
@@ -301,24 +446,40 @@ def connector_lookup(
         "论文": "paper",
     }
     selected_operation = aliases.get(selected_operation, selected_operation)
-    operation_contract = {
-        "weather_current": ("weather", "current"),
-        "weather_alerts": ("weather_alerts", "alerts"),
-        "github_repository": ("github", "repository"),
-        "github_code": ("github", "code"),
-        "github_release": ("github", "release"),
-        "paper": ("paper", "paper"),
-        "paper_series": ("paper", "series"),
-        "crates_release": ("crates", "release"),
-        "pypi_release": ("pypi", "release"),
-        "npm_release": ("npm", "release"),
-    }
-    name, scope = operation_contract.get(selected_operation, ("", ""))
+    name, scope = _OPERATION_CONTRACT.get(selected_operation, ("", ""))
     text = " ".join(str(query or "").split()).strip()
     if not name:
-        return json.dumps({"status": "error", "tool": "connector_lookup", "error_class": "unsupported_operation", "operation": selected_operation, "results": []}, ensure_ascii=False)
+        return json.dumps(
+            _finalize_connector_payload(
+                {
+                    "status": "error",
+                    "error_class": "unsupported_operation",
+                    "message": "operation is not supported by connector_lookup",
+                    "supported_operations": list(_OPERATION_CONTRACT),
+                    "results": [],
+                },
+                connector="",
+                operation=selected_operation,
+                real_network=False,
+            ),
+            ensure_ascii=False,
+        )
     if not text:
-        return json.dumps({"status": "error", "tool": "connector_lookup", "error_class": "empty_query", "connector": name, "results": []}, ensure_ascii=False)
+        return json.dumps(
+            _finalize_connector_payload(
+                {
+                    "status": "error",
+                    "error_class": "object_type_mismatch",
+                    "identity_error_class": "empty_query",
+                    "message": "query must identify one accepted object type",
+                    "results": [],
+                },
+                connector=name,
+                operation=selected_operation,
+                real_network=False,
+            ),
+            ensure_ascii=False,
+        )
 
     context = {
         "task_id": str(kwargs.get("task_id") or ""),
@@ -368,40 +529,35 @@ def connector_lookup(
             explicit_repository = github_repository_target(text)
             direct_repository = bool(explicit_repository)
             if release_scope:
-                if direct_repository:
-                    candidate = explicit_repository
-                else:
-                    discovered = _payload(
-                        search_github_rest(
-                            text,
-                            scope="repositories",
-                            max_results=max_results,
-                            **context,
-                        )
-                    )
-                    first = next(
-                        (
-                            item
-                            for item in discovered.get("results") or []
-                            if isinstance(item, dict)
-                            and (item.get("full_name") or item.get("url"))
+                # A latest-release API path is valid only for an explicit
+                # owner/repository identity.  Silently taking the first fuzzy
+                # repository-search hit changes the model-selected object
+                # (for example package ``typescript`` -> an unrelated repo).
+                # Return a typed tool error and let RWKV choose a new route.
+                candidate = explicit_repository
+                if not direct_repository:
+                    payload = {
+                        "status": "error",
+                        "provider": "connector.github",
+                        "query": text,
+                        "results": [],
+                        "error_class": "object_type_mismatch",
+                        "identity_error_class": "invalid_repository_identifier",
+                        "message": (
+                            "github_release requires an explicit owner/repository "
+                            "identifier or GitHub repository URL"
                         ),
-                        None,
+                    }
+                else:
+                    if candidate and not candidate.startswith(("http://", "https://")):
+                        candidate = f"https://github.com/{candidate.strip('/')}"
+                    owner_repo = github_repository_target(candidate)
+                    release_url = f"https://api.github.com/repos/{owner_repo}/releases/latest" if "/" in owner_repo else ""
+                    payload = (
+                        _payload(fetch_github_rest(release_url, max_chars=20000, **context))
+                        if release_url
+                        else {"status": "no_results", "results": []}
                     )
-                    candidate = str(
-                        (first or {}).get("full_name")
-                        or (first or {}).get("url")
-                        or ""
-                    )
-                if candidate and not candidate.startswith(("http://", "https://")):
-                    candidate = f"https://github.com/{candidate.strip('/')}"
-                owner_repo = github_repository_target(candidate)
-                release_url = f"https://api.github.com/repos/{owner_repo}/releases/latest" if "/" in owner_repo else ""
-                payload = (
-                    _payload(fetch_github_rest(release_url, max_chars=20000, **context))
-                    if release_url
-                    else {"status": "no_results", "results": []}
-                )
             elif direct_repository:
                 payload = _payload(
                     fetch_github_rest(
@@ -427,7 +583,14 @@ def connector_lookup(
             payload = _payload(search_papers(text, scope=paper_scope, max_results=max_results, **context))
             payload = _structured_rows(payload, name)
     except Exception as exc:
-        payload = {"status": "error", "provider": f"connector.{name}", "query": text, "results": [], "provider_errors": [f"{type(exc).__name__}: {exc}"], "error_class": "connector_execution"}
+        payload = {
+            "status": "error",
+            "provider": f"connector.{name}",
+            "query": text,
+            "results": [],
+            "provider_errors": [f"{type(exc).__name__}: {exc}"],
+            "error_class": "connector_execution",
+        }
 
     policy = build_freshness_policy(kwargs.get("original_goal") or text, context["task_plan"])
     payload = annotate_result_freshness(payload, policy)
@@ -440,7 +603,12 @@ def connector_lookup(
         for row in payload.get("results") or []
         if isinstance(row, dict)
     ]
-    payload.update({"tool": "connector_lookup", "connector": name, "operation": selected_operation, "real_network": True})
+    payload = _finalize_connector_payload(
+        payload,
+        connector=name,
+        operation=selected_operation,
+        real_network=True,
+    )
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 

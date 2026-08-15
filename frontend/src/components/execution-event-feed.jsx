@@ -51,7 +51,7 @@ const EVENT_DEFS = {
   synthesis: { label: "RWKV 总结输出", group: "总结", icon: Bot, tone: "model" },
   completion_judgement: { label: "完成性判断", group: "判断", icon: CheckCircle2, tone: "judge" },
   completion_pending: { label: "证据仍不完整", group: "判断", icon: CircleDot, tone: "warning" },
-  cross_validation: { label: "RWKV 交叉验证", group: "判断", icon: ScanSearch, tone: "judge" },
+  evidence_review: { label: "RWKV 证据审查", group: "判断", icon: ScanSearch, tone: "judge" },
   citation_validation: { label: "引用校验", group: "判断", icon: FileSearch, tone: "judge" },
   risk_validation: { label: "风险校验", group: "判断", icon: CheckCircle2, tone: "judge" },
   provider_error: { label: "提供方错误", group: "错误", icon: AlertTriangle, tone: "error" },
@@ -140,21 +140,22 @@ function PlanView({ plan }) {
     <div className="trace-detail-stack">
       <div className="trace-fields">
         <Field label="目标" value={plan.goal} wide />
-        <Field label="完成规则" value={plan.completion_rule} wide />
       </div>
-      {Array.isArray(plan.atomic_points) ? (
+      {Array.isArray(plan.records) ? (
         <div className="trace-points">
-          {plan.atomic_points.map((point, index) => (
-            <div className="trace-point" key={`${point.id || "point"}-${index}`}>
+          {plan.records.map((record, index) => (
+            <div className="trace-point" key={`${record.record_id || "record"}-${index}`}>
               <div className="trace-point-head">
-                <span className="trace-point-id">{point.id || `P${index + 1}`}</span>
-                <StatusPill value={point.status || "pending"} />
+                <span className="trace-point-id">{record.record_id || `P${index + 1}`}</span>
+                <StatusPill value={record.time_scope || "unspecified"} />
               </div>
-              <p>{point.objective || "未提供目标"}</p>
-              {Array.isArray(point.evidence_needed) && point.evidence_needed.length ? (
+              <p>{record.question || "未提供问题"}</p>
+              {Array.isArray(record.fields) && record.fields.length ? (
                 <div className="trace-chip-row">
-                  {point.evidence_needed.map((item, itemIndex) => (
-                    <span className="trace-chip" key={`${item}-${itemIndex}`}>{item}</span>
+                  {record.fields.map((field, fieldIndex) => (
+                    <span className="trace-chip" key={field.field_id || `${field.name}-${fieldIndex}`}>
+                      {field.field_id ? `${field.field_id}: ` : ""}{field.name}
+                    </span>
                   ))}
                 </div>
               ) : null}
@@ -163,58 +164,6 @@ function PlanView({ plan }) {
         </div>
       ) : null}
       {jsonBlock("计划原始 JSON", plan)}
-    </div>
-  );
-}
-
-function TaskPointStatusView({ taskPointStatus }) {
-  if (!taskPointStatus || typeof taskPointStatus !== "object") return null;
-  const entries = Object.entries(taskPointStatus).filter(([, value]) => value && typeof value === "object");
-  if (!entries.length) return null;
-
-  return (
-    <div className="trace-points">
-      {entries.map(([pointId, point]) => {
-        const facts = Array.isArray(point.supported_facts) ? point.supported_facts : [];
-        const evidenceUrls = Array.isArray(point.evidence_urls) ? point.evidence_urls : [];
-        const missingFields = Array.isArray(point.missing_fields) ? point.missing_fields : [];
-        return (
-          <div className="trace-point" key={pointId}>
-            <div className="trace-point-head">
-              <span className="trace-point-id">{pointId}</span>
-              <StatusPill value={point.status || "unknown"} />
-            </div>
-            {facts.length ? (
-              <div className="trace-result-list">
-                {facts.map((fact, index) => (
-                  <div className="trace-result-row" key={`${pointId}-fact-${index}`}>
-                    <span className="trace-result-index">{index + 1}</span>
-                    <div className="min-w-0">
-                      <strong>{fact.field ? `${fact.field}: ` : ""}{fact.value || "已支持"}</strong>
-                      {fact.evidence_url ? (
-                        <a href={fact.evidence_url} target="_blank" rel="noreferrer">{fact.evidence_url}</a>
-                      ) : null}
-                      {fact.quote ? <p>引用：{fact.quote}</p> : null}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            {evidenceUrls.length ? (
-              <div className="trace-chip-row">
-                {evidenceUrls.map((url, index) => (
-                  <a className="trace-chip" href={url} target="_blank" rel="noreferrer" key={`${url}-${index}`}>
-                    证据 {index + 1}
-                  </a>
-                ))}
-              </div>
-            ) : null}
-            {missingFields.length ? (
-              <div className="trace-alert">缺失字段：{missingFields.join("；")}</div>
-            ) : null}
-          </div>
-        );
-      })}
     </div>
   );
 }
@@ -256,24 +205,24 @@ function ModelCallView({ event }) {
   );
 }
 
-function CrossValidationView({ event }) {
+function EvidenceReviewView({ event }) {
+  const gap = event.gap || {};
   return (
     <div className="trace-detail-stack">
       <div className="trace-fields">
         <Field label="Decision" value={<StatusPill value={event.decision} />} />
-        <Field label="Missing points" value={event.missing_points} mono />
-        <Field label="Conflicts" value={event.conflicts} wide />
-        <Field label="下一轮关注" value={event.next_focus} wide />
-        <Field label="判断原因" value={event.reason} wide />
-        <Field label="Cross-validation temperature" value={event.sampling_temperature} mono />
+        <Field label="Gap Task Record" value={gap.task_record_id} mono />
+        <Field label="Gap Type" value={gap.gap_type} mono />
+        <Field label="Gap Fields" value={gap.field_ids} mono />
+        <Field label="Evidence Records" value={gap.evidence_record_ids} mono />
+        <Field label="Evidence Review temperature" value={event.sampling_temperature} mono />
         <Field label="Seed" value={event.sampling_seed ?? "未设置"} mono />
         <Field label="证据版本" value={event.evidence_revision} mono />
       </div>
-      <TaskPointStatusView taskPointStatus={event.task_point_status} />
-      {jsonBlock("交叉验证引用的证据与 Claim Ledger", event.claim_ledger)}
-      {jsonBlock("交叉验证 RWKV 输入", event.prompt, { className: "trace-long-text" })}
-      {jsonBlock("交叉验证上下文", event.context_text, { className: "trace-long-text" })}
-      {jsonBlock("RWKV 交叉验证可见输出", event.raw_model_output, { open: true })}
+      {jsonBlock("证据审查引用的 Evidence Ledger", event.evidence_ledger)}
+      {jsonBlock("Evidence Review RWKV 输入", event.prompt, { className: "trace-long-text" })}
+      {jsonBlock("Evidence Review上下文", event.context_text, { className: "trace-long-text" })}
+      {jsonBlock("RWKV 证据审查可见输出", event.raw_model_output, { open: true })}
       {jsonBlock("上下文统计", event.context_stats)}
     </div>
   );
@@ -281,25 +230,23 @@ function CrossValidationView({ event }) {
 
 function PlannerSessionRebuiltView({ event }) {
   const review = event.review || {};
+  const gap = review.gap || {};
   const replanAction = event.replan_action || {};
-  const missingFields = Object.entries(review.task_point_status || {}).flatMap(([pointId, point]) =>
-    (point?.missing_fields || []).map((field) => `${pointId}: ${field}`),
-  );
   return (
     <div className="trace-detail-stack">
       <div className="trace-fields">
-        <Field label="为什么 Replan" value={event.reason || review.reason || review.next_focus} wide />
-        <Field label="上一轮缺失任务点" value={review.missing_points} mono />
-        <Field label="上一轮缺失内容" value={missingFields} wide />
-        <Field label="上一轮冲突" value={review.conflicts} wide />
+        <Field label="为什么 Replan" value={event.reason || gap.gap_type} wide />
+        <Field label="上一轮任务记录" value={gap.task_record_id} mono />
+        <Field label="上一轮字段" value={gap.field_ids} wide />
+        <Field label="上一轮证据" value={gap.evidence_record_ids} wide />
         <Field label="Replan 次数" value={event.replan_count} mono />
         <Field label="RWKV 新动作" value={replanAction.action} mono />
-        <Field label="新动作任务点" value={replanAction.task_point_id} mono />
+        <Field label="新动作任务记录" value={replanAction.task_record_id} mono />
         <Field label="Replan temperature" value={replanAction.sampling_temperature} mono />
         <Field label="Seed" value={replanAction.sampling_seed ?? "未设置"} mono />
       </div>
       {jsonBlock("RWKV 新动作", replanAction, { open: true })}
-      {jsonBlock("上一轮 Cross-validation", review, { open: true })}
+      {jsonBlock("上一轮 Evidence Review", review, { open: true })}
       {jsonBlock("重建后的共享检索状态", event.shared_state)}
     </div>
   );
@@ -366,7 +313,7 @@ function EventDetail({ event }) {
   const pageData = type === "page_candidate_merge" ? data : null;
 
   if (type === "model_call") return <ModelCallView event={event} />;
-  if (type === "cross_validation") return <CrossValidationView event={event} />;
+  if (type === "evidence_review") return <EvidenceReviewView event={event} />;
   if (type === "planner_session_rebuilt") return <PlannerSessionRebuiltView event={event} />;
   if (isNetworkErrorEvent(event)) return <NetworkErrorView event={event} />;
   if (type === "task_plan" || type === "task_replan") return <PlanView plan={data} />;
@@ -377,7 +324,7 @@ function EventDetail({ event }) {
         <div className="trace-fields">
           <Field label="阶段" value={event.phase} />
           <Field label="动作" value={event.action} mono />
-          <Field label="任务点" value={event.task_point_id || "模型未提供"} mono />
+          <Field label="任务记录" value={event.task_record_id || "模型未提供"} mono />
           <Field label="解析错误" value={event.planner_error} />
         </div>
         {jsonBlock("模型选择的工具参数", event.args, { open: true })}
@@ -540,8 +487,8 @@ function EventDetail({ event }) {
           <Field label="Status" value={<StatusPill value={event.status || verification.status} />} />
           <Field label="Completion ready" value={String(event.completion_ready ?? verification.completion_ready)} mono />
           <Field label="Requires replan" value={String(event.requires_replan ?? verification.requires_replan)} mono />
-          <Field label="Missing points" value={event.missing_point_ids || verification.missing_point_ids} mono />
-          <Field label="Conflict points" value={event.conflict_point_ids || verification.conflict_point_ids} mono />
+          <Field label="Missing points" value={event.missing_task_record_ids || verification.missing_task_record_ids} mono />
+          <Field label="Conflict Task Records" value={event.conflict_task_record_ids || verification.conflict_task_record_ids} mono />
           <Field label="Next queries" value={event.next_queries || verification.next_queries} wide />
         </div>
         {jsonBlock("Verifier prompt", event.prompt)}
@@ -554,25 +501,25 @@ function EventDetail({ event }) {
   if (type === "evidence_validation") {
     const validation = data.validation || {};
     const cross = validation.cross_source || {};
-    const coverage = Array.isArray(validation.subquestion_coverage)
-      ? validation.subquestion_coverage
+    const coverage = Array.isArray(validation.task_record_coverage)
+      ? validation.task_record_coverage
       : [];
     const alignment = data.answer_alignment || {};
     return (
       <div className="trace-detail-stack">
         <div className="trace-fields">
           <Field label="Coverage points" value={coverage.length} mono />
-          <Field label="Multi-source overlap" value={cross.multi_source_points} mono />
-          <Field label="Single-source points" value={cross.single_source_points} mono />
-          <Field label="Missing points" value={cross.missing_points} mono />
+          <Field label="Multi-source Task Records" value={cross.multi_source_task_records} mono />
+          <Field label="Single-source Task Records" value={cross.single_source_task_records} mono />
+          <Field label="Missing Task Records" value={cross.missing_task_records} mono />
           <Field label="Candidate conflicts" value={cross.candidate_conflicts?.length || 0} mono />
           <Field label="Unaligned answer lines" value={alignment.unsupported_line_count} mono />
         </div>
         {coverage.length ? (
           <div className="trace-result-list">
             {coverage.map((row, index) => (
-              <div className="trace-result-row" key={`${row.point_id || "point"}-${index}`}>
-                <span className="trace-result-index">{row.point_id || `P${index + 1}`}</span>
+              <div className="trace-result-row" key={`${row.task_record_id || "point"}-${index}`}>
+                <span className="trace-result-index">{row.task_record_id || `P${index + 1}`}</span>
                 <div className="min-w-0">
                   <strong>{row.status} · {row.agreement}</strong>
                   <p>{(row.sources || []).map((source) => source.ref_id).join(", ") || "no evidence source"}</p>
@@ -635,7 +582,7 @@ function EventDetail({ event }) {
       <div className="trace-detail-stack">
         <div className="trace-fields">
           <Field label="判断状态" value={<StatusPill value={judgement.status} />} />
-          <Field label="缺少任务点" value={judgement.missing_point_ids} mono />
+          <Field label="缺少任务记录" value={judgement.missing_task_record_ids} mono />
           <Field label="下一步关注" value={judgement.next_focus} wide />
           <Field label="判断原因" value={judgement.reason} wide />
         </div>
@@ -689,36 +636,37 @@ function summaryFor(event) {
   if (event.type === "model_call") {
     return `${event.request_stage || event.operation || "模型请求"} · ${event.status || "unknown"} · ${event.prompt_tokens || 0}→${event.completion_tokens || 0} tokens · T=${event.temperature ?? "—"}`;
   }
-  if (event.type === "cross_validation") {
-    return `${event.decision || "unknown"} · missing ${(event.missing_points || []).join(", ") || "none"} · conflicts ${(event.conflicts || []).length || 0} · T=${event.sampling_temperature ?? "—"}`;
+  if (event.type === "evidence_review") {
+    const gap = event.gap || {};
+    return `${event.decision || "unknown"} · ${gap.task_record_id || "no gap"} · ${gap.gap_type || "none"} · T=${event.sampling_temperature ?? "—"}`;
   }
   if (event.type === "planner_session_rebuilt") {
     return `${event.reason || event.review?.reason || "RWKV requested replan"} · ${event.replan_action?.action || "等待新动作"} · T=${event.replan_action?.sampling_temperature ?? "—"}`;
   }
   if (event.type === "evidence_verification") {
-    return `${event.status || "unknown"} · ${event.completion_ready ? "ready" : "incomplete"} · missing ${(event.missing_point_ids || []).join(", ") || "none"} · replans ${event.requires_replan ? "yes" : "no"}`;
+    return `${event.status || "unknown"} · ${event.completion_ready ? "ready" : "incomplete"} · missing ${(event.missing_task_record_ids || []).join(", ") || "none"} · replans ${event.requires_replan ? "yes" : "no"}`;
   }
   if (event.type === "evidence_validation") {
     const cross = event.data?.validation?.cross_source || {};
     const alignment = event.data?.answer_alignment || {};
-    return `${cross.multi_source_points || 0} multi-source · ${cross.missing_points || 0} missing · ${cross.candidate_conflicts?.length || 0} conflicts · ${alignment.unsupported_line_count || 0} unaligned`;
+    return `${cross.multi_source_task_records || 0} multi-source · ${cross.missing_task_records || 0} missing · ${cross.candidate_conflicts?.length || 0} conflicts · ${alignment.unsupported_line_count || 0} unaligned`;
   }
-  if (event.type === "model_tool_decision") return `${event.action || "未选择工具"}${event.task_point_id ? ` · ${event.task_point_id}` : ""}`;
+  if (event.type === "model_tool_decision") return `${event.action || "未选择工具"}${event.task_record_id ? ` · ${event.task_record_id}` : ""}`;
   if (event.type === "tool_call") return `${event.action || "工具"} · ${compact(event.args, 140)}`;
   if (event.type === "tool_result") return `${result?.provider || event.action || "工具"} · ${result?.status || event.execution_status || "返回"} · ${result?.count ?? result?.results?.length ?? 0} 条`;
   if (event.type === "page_chunk") return `${event.chunk_id || "chunk"} · ${event.chunk_tokens || 0} tokens · ${event.chunk_chars || 0} chars`;
   if (event.type === "page_chunk_candidate") return `${event.chunk_id || "chunk"} · supported=${String(event.candidate?.supported)} · ${event.finish_reason || "unknown"}`;
   if (event.type === "page_candidate_merge") return `${event.url || "网页"} · ${event.data?.candidate_count || 0} 个候选 · ${event.data?.chunk_count || 0} chunks`;
   if (event.type === "context_build") return `${event.data?.context_stats?.context_tokens || 0} tokens · ${event.data?.selected_evidence?.length || 0} 个证据`;
-  if (event.type === "completion_judgement") return `${event.data?.status || "unknown"} · 缺少 ${(event.data?.missing_point_ids || []).join("、") || "无"}`;
+  if (event.type === "completion_judgement") return `${event.data?.status || "unknown"} · 缺少 ${(event.data?.missing_task_record_ids || []).join("、") || "无"}`;
   if (event.type === "final") return `${event.status || "结束"} · ${compact(event.content, 180)}`;
   if (event.type === "error" || event.type === "provider_error") return event.error || event.message || event.error_class || "执行错误";
-  if (event.type === "task_plan" || event.type === "task_replan") return `${event.data?.atomic_points?.length || 0} 个原子任务点`;
+  if (event.type === "task_plan" || event.type === "task_replan") return `${event.data?.records?.length || 0} 条事实记录`;
   return compact(event.content || event.message || event.data || event.result || "状态已更新", 180);
 }
 
 function isImportant(event) {
-  return isNetworkErrorEvent(event) || ["task_plan", "task_replan", "model_call", "model_tool_decision", "planner_session_rebuilt", "page_candidate_merge", "context_build", "cross_validation", "evidence_validation", "evidence_verification", "synthesis", "completion_judgement", "final"].includes(event.type);
+  return isNetworkErrorEvent(event) || ["task_plan", "task_replan", "model_call", "model_tool_decision", "planner_session_rebuilt", "page_candidate_merge", "context_build", "evidence_review", "evidence_validation", "evidence_verification", "synthesis", "completion_judgement", "final"].includes(event.type);
 }
 
 function Metric({ label, value, tone = "neutral" }) {

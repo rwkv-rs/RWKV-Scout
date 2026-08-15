@@ -65,7 +65,7 @@ def _event_projection(event: dict[str, Any]) -> dict[str, Any]:
         "status",
         "execution_status",
         "retrieval_role",
-        "task_point_id",
+        "task_record_id",
         "url",
         "query",
         "completion_ready",

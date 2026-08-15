@@ -10,6 +10,7 @@ from utils.rwkv_prompt import (
     consume_final_prefill_boundary,
     tool_call_prefix,
 )
+from utils.rwkv_json_protocol import normalize_json_object_envelope
 
 
 class _PromptFakeLLM:
@@ -32,7 +33,7 @@ class RWKVPromptContractTests(unittest.TestCase):
         self.assertTrue(prompt.endswith("Assistant: <think></think"))
         self.assertTrue(prompt.startswith("User: "))
 
-    def test_json_prefix_matches_rwkv_skills_tool_continuation(self):
+    def test_json_prefix_matches_online_g1i_tool_continuation(self):
         self.assertEqual(
             assistant_json_prefix(enable_think=True, prefill_object=True),
             "Assistant: <think></think\n```json\n{",
@@ -42,6 +43,20 @@ class RWKVPromptContractTests(unittest.TestCase):
             "Assistant: ```json\n{",
         )
         self.assertEqual(tool_call_prefix(), "Assistant: ```json\n")
+
+    def test_stop_suffixes_match_ecra_role_boundaries(self):
+        self.assertEqual(
+            prompt_contract.JSON_CALL_STOP_SUFFIXES,
+            (
+                "\n```",
+                "\nUser:",
+                "\nSystem:",
+                "\nAssistant:",
+            ),
+        )
+        self.assertNotIn("```", prompt_contract.JSON_CALL_STOP_SUFFIXES)
+        self.assertNotIn("User:", prompt_contract.JSON_CALL_STOP_SUFFIXES)
+        self.assertNotIn("System:", prompt_contract.JSON_CALL_STOP_SUFFIXES)
 
     def test_online_g1i_tool_role_blocks_are_exact(self):
         rendered = prompt_contract.render_tool_transcript(
@@ -141,6 +156,33 @@ class RWKVPromptContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _extract_json_object("the model did not return a function call")
 
+    def test_json_envelope_normalizer_accepts_only_lossless_common_formats(self):
+        samples = {
+            '{"name":"read_file","arguments":{}}': "json_object",
+            '"name":"read_file","arguments":{}}': "prefilled_object_tail",
+            '```json\n{"name":"read_file","arguments":{}}\n```': "json_fence",
+            'Assistant: ```json\n{"name":"read_file","arguments":{}}': (
+                "assistant_prefix+json_fence"
+            ),
+        }
+        for raw, expected_format in samples.items():
+            with self.subTest(raw=raw):
+                normalized = normalize_json_object_envelope(raw)
+                self.assertEqual(normalized.payload["name"], "read_file")
+                self.assertEqual(normalized.input_format, expected_format)
+
+    def test_json_envelope_normalizer_rejects_ambiguous_or_repaired_content(self):
+        invalid = (
+            'explanation {"name":"read_file","arguments":{}}',
+            '{"name":"read_file","arguments":{}} {"name":"submit","arguments":{}}',
+            "{'name':'read_file','arguments':{}}",
+            '{"name":"read_file","arguments":{"path":"unterminated}}',
+            '[{"name":"read_file","arguments":{}},{"name":"submit","arguments":{}}]',
+        )
+        for raw in invalid:
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                normalize_json_object_envelope(raw, allow_singleton_array=True)
+
     def test_no_evidence_is_context_for_rwkv_not_a_controller_refusal(self):
         llm = _PromptFakeLLM("  RWKV decides what to say.\n")
         result = synthesize_retrieval_answer(
@@ -149,7 +191,14 @@ class RWKVPromptContractTests(unittest.TestCase):
             llm=llm,
         )
         self.assertIn("No source text was retrieved.", llm.prompt)
-        self.assertIsNone(llm.stop)
+        self.assertEqual(
+            llm.stop,
+            (
+                "\nUser:",
+                "\nSystem:",
+                "\nAssistant:",
+            ),
+        )
         self.assertEqual(result["content"], llm.content)
         self.assertEqual(result["mode"], "rwkv_final")
         self.assertEqual(result["answer_quality"], {})

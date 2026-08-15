@@ -1,6 +1,6 @@
 # RWKV-Scout 架构约定
 
-完整的当前架构、量化问题、目标架构和迁移计划见 [`docs/ARCHITECTURE_HANDOFF.zh-CN.md`](docs/ARCHITECTURE_HANDOFF.zh-CN.md)。
+完整的当前架构见 [`docs/ARCHITECTURE_HANDOFF.zh-CN.md`](docs/ARCHITECTURE_HANDOFF.zh-CN.md)，正式运行态对象见 [`docs/RUNTIME_CONTRACTS.zh-CN.md`](docs/RUNTIME_CONTRACTS.zh-CN.md)。
 
 ## 目录职责
 
@@ -17,6 +17,11 @@ agent/
 ├── state.py                  # 单任务状态与上下文投影
 ├── slm_scheduler.py          # 可选的本地 SLM 调度
 ├── planner.py                # 任务计划和下一步动作路由
+├── runtime_contracts.py      # 唯一正式运行态合约目录
+├── retrieval_query_plan.py   # 可选的有界互补查询计划（默认关闭）
+├── evidence_ledger.py        # 按 Task Record 保存落地证据
+├── evidence_records.py       # 组装原子 Evidence Record
+├── evidence_resolution.py    # 全局证据字段闭包
 ├── retrieval_loop.py         # 检索结果合并与去重
 ├── page_evidence.py          # 单页正文取证
 └── retrieval_synthesis.py    # 证据上下文和最终回答合成
@@ -65,21 +70,26 @@ runtime.ModelBackend
 
 ## 当前检索执行链
 
-生产请求使用一个共享状态的有界循环。任务计划只定义用户要回答的原子点；
-RWKV 决定是否继续检索以及下一次搜索方向，代码负责工具边界、来源策略、
-证据去重、循环上限和最终回答协议。
+生产请求使用一个共享状态的有界循环。Task Plan 只定义用户要回答的事实记录；
+RWKV 决定是否继续检索以及下一次搜索方向，代码负责协议验证、原文落地、
+状态投影、循环上限和最终回答协议。
 
 ```text
-task_plan.v1
+Task Plan (controller-owned record_id/field_id)
     ↓
-Orchestrator global loop
-    ├── Planner：选择 web_search 或 finish_task
-    ├── web_search：发现候选、抓取正文、逐页取证
-    ├── RetrievalLedger + evidence_review：记录进度和来源约束
-    └── retrieval_synthesis：只用保留下来的正文生成回答
+Planner → [optional Retrieval Query Plan] → Web Retrieval → Page Evidence
+    ↓                                      ↓
+Retrieval Routing State              Evidence Ledger
+    └──────────────→ Evidence Record Set ←──────────────┘
+                           ↓
+                  Evidence Resolution
+                           ↓
+                    Evidence Review
+                    ├── gap → Plan Revision
+                    └── finish → Answer Writer
 ```
 
-`task_plan`、`RetrievalLedger`、网页正文证据和最终合成属于同一条链路；
+Task Plan、Retrieval Event Ledger、网页正文证据和最终合成属于同一条链路；
 不再维护并行的 Fork/Runner 默认架构。实验脚本可以覆盖搜索预算，不能改变
 生产链路的证据边界。
 ## Unified research runtime

@@ -32,37 +32,10 @@ def test_github_release_record_is_rendered_as_structured_evidence():
 
 @patch("tools.connectors.fetch_github_rest")
 @patch("tools.connectors.search_github_rest")
-def test_github_latest_release_scope_discovers_repo_then_fetches_release(
+def test_github_latest_release_scope_rejects_ambiguous_repository_text(
     search_github_rest,
     fetch_github_rest,
 ):
-    search_github_rest.return_value = json.dumps(
-        {
-            "status": "ok",
-            "results": [
-                {
-                    "full_name": "example/project",
-                    "url": "https://github.com/example/project",
-                }
-            ],
-        }
-    )
-    fetch_github_rest.return_value = json.dumps(
-        {
-            "status": "ok",
-            "results": [
-                {
-                    "title": "example/project — v2.4.1",
-                    "url": "https://github.com/example/project/releases/tag/v2.4.1",
-                    "content": "Release: v2.4.1\nPublished: 2026-08-10",
-                    "content_type": "release",
-                    "published": "2026-08-10",
-                    "evidence_origin": "structured_api_record",
-                }
-            ],
-        }
-    )
-
     result = json.loads(
         connector_lookup(
             "github",
@@ -72,14 +45,54 @@ def test_github_latest_release_scope_discovers_repo_then_fetches_release(
         )
     )
 
-    search_github_rest.assert_called_once()
-    assert search_github_rest.call_args.kwargs["scope"] == "repositories"
-    assert fetch_github_rest.call_args.args[0] == (
-        "https://api.github.com/repos/example/project/releases/latest"
+    search_github_rest.assert_not_called()
+    fetch_github_rest.assert_not_called()
+    assert result["status"] == "error"
+    assert result["error_class"] == "object_type_mismatch"
+    assert result["identity_error_class"] == "invalid_repository_identifier"
+    assert result["accepted_object_types"] == ["github_repository"]
+    assert result["connector_runtime"]["status"] == "available"
+    assert result["real_network"] is False
+    assert result["results"] == []
+
+
+@patch("tools.connectors.fetch_github_rest")
+def test_github_403_reports_current_run_rate_limit_without_selecting_fallback(
+    fetch_github_rest,
+):
+    fetch_github_rest.return_value = json.dumps(
+        {
+            "status": "error",
+            "provider": "github.rest",
+            "error_class": "provider_error",
+            "provider_errors": [
+                "NetworkFetchError: HTTP request failed: 403 rate limit exceeded"
+            ],
+            "results": [],
+        }
     )
-    assert result["status"] == "ok"
-    assert result["results"][0]["content_type"] == "release"
-    assert result["results"][0]["structured_evidence_text"].startswith("Release:")
+
+    result = json.loads(
+        connector_lookup(
+            "github_release",
+            "owner/repository",
+            original_goal="What is the latest release?",
+        )
+    )
+
+    fetch_github_rest.assert_called_once()
+    assert result["status"] == "error"
+    assert result["error_class"] == "rate_limited"
+    assert result["connector_runtime"] == {
+        "provider": "connector.github",
+        "operation": "github_release",
+        "status": "rate_limited",
+        "available": False,
+        "cooldown_seconds": 300,
+        "error_class": "provider_error",
+        "message": "NetworkFetchError: HTTP request failed: 403 rate limit exceeded",
+    }
+    assert "web_search" not in result
 
 
 @patch("tools.connectors.fetch_github_rest")

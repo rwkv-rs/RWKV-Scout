@@ -9,12 +9,25 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
+from agent.evidence_resolution import (
+    EVIDENCE_RESOLUTION_CONTRACT,
+    attach_evidence_resolution_to_context,
+    build_evidence_record_set,
+    evidence_resolution_signature,
+    resolve_evidence,
+)
+from agent.runtime_contracts import EVIDENCE_REVIEW_CONTRACT
 from agent.planner import Planner
+from agent.task_plan_contract import task_records
 from agent.retrieval_loop import merge_retrieval_results
-from agent.retrieval_synthesis import build_evidence_context, synthesize_retrieval_answer
+from agent.retrieval_synthesis import (
+    build_evidence_context,
+    synthesize_retrieval_answer,
+)
 from agent.slm_scheduler import GLOBAL_SLM_INPUT_SCHEDULER
 from agent.state import AgentState
 from agent.unified_research import run_unified_research_loop
@@ -106,9 +119,18 @@ class Orchestrator:
         self._arithmetic_results: list[dict[str, Any]] = []
         self._time_results: list[dict[str, Any]] = []
         self._model_protocol_failure = False
+        self._writer_context_cache_signature = ""
+        self._writer_context_cache: dict[str, Any] | None = None
+        self._evidence_resolution_cache_signature = ""
+        self._evidence_resolution_cache: dict[str, Any] | None = None
 
     def _deterministic_results(self) -> list[dict[str, Any]]:
         return [*self._calculation_results, *self._time_results, *self._arithmetic_results]
+
+    def _evidence_review_state_signature(self) -> str:
+        """Review identity is the immutable evidence revision, never route churn."""
+
+        return f"evidence:{int(self.state.retrieval.evidence_revision or 0)}"
 
     def _current_retrieval_data(
         self,
@@ -116,9 +138,9 @@ class Orchestrator:
         action: str,
         rounds: list[tuple[str, dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
-        """Build the one evidence record consumed by CV and the Writer.
+        """Build the one evidence record consumed by Evidence Review and the Writer.
 
-        Round 19 let cross-validation inspect a smaller, differently ordered
+        Round 19 let evidence-review inspect a smaller, differently ordered
         projection than final synthesis.  A binary review cannot be meaningful
         when the two RWKV calls see different source records.  This helper is
         intentionally mechanical: it merges retrieval rounds and attaches
@@ -148,10 +170,10 @@ class Orchestrator:
                 "real_network": True,
             }
         data["calculation_results"] = self._deterministic_results()
-        data["claim_ledger"] = self.state.retrieval.claims.snapshot()
+        data["evidence_ledger"] = self.state.retrieval.evidence_ledger.snapshot()
         return data
 
-    def _cross_validate_research(
+    def _review_evidence(
         self,
         user_query: str,
         task_plan: dict[str, Any],
@@ -159,55 +181,66 @@ class Orchestrator:
         step: int,
         trigger: str = "planner_finish",
     ) -> dict[str, Any]:
-        """Let RWKV make one binary finish-or-replan decision."""
+        """Let RWKV make the binary continue-or-write Evidence Review decision."""
 
-        claim_snapshot = self.state.retrieval.claims.snapshot()
+        evidence_ledger_snapshot = self.state.retrieval.evidence_ledger.snapshot()
         freshness_policy = self.state.run_metadata.get("freshness_policy")
         if not isinstance(freshness_policy, dict) or not freshness_policy:
             freshness_policy = build_freshness_policy(user_query, task_plan)
-        context = build_evidence_context(
-            self._current_retrieval_data(
-                user_query,
-                "cross_validation",
-            ),
-            constraints={
-                "freshness_policy": freshness_policy,
-                "task_plan": task_plan,
-            },
-            query=user_query,
-            # Cross-validation and the final Writer must inspect the same
-            # evidence projection.  Round 19 used a separate 4-source,
-            # 1-chunk view that hid decisive spans and let CV terminate a
-            # task before the evidence later shown to Writer was reviewed.
+        context = self._resolved_writer_context(
+            user_query,
+            task_plan,
+            step=step,
+            trigger=trigger,
         )
-        review_context = str(context["text"])
-        routing_context = ""
-        if "resource_boundary" in str(trigger or "") or self.state.retrieval.frozen_paths:
-            routing_context = json.dumps(
-                self.state.retrieval.planner_routing_snapshot(
-                    max_sources=4,
-                    max_queries=6,
-                    max_frozen_paths=6,
-                ),
-                ensure_ascii=False,
-                separators=(",", ":"),
+        evidence_resolution_view = str(context.get("evidence_resolution_view") or "").strip()
+        review_context = (
+            (f"EVIDENCE RESOLUTION CONTROL LANE:\n{evidence_resolution_view}\n\n" if evidence_resolution_view else "")
+            + "EXACT EVIDENCE LANE:\n"
+            + str(context.get("evidence_text") or context.get("text") or "")
+        )
+        routing_snapshot = self.state.retrieval.planner_routing_snapshot(
+            max_sources=0,
+            max_queries=12,
+            max_frozen_paths=12,
+        )
+        routing_context = json.dumps(
+            routing_snapshot,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        allowed_evidence_record_ids = list(
+            dict.fromkeys(
+                str(item.get("evidence_record_id") or "").strip()
+                for item in context.get("selected_evidence") or []
+                if isinstance(item, dict)
+                and str(item.get("evidence_record_id") or "").strip()
             )
+        )
+        allowed_route_ids = list(
+            dict.fromkeys(
+                str(row.get("route_id") or row.get("request_key") or "").strip()
+                for key in ("queries", "frozen_paths")
+                for row in routing_snapshot.get(key) or []
+                if isinstance(row, dict)
+                and str(row.get("route_id") or row.get("request_key") or "").strip()
+            )
+        )
         validation_context_stats = {
             **context["context_stats"],
             "review_context_tokens": get_token_count(review_context),
             "routing_context_tokens": get_token_count(routing_context),
         }
-        review = self.planner.cross_validate_research(
+        review = self.planner.review_evidence(
             user_query,
             task_plan,
             review_context,
             routing_context,
+            allowed_evidence_record_ids=allowed_evidence_record_ids,
+            allowed_route_ids=allowed_route_ids,
         )
         evidence_revision = int(self.state.retrieval.evidence_revision or 0)
-        validation_state_signature = (
-            f"evidence:{evidence_revision}:"
-            f"frozen-routes:{len(self.state.retrieval.frozen_paths)}"
-        )
+        validation_state_signature = self._evidence_review_state_signature()
         review["evidence_revision"] = evidence_revision
         review["validation_state_signature"] = validation_state_signature
         review["trigger"] = str(trigger or "planner_finish")[:120]
@@ -216,24 +249,17 @@ class Orchestrator:
         # validates sources, reorders evidence, or enters the final Writer
         # context.
         self.state.run_metadata.pop("validated_source_urls", None)
-        self.state.run_metadata["last_cross_validation"] = {
-            "schema_version": str(
-                review.get("schema_version") or "rwkv-cross-validation.v3"
+        self.state.run_metadata["last_evidence_review"] = {
+            "contract": str(
+                review.get("contract") or EVIDENCE_REVIEW_CONTRACT
             ),
             "decision": str(review.get("decision") or "")[:120],
             "trigger": str(trigger or "planner_finish")[:120],
             "evidence_revision": evidence_revision,
         }
-        if str(review.get("decision") or "").casefold() in {"finish", "replan"}:
-            self.state.run_metadata["last_cross_validation_evidence_revision"] = (
-                evidence_revision
-            )
-            self.state.run_metadata["last_cross_validation_state_signature"] = (
-                validation_state_signature
-            )
         append_task_event(
             self.state.task_id,
-            "cross_validation",
+            "evidence_review",
             step=step,
             phase="VALIDATION",
             trigger=str(trigger or "planner_finish"),
@@ -250,51 +276,139 @@ class Orchestrator:
             context_stats=validation_context_stats,
             evidence_revision=evidence_revision,
             validation_state_signature=validation_state_signature,
-            claim_ledger=claim_snapshot,
+            allowed_evidence_record_ids=allowed_evidence_record_ids,
+            allowed_route_ids=allowed_route_ids,
+            evidence_ledger=evidence_ledger_snapshot,
             decision_owner="rwkv",
         )
-        if str(review.get("decision") or "").casefold() == "replan":
-            focus = self.planner.select_replan_focus(
-                user_query,
-                task_plan,
-                review_context,
-            )
-            review["replan_focus"] = {
-                key: focus.get(key)
-                for key in (
-                    "schema_version",
-                    "status",
-                    "error_class",
-                    "message",
-                    "task_point_id",
-                    "missing_field",
-                    "focus_owner",
-                    "sampling_temperature",
-                    "sampling_seed",
-                    "focus_attempts",
-                )
-                if focus.get(key) not in (None, "")
-            }
-            append_task_event(
-                self.state.task_id,
-                "replan_focus",
-                step=step,
-                phase="REPLAN",
-                task_point_id=focus.get("task_point_id", ""),
-                missing_field=focus.get("missing_field", ""),
-                error_class=focus.get("error_class", ""),
-                message=focus.get("message", ""),
-                sampling_temperature=focus.get("sampling_temperature"),
-                sampling_seed=focus.get("sampling_seed"),
-                focus_attempts=focus.get("focus_attempts"),
-                raw_model_output=focus.get("raw_model_output", ""),
-                prompt=focus.get("prompt", ""),
-                evidence_revision=evidence_revision,
-                decision_owner="rwkv",
-            )
         return review
 
-    def _cross_validate_if_evidence_changed(
+    def _resolved_writer_context(
+        self,
+        user_query: str,
+        task_plan: dict[str, Any],
+        *,
+        step: int,
+        trigger: str,
+    ) -> dict[str, Any]:
+        """Build one immutable evidence packet shared by Evidence Review and Writer."""
+
+        freshness_policy = self.state.run_metadata.get("freshness_policy")
+        if not isinstance(freshness_policy, dict) or not freshness_policy:
+            freshness_policy = build_freshness_policy(user_query, task_plan)
+        writer_constraints = {
+            **runtime_metadata_only(self.state.run_metadata),
+            "freshness_policy": freshness_policy,
+            "task_plan": task_plan,
+        }
+        constraint_digest = hashlib.sha256(
+            json.dumps(
+                writer_constraints,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        signature = (
+            f"{self._evidence_review_state_signature()}:"
+            f"writer_constraints:{constraint_digest}"
+        )
+        if (
+            signature == self._writer_context_cache_signature
+            and isinstance(self._writer_context_cache, dict)
+        ):
+            return self._writer_context_cache
+
+        base_context = build_evidence_context(
+            self._current_retrieval_data(user_query, "writer_context"),
+            constraints=writer_constraints,
+            query=user_query,
+        )
+        resolution: dict[str, Any]
+        if bool(DATA_PIPELINE.get("evidence_resolution_enabled", True)):
+            evidence_records = build_evidence_record_set(
+                base_context.get("selected_evidence") or [],
+                max_records=int(
+                    DATA_PIPELINE.get("evidence_resolution_max_records", 24)
+                    or 24
+                ),
+                max_chars_per_record=int(
+                    DATA_PIPELINE.get(
+                        "evidence_resolution_max_chars_per_record", 12000
+                    )
+                    or 12000
+                ),
+            )
+            resolution_cache_signature = evidence_resolution_signature(
+                user_query,
+                task_plan,
+                evidence_records,
+            )
+            if (
+                resolution_cache_signature
+                == self._evidence_resolution_cache_signature
+                and isinstance(self._evidence_resolution_cache, dict)
+            ):
+                resolution = self._evidence_resolution_cache
+            else:
+                resolution = resolve_evidence(
+                    user_query,
+                    task_plan,
+                    evidence_records,
+                    self.llm,
+                )
+                self._evidence_resolution_cache_signature = resolution_cache_signature
+                self._evidence_resolution_cache = resolution
+                append_task_event(
+                    self.state.task_id,
+                    "evidence_resolution",
+                    step=step,
+                    phase="VALIDATION",
+                    trigger=str(trigger or "finalize")[:120],
+                    status=resolution.get("status", ""),
+                    evidence_record_count=resolution.get("evidence_record_count", 0),
+                    decisions=resolution.get("decisions") or [],
+                    input_digest=resolution.get("input_digest", ""),
+                    attempts=resolution.get("attempts", 0),
+                    error=resolution.get("error", ""),
+                    prompt=resolution.get("prompt", ""),
+                    raw_model_output=resolution.get("raw_model_output", ""),
+                    stage_calls=resolution.get("stage_calls") or [],
+                    sampling_temperature=resolution.get("sampling_temperature"),
+                    sampling_parameters=resolution.get("sampling_parameters") or {},
+                    decision_owner="rwkv_evidence_resolution",
+                )
+        else:
+            resolution = {
+                "contract": EVIDENCE_RESOLUTION_CONTRACT,
+                "status": "disabled",
+                "evidence_record_count": len(base_context.get("selected_evidence") or []),
+                "decisions": [],
+                "attempts": 0,
+            }
+        resolved_context = attach_evidence_resolution_to_context(
+            base_context,
+            resolution,
+            task_plan,
+        )
+        self._writer_context_cache_signature = signature
+        self._writer_context_cache = resolved_context
+        append_task_event(
+            self.state.task_id,
+            "writer_context",
+            step=step,
+            phase="VALIDATION",
+            trigger=str(trigger or "finalize")[:120],
+            context_text=resolved_context.get("text", ""),
+            selected_evidence=resolved_context.get("selected_evidence") or [],
+            context_stats=resolved_context.get("context_stats") or {},
+            evidence_resolution=resolution,
+            decision_owner="rwkv_evidence_review_and_writer",
+        )
+        return resolved_context
+
+    def _review_evidence_if_changed(
         self,
         user_query: str,
         task_plan: dict[str, Any],
@@ -302,37 +416,39 @@ class Orchestrator:
         step: int,
         trigger: str = "planner_finish",
     ) -> dict[str, Any] | None:
-        """Review one materially distinct evidence/routing state at most once."""
+        """Review one immutable evidence revision at most once."""
 
         current_revision = int(self.state.retrieval.evidence_revision or 0)
-        current_signature = (
-            f"evidence:{current_revision}:"
-            f"frozen-routes:{len(self.state.retrieval.frozen_paths)}"
-        )
+        current_signature = self._evidence_review_state_signature()
         reviewed_signature = str(
-            self.state.run_metadata.get("last_cross_validation_state_signature")
+            self.state.run_metadata.get("last_evidence_review_state_signature")
             or ""
         )
         if current_signature == reviewed_signature:
             return None
-        # Compatibility with resumed traces produced before the routing-state
-        # signature existed. An unchanged evidence revision with no frozen
-        # route was already reviewed under the historical revision key.
-        if not reviewed_signature and not self.state.retrieval.frozen_paths:
-            reviewed_revision_value = self.state.run_metadata.get(
-                "last_cross_validation_evidence_revision"
-            )
-            if (
-                reviewed_revision_value is not None
-                and current_revision <= int(reviewed_revision_value)
-            ):
-                return None
-        return self._cross_validate_research(
+        reviewed_revision_value = self.state.run_metadata.get(
+            "last_evidence_review_revision"
+        )
+        if reviewed_revision_value is not None and current_revision <= int(
+            reviewed_revision_value
+        ):
+            return None
+        review = self._review_evidence(
             user_query,
             task_plan,
             step=step,
             trigger=trigger,
         )
+        # Only a valid RWKV decision closes this immutable evidence revision.
+        # A protocol error remains fully auditable in ``last_evidence_review``
+        # but must not suppress the next terminal review attempt for the same
+        # evidence.  Otherwise one malformed continuation bypasses the only
+        # model-owned finish/replan gate and the Writer runs without a
+        # successful review.
+        if str(review.get("decision") or "").casefold() in {"finish", "replan"}:
+            self.state.run_metadata["last_evidence_review_revision"] = current_revision
+            self.state.run_metadata["last_evidence_review_state_signature"] = current_signature
+        return review
 
     def _retrieval_context(self) -> dict[str, Any]:
         return {
@@ -371,9 +487,10 @@ class Orchestrator:
         query: str,
         step: int,
         action: str,
+        arguments: dict[str, Any] | None = None,
         phase: str,
         branch_id: str = "",
-        task_point_id: str = "",
+        task_record_id: str = "",
     ) -> dict[str, Any]:
         """Record retrieval state without changing the model-selected route."""
 
@@ -382,13 +499,14 @@ class Orchestrator:
             result,
             step=step,
             branch_id=branch_id,
-            task_point_id=task_point_id,
+            task_record_id=task_record_id,
             action=action,
+            arguments=arguments,
             phase=phase,
         )
         observation = self._retrieval_ledger.observation(
             branch_id=branch_id,
-            task_point_id=task_point_id,
+            task_record_id=task_record_id,
         )
         enriched = {**result, "retrieval_delta": delta, "retrieval_ledger": observation}
         append_task_event(
@@ -397,7 +515,7 @@ class Orchestrator:
             step=step,
             phase=phase,
             branch_id=branch_id,
-            task_point_id=task_point_id,
+            task_record_id=task_record_id,
             action=action,
             query=query,
             data=delta,
@@ -477,8 +595,8 @@ class Orchestrator:
             )
 
         merged = self._current_retrieval_data(user_query, action, rounds)
-        claim_snapshot = self.state.retrieval.claims.snapshot()
-        self.state.run_metadata["claim_ledger"] = claim_snapshot
+        evidence_ledger_snapshot = self.state.retrieval.evidence_ledger.snapshot()
+        self.state.run_metadata["evidence_ledger"] = evidence_ledger_snapshot
         self._record_final_ranking(action, merged, step)
 
         synthesis = synthesize_retrieval_answer(
@@ -487,6 +605,12 @@ class Orchestrator:
             llm=self.llm,
             constraints=self.state.run_metadata,
             termination_reason=termination_reason,
+            prebuilt_context=self._resolved_writer_context(
+                user_query,
+                self._task_plan,
+                step=step,
+                trigger="final_writer",
+            ),
         )
         answer = str(synthesis.get("content") or "")
 
@@ -499,7 +623,11 @@ class Orchestrator:
                 "context_text": synthesis.get("context_text", ""),
                 "selected_evidence": synthesis.get("selected_evidence") or [],
                 "context_stats": synthesis.get("context_stats") or {},
-                "claim_ledger": claim_snapshot,
+                "evidence_resolution": synthesis.get(
+                    "evidence_resolution"
+                )
+                or {},
+                "evidence_ledger": evidence_ledger_snapshot,
             },
         )
         append_task_event(
@@ -518,7 +646,11 @@ class Orchestrator:
             context_text=synthesis.get("context_text", ""),
             selected_evidence=synthesis.get("selected_evidence") or [],
             context_stats=synthesis.get("context_stats") or {},
-            claim_ledger=claim_snapshot,
+            evidence_resolution=synthesis.get(
+                "evidence_resolution"
+            )
+            or {},
+            evidence_ledger=evidence_ledger_snapshot,
             termination_reason=termination_reason,
         )
 
@@ -534,7 +666,7 @@ class Orchestrator:
             citation_refs=synthesis.get("citation_refs") or [],
             termination_reason=termination_reason,
             model_output_available=True,
-            claim_ledger=claim_snapshot,
+            evidence_ledger=evidence_ledger_snapshot,
         )
         report_data = {
             **merged,
@@ -542,6 +674,10 @@ class Orchestrator:
             "selected_evidence": synthesis.get("selected_evidence") or [],
             "context_stats": synthesis.get("context_stats") or {},
             "context_text": synthesis.get("context_text", ""),
+            "evidence_resolution": synthesis.get(
+                "evidence_resolution"
+            )
+            or {},
         }
         self._write_agentic_report(
             user_query,
@@ -575,8 +711,8 @@ class Orchestrator:
 
         freshness_policy = build_freshness_policy(user_query, task_plan)
         self.state.run_metadata["freshness_policy"] = freshness_policy
-        self.state.retrieval.claims.initialize(task_plan, user_query)
-        self.state.run_metadata["claim_ledger"] = self.state.retrieval.claims.snapshot()
+        self.state.retrieval.evidence_ledger.initialize(task_plan, user_query)
+        self.state.run_metadata["evidence_ledger"] = self.state.retrieval.evidence_ledger.snapshot()
         self.planner.begin_task(user_query, environment_context, task_plan, phase)
         return task_plan
 
@@ -616,7 +752,7 @@ class Orchestrator:
         self.state.run_metadata["retrieval_strategy"] = "single_rwkv_loop"
         self.state.run_metadata["retrieval_strategy_decision"] = {
             "owner": "rwkv",
-            "point_count": len(task_plan.get("atomic_points") or []),
+            "record_count": len(task_records(task_plan)),
             "controller_override": False,
         }
         return self._run_single_loop(user_query, model_profile, task_plan, max_steps)
@@ -639,6 +775,10 @@ class Orchestrator:
         self._time_results = []
         self._arithmetic_results = []
         self._model_protocol_failure = False
+        self._writer_context_cache_signature = ""
+        self._writer_context_cache = None
+        self._evidence_resolution_cache_signature = ""
+        self._evidence_resolution_cache = None
         self.state.task_output_dir = os.path.join(
             DATA_PIPELINE.get("output_directory", "./data/output"),
             self.state.task_id,

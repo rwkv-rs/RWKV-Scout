@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.planner import Planner
+from agent.task_plan_contract import normalize_task_plan
 from agent.retrieval_synthesis import (
     _clean_answer,
     build_evidence_context,
@@ -19,6 +20,36 @@ from utils.source_authority import (
     resolve_source_policy,
 )
 from utils.web_retrieval import retrieval_url_identity
+
+
+def _grounded_results(query, results, *, task_record_id="P1"):
+    records = [
+        {
+            "evidence_record_id": f"E-{index}",
+            "task_record_id": task_record_id,
+            "title": item.get("title"),
+            "url": item.get("url"),
+            "chunk_id": "chunk-1",
+            "quote": next(
+                (
+                    str(row.get("quote") or "")
+                    for row in item.get("chunk_candidates") or []
+                    if row.get("source_grounded") is True
+                    and str(row.get("quote") or "").strip()
+                ),
+                str(item.get("content") or ""),
+            ),
+            "evidence_origin": item.get("evidence_origin"),
+        }
+        for index, item in enumerate(results, start=1)
+    ]
+    return {
+        "query": query,
+        "results": results,
+        "evidence_ledger": {
+            "task_records": [{"task_record_id": task_record_id, "evidence_records": records}]
+        },
+    }
 
 
 def test_official_subdomain_of_code_host_can_be_inferred_without_trusting_repo_pages():
@@ -183,9 +214,9 @@ class SourceAuthorityTests(unittest.TestCase):
 
     def test_required_domain_is_not_satisfied_by_third_party_summary(self):
         plan = {
-            "schema_version": "task_plan.v2",
+            "contract": "rwkv.ecra.runtime.task-plan",
             "goal": "Use the official miit.gov.cn source for the latest MIIT telecom statistics",
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "question": "latest MIIT telecom statistics from miit.gov.cn",
@@ -208,7 +239,7 @@ class SourceAuthorityTests(unittest.TestCase):
             query="Use the official miit.gov.cn page for latest MIIT telecommunications industry statistics",
             constraints={"task_plan": plan},
         )
-        row = report["subquestion_coverage"][0]
+        row = report["task_record_coverage"][0]
         self.assertEqual(row["status"], "authority_missing")
         self.assertFalse(row["answerable"])
 
@@ -357,13 +388,14 @@ class SourceAuthorityTests(unittest.TestCase):
     def test_plan_keeps_only_factual_scope_fields(self):
         plan = Planner._validate_task_plan(
             {
+                "contract": "rwkv.ecra.runtime.task-plan",
                 "goal": "latest notices",
                 "task_mode": "latest_list",
                 "source_policy": "official_required",
                 "required_domains": ["ubuntu.com"],
                 "requested_fields": ["notice_id", "title"],
                 "max_items": 5,
-                "atomic_points": [
+                "records": [
                     {
                         "id": "P1",
                         "question": "find latest notices",
@@ -373,18 +405,21 @@ class SourceAuthorityTests(unittest.TestCase):
                 ],
             }
         )
-        self.assertEqual(plan["schema_version"], "task_plan.v2")
-        self.assertEqual(plan["atomic_points"][0]["fields"], ["notice_id", "title"])
-        self.assertEqual(plan["atomic_points"][0]["time_scope"], "current")
+        self.assertEqual(plan["contract"], "rwkv.ecra.runtime.task-plan")
+        self.assertEqual(plan["records"][0]["fields"], [
+            {"field_id": "P1:F1", "name": "notice_id"},
+            {"field_id": "P1:F2", "name": "title"},
+        ])
+        self.assertEqual(plan["records"][0]["time_scope"], "current")
         self.assertNotIn("source_policy", plan)
         self.assertNotIn("required_domains", plan)
         self.assertNotIn("task_mode", plan)
 
     def test_web_search_scopes_official_adapter_and_hard_query_to_active_claim(self):
         plan = {
-            "schema_version": "task_plan.v2",
+            "contract": "rwkv.ecra.runtime.task-plan",
             "goal": "Compare official docs.djangoproject.com and python.org release dates",
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "question": "Django 5.2 official release date from docs.djangoproject.com",
@@ -412,7 +447,7 @@ class SourceAuthorityTests(unittest.TestCase):
             web_search(
                 "Python 3.13 release date",
                 task_plan=plan,
-                task_point_id="P2",
+                task_record_id="P2",
                 original_goal=(
                     "Compare official docs.djangoproject.com and python.org release dates "
                     "for Django 5.2 and Python 3.13"
@@ -447,7 +482,7 @@ class SourceAuthorityTests(unittest.TestCase):
             "task_mode": "latest_list",
             "max_items": 2,
             "requested_fields": ["id", "title"],
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "task": "latest notices",
@@ -458,9 +493,9 @@ class SourceAuthorityTests(unittest.TestCase):
             ],
         }
         context = build_evidence_context(
-            {
-                "query": "latest notices",
-                "results": [
+            _grounded_results(
+                "latest notices",
+                [
                     {
                         "url": "https://ubuntu.com/security/notices",
                         "title": "Ubuntu security notices",
@@ -481,14 +516,14 @@ class SourceAuthorityTests(unittest.TestCase):
                         ],
                     }
                 ],
-            },
+            ),
             constraints={"task_plan": plan},
         )
         self.assertIn("Item A", context["text"])
         self.assertIn("Item B", context["text"])
         self.assertIn("Item C", context["text"])
         self.assertNotIn("MODEL ITEM MUST NOT ENTER CONTEXT", context["text"])
-        self.assertIn("Navigation and unrelated archive text", context["text"])
+        self.assertNotIn("Navigation and unrelated archive text", context["text"])
 
     def test_clean_answer_does_not_rewrite_rwkv_output(self):
         answer = "**P1** – internal routing\n**Answer:**\nUsable answer [S1]"
@@ -524,7 +559,7 @@ class SourceAuthorityTests(unittest.TestCase):
         self.assertIn("/2026/08/05/", candidates[0]["url"])
 
     def test_community_detail_ranks_before_board_navigation_without_plan_policy(self):
-        plan = {"goal": "V2EX macOS 升级体验", "atomic_points": []}
+        plan = {"goal": "V2EX macOS 升级体验", "records": []}
         candidates = _merge_candidates(
             "V2EX macOS 升级体验",
             [
@@ -740,7 +775,7 @@ class SourceAuthorityTests(unittest.TestCase):
         plan = {
             "source_policy": "official_required",
             "required_domains": ["miit.gov.cn"],
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "task": "MIIT official statistic",
@@ -753,9 +788,9 @@ class SourceAuthorityTests(unittest.TestCase):
         llm = self._FinalLLM()
         result = synthesize_retrieval_answer(
             "latest MIIT official statistic",
-            {
-                "query": "latest MIIT official statistic",
-                "results": [
+            _grounded_results(
+                "latest MIIT official statistic",
+                [
                     {
                         "url": "https://www.researchandmarkets.com/report",
                         "title": "Third-party MIIT report",
@@ -763,7 +798,7 @@ class SourceAuthorityTests(unittest.TestCase):
                         "evidence_origin": "fetched_page_body",
                     }
                 ],
-            },
+            ),
             llm=llm,
             constraints={"task_plan": plan},
         )
@@ -776,7 +811,7 @@ class SourceAuthorityTests(unittest.TestCase):
         plan = {
             "source_policy": "official_required",
             "required_domains": ["nginx.org", "nginx.com"],
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "task": "查找 nginx 官方文档中关于 WebSocket 反向代理的配置说明",
@@ -792,9 +827,9 @@ class SourceAuthorityTests(unittest.TestCase):
         llm = self._FinalLLM(content="Use the official WebSocket proxying example [S1]")
         result = synthesize_retrieval_answer(
             "nginx websocket 反向代理 官方文档",
-            {
-                "query": "nginx websocket 反向代理 官方文档",
-                "results": [
+            _grounded_results(
+                "nginx websocket 反向代理 官方文档",
+                [
                     {
                         "url": "https://nginx.org/en/docs/http/websocket.html",
                         "title": "WebSocket proxying",
@@ -810,7 +845,7 @@ class SourceAuthorityTests(unittest.TestCase):
                         "body_verified": True,
                     }
                 ],
-            },
+            ),
             llm=llm,
             constraints={"task_plan": plan},
         )
@@ -1156,12 +1191,12 @@ class SourceAuthorityTests(unittest.TestCase):
             ],
             "evidence_origin": "fetched_page_body",
             "body_verified": True,
-            "locator_claim_id": "P1",
+            "locator_task_record_id": "P1",
         }
         state = SimpleNamespace(
             retrieval=SimpleNamespace(
                 sources={url: cached},
-                sources_by_claim={"P1": {url: cached}},
+                sources_by_task_record={"P1": {url: cached}},
                 attempted_urls={url},
                 url_attempt_counts={url: 1},
             )
@@ -1179,13 +1214,13 @@ class SourceAuthorityTests(unittest.TestCase):
         }
         rebound = {
             **cached,
-            "locator_claim_id": "P2",
-            "claim_ids": ["P2"],
+            "locator_task_record_id": "P2",
+            "task_record_ids": ["P2"],
         }
         plan = {
             "source_policy": "open_web",
             "required_domains": [],
-            "atomic_points": [
+            "records": [
                 {"id": "P1", "task": "Django release date"},
                 {"id": "P2", "task": "Python 3.13 release date"},
             ],
@@ -1204,7 +1239,7 @@ class SourceAuthorityTests(unittest.TestCase):
                 web_search(
                     "Python 3.13 release date",
                     task_plan=plan,
-                    task_point_id="P2",
+                    task_record_id="P2",
                     original_goal="Compare Django and Python release dates",
                     task_id="CLAIM_CACHE_REEXTRACT_TEST",
                     agent_state=state,
@@ -1214,7 +1249,211 @@ class SourceAuthorityTests(unittest.TestCase):
         fetch.assert_not_called()
         compact.assert_called_once()
         self.assertTrue(result["reextracted_cached_sources"])
-        self.assertEqual(result["results"][0]["locator_claim_id"], "P2")
+        self.assertEqual(result["results"][0]["locator_task_record_id"], "P2")
+
+    def test_unbound_route_reextracts_a_claim_scoped_cached_page(self):
+        url = "https://example.org/shared"
+        original_goal = "Compare Alpha and Beta release dates"
+        cached = {
+            "url": url,
+            "title": "Shared release history",
+            "snippet": "Alpha and Beta release dates",
+            "source": "test",
+            "content": "Alpha and Beta release history. " * 20,
+            "source_excerpt": "Alpha and Beta release history. " * 20,
+            "source_chunks": [
+                {
+                    "chunk_id": "chunk-1",
+                    "index": 0,
+                    "text": "Alpha and Beta release history. " * 20,
+                }
+            ],
+            "evidence_origin": "fetched_page_body",
+            "body_verified": True,
+            "attempt_task_record_id": "P1",
+            "locator_task_record_id": "P1",
+            "locator_query": "What is the Alpha release date?",
+        }
+        state = SimpleNamespace(
+            retrieval=SimpleNamespace(
+                sources={url: cached},
+                sources_by_task_record={"P1": {url: cached}},
+                attempted_urls={url},
+                url_attempt_counts={url: 1},
+            )
+        )
+        provider = {
+            "status": "ok",
+            "provider": "test",
+            "results": [
+                {
+                    "title": cached["title"],
+                    "url": url,
+                    "snippet": cached["snippet"],
+                }
+            ],
+        }
+        rebound = {
+            **cached,
+            "attempt_task_record_id": "",
+            "locator_task_record_id": "P2",
+            "locator_query": original_goal,
+            "task_record_ids": ["P2"],
+        }
+        plan = {
+            "source_policy": "open_web",
+            "required_domains": [],
+            "records": [
+                {"id": "P1", "question": "What is the Alpha release date?"},
+                {"id": "P2", "question": "What is the Beta release date?"},
+            ],
+        }
+        with (
+            patch("tools.web_search_generic.search_web_keyless", return_value=provider),
+            patch("tools.web_search_generic.search_web_tavily", return_value=provider),
+            patch("tools.web_search_generic._fetch_candidate") as fetch,
+            patch(
+                "tools.web_search_generic._compact_page",
+                return_value=(rebound, {"status": "ok"}),
+            ) as compact,
+            patch("tools.web_search_generic.append_task_event"),
+        ):
+            result = json.loads(
+                web_search(
+                    "Alpha release date",
+                    task_plan=plan,
+                    original_goal=original_goal,
+                    task_id="UNBOUND_CACHE_REEXTRACT_TEST",
+                    agent_state=state,
+                )
+            )
+
+        fetch.assert_not_called()
+        compact.assert_called_once()
+        self.assertEqual(compact.call_args.args[0], original_goal)
+        self.assertTrue(result["reextracted_cached_sources"])
+        self.assertEqual(result["results"][0]["locator_task_record_id"], "P2")
+
+    def test_mixed_novel_and_cached_candidates_both_run_scope_extraction(self):
+        cached_url = "https://example.org/shared-history"
+        novel_url = "https://example.net/new-release"
+        original_goal = "Compare Alpha and Beta release dates"
+        cached = {
+            "url": cached_url,
+            "title": "Shared release history",
+            "snippet": "Alpha and Beta release dates",
+            "source": "test",
+            "content": "Alpha and Beta release history. " * 20,
+            "source_excerpt": "Alpha and Beta release history. " * 20,
+            "source_chunks": [
+                {
+                    "chunk_id": "chunk-1",
+                    "index": 0,
+                    "text": "Alpha and Beta release history. " * 20,
+                }
+            ],
+            "evidence_origin": "fetched_page_body",
+            "body_verified": True,
+            "attempt_task_record_id": "P1",
+            "locator_task_record_id": "P1",
+            "locator_query": "What is the Alpha release date?",
+        }
+        state = SimpleNamespace(
+            retrieval=SimpleNamespace(
+                sources={cached_url: cached},
+                sources_by_task_record={"P1": {cached_url: cached}},
+                attempted_urls={cached_url},
+                url_attempt_counts={cached_url: 1},
+            )
+        )
+        provider = {
+            "status": "ok",
+            "provider": "test",
+            "results": [
+                {
+                    "title": cached["title"],
+                    "url": cached_url,
+                    "snippet": cached["snippet"],
+                },
+                {
+                    "title": "New Beta release",
+                    "url": novel_url,
+                    "snippet": "Beta release date",
+                },
+            ],
+        }
+        old_rebound = {
+            **cached,
+            "attempt_task_record_id": "",
+            "locator_task_record_id": "P2",
+            "locator_query": original_goal,
+            "task_record_ids": ["P2"],
+        }
+        new_record = {
+            "url": novel_url,
+            "title": "New Beta release",
+            "content": "Beta release evidence. " * 20,
+            "source_excerpt": "Beta release evidence. " * 20,
+            "evidence_origin": "fetched_page_body",
+            "body_verified": True,
+            "attempt_task_record_id": "",
+            "locator_task_record_id": "P2",
+            "locator_query": original_goal,
+            "task_record_ids": ["P2"],
+        }
+        plan = {
+            "source_policy": "open_web",
+            "required_domains": [],
+            "records": [
+                {"id": "P1", "question": "What is the Alpha release date?"},
+                {"id": "P2", "question": "What is the Beta release date?"},
+            ],
+        }
+
+        def compact(_query, candidate, _fetched, *_args, **_kwargs):
+            if candidate["url"] == cached_url:
+                return old_rebound, {"status": "ok", "url": cached_url}
+            return new_record, {"status": "ok", "url": novel_url}
+
+        with (
+            patch("tools.web_search_generic.search_web_keyless", return_value=provider),
+            patch("tools.web_search_generic.search_web_tavily", return_value=provider),
+            patch(
+                "tools.web_search_generic._fetch_candidate",
+                return_value={
+                    "status": "ok",
+                    "results": [
+                        {
+                            "url": novel_url,
+                            "title": "New Beta release",
+                            "page_excerpt": "Beta release evidence. " * 20,
+                            "body_verified": True,
+                        }
+                    ],
+                },
+            ) as fetch,
+            patch("tools.web_search_generic._compact_page", side_effect=compact) as compact_page,
+            patch("tools.web_search_generic.append_task_event"),
+        ):
+            result = json.loads(
+                web_search(
+                    "Alpha and Beta release dates",
+                    task_plan=plan,
+                    original_goal=original_goal,
+                    task_id="MIXED_CACHE_SCOPE_TEST",
+                    agent_state=state,
+                )
+            )
+
+        fetch.assert_called_once()
+        self.assertEqual(fetch.call_args.args[0]["url"], novel_url)
+        self.assertEqual(compact_page.call_count, 2)
+        self.assertEqual(
+            {item["url"] for item in result["results"]},
+            {cached_url, novel_url},
+        )
+        self.assertTrue(result["reextracted_cached_sources"])
+        self.assertEqual(result["fetched_count"], 1)
 
     def test_unbound_multi_point_search_extracts_against_complete_user_goal(self):
         search_query = "Titans arXiv latest revision"
@@ -1241,9 +1480,9 @@ class SourceAuthorityTests(unittest.TestCase):
             "evidence_origin": "fetched_page_body",
         }
         plan = {
-            "schema_version": "task_plan.v2",
+            "contract": "rwkv.ecra.runtime.task-plan",
             "goal": original_goal,
-            "atomic_points": [
+            "records": [
                 {"id": "P1", "question": "latest revision", "fields": ["date"]},
                 {"id": "P2", "question": "architecture variants", "fields": ["names"]},
             ],

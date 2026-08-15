@@ -44,6 +44,62 @@ def test_array_candidate_is_rejected_instead_of_silently_taking_first_row():
     assert candidate["quote"] == ""
 
 
+def test_singleton_array_candidate_is_losslessly_normalized():
+    candidate = parse_chunk_candidate(
+        '[{"supported":true,"quote":"one exact source span"}]',
+        {"chunk_id": "c1", "index": 0, "text": "one exact source span"},
+    )
+
+    assert candidate["supported"] is True
+    assert candidate["quote"] == "one exact source span"
+    assert candidate["protocol_input_format"] == "singleton_object_array"
+    assert candidate["protocol_normalized"] is True
+
+
+def test_legacy_extractor_aliases_are_losslessly_mapped_to_runtime_ids():
+    candidate = parse_chunk_candidate(
+        json.dumps(
+            {
+                "supported": True,
+                "claim_ids": ["P1"],
+                "field_keys": ["version"],
+                "quote": "Version 4.4 is current.",
+            }
+        ),
+        {"chunk_id": "c1", "index": 0, "text": "Version 4.4 is current."},
+        planned_task_record_ids={"P1"},
+        planned_field_ids_by_record_id={"P1": {"P1:F1"}},
+        planned_field_name_to_id_by_record_id={
+            "P1": {"version": "P1:F1", "p1:f1": "P1:F1"}
+        },
+    )
+
+    assert candidate["task_record_ids"] == ["P1"]
+    assert candidate["field_ids"] == ["P1:F1"]
+
+
+def test_extractor_prompt_has_no_concrete_output_id_example():
+    prompt = build_chunk_candidate_prompt(
+        "current version",
+        "https://example.test/releases",
+        "Releases",
+        {"chunk_id": "c1", "index": 0, "text": "Version 4.4 is current."},
+        1,
+        task_records=[
+            {
+                "record_id": "P1",
+                "question": "current version",
+                "fields": [{"field_id": "P1:F1", "name": "version"}],
+            }
+        ],
+    )
+
+    format_prefix = prompt.split("任务记录：", 1)[0]
+    assert '"task_record_ids":["P1"]' not in format_prefix
+    assert '"field_ids":["P1:F1"]' not in format_prefix
+    assert "这里不提供任何可复制的 ID 或事实示例" in prompt
+
+
 def test_structural_windows_route_requested_headings_before_marker_dense_noise():
     chunks = [
         {
@@ -96,7 +152,7 @@ def test_current_release_keeps_newest_record_with_bounded_date_tiebreaker():
         chunks,
         {
             "freshness_policy": {"now": "2026-08-12T00:00:00+00:00"},
-            "atomic_points": [
+            "records": [
                 {"id": "P1", "task": "latest stable Widget version and release date"}
             ],
         },
@@ -132,7 +188,7 @@ def test_current_release_reserves_newest_structural_record_attention_lane():
         chunks,
         {
             "freshness_policy": {"now": "2026-08-12T00:00:00+00:00"},
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "question": "latest Widget version and release date",
@@ -167,7 +223,7 @@ def test_newer_unrelated_record_cannot_override_task_relevant_record():
         chunks,
         {
             "freshness_policy": {"now": "2026-08-12T00:00:00+00:00"},
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "question": "latest stable Widget version and release date",
@@ -203,7 +259,7 @@ def test_current_release_keeps_after_cutoff_metadata_when_capacity_allows():
         chunks,
         {
             "freshness_policy": {"as_of": "2026-08-10"},
-            "atomic_points": [{"id": "P1", "task": "latest stable Widget version"}],
+            "records": [{"id": "P1", "task": "latest stable Widget version"}],
         },
         max_chunks=4,
     )
@@ -234,7 +290,7 @@ def test_current_table_rows_are_independent_literal_attention_records():
         "Windows 11 current public version latest OS Build",
         chunks,
         {
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "question": "current public version and latest OS Build",
@@ -381,7 +437,7 @@ def test_direct_page_url_path_does_not_create_temporal_intent():
             }
         ],
         {
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "question": "说明 -j 的并行行为。",
@@ -422,7 +478,7 @@ def test_task_plan_identifiers_and_short_cli_flags_reach_option_record():
             }
         ],
         {
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "question": "-j 会额外占用多少数据库连接？",
@@ -505,7 +561,7 @@ def test_locator_quote_finishes_sentence_instead_of_cutting_a_word():
     assert len(candidate["quote"]) <= 1040
 
 
-def test_multiline_model_locator_keeps_structure_until_source_grounding():
+def test_multiline_model_locator_rejects_omitted_source_line():
     source = (
         "### Package manager\n"
         "Formatting-only source line.\n"
@@ -538,11 +594,10 @@ def test_multiline_model_locator_keeps_structure_until_source_grounding():
         [parsed],
         {},
     )[0]
-    assert gated["supported"] is True
-    assert gated["source_grounded"] is True
-    assert gated["grounding_basis"] == "ordered_source_segments"
-    assert gated["grounded_segment_count"] == 4
-    assert gated["quote"].endswith("`package-manager --version`")
+    assert gated["supported"] is False
+    assert gated["source_grounded"] is False
+    assert gated["rejection_reason"] == "model_quote_not_grounded"
+    assert gated["model_quote"] == model_quote
 
 
 def test_chunk_candidate_keeps_only_valid_rwkv_claim_bindings():
@@ -550,7 +605,7 @@ def test_chunk_candidate_keeps_only_valid_rwkv_claim_bindings():
         json.dumps(
             {
                 "supported": True,
-                "claim_ids": ["P2", "P999", "P2"],
+                "task_record_ids": ["P2", "P999", "P2"],
                 "quote": "Version 2.0 was released on 2026-08-12.",
             }
         ),
@@ -560,10 +615,10 @@ def test_chunk_candidate_keeps_only_valid_rwkv_claim_bindings():
             "text": "Version 2.0 was released on 2026-08-12.",
             "token_count": 12,
         },
-        planned_point_ids={"P1", "P2"},
+        planned_task_record_ids={"P1", "P2"},
     )
 
-    assert candidate["claim_ids"] == ["P2"]
+    assert candidate["task_record_ids"] == ["P2"]
 
 
 def test_chunk_candidate_keeps_grounded_record_identity_and_requested_fields():
@@ -578,15 +633,15 @@ def test_chunk_candidate_keeps_grounded_record_identity_and_requested_fields():
             {
                 "supported": True,
                 "task_record_ids": ["P1"],
-                "field_keys": ["version", "title", "invented field"],
+                "field_ids": ["P1:F1", "P1:F2", "invented field"],
                 "subject_key": "Example Game",
                 "record_key": "Version 4.4",
                 "quote": chunk["text"],
             }
         ),
         chunk,
-        planned_point_ids={"P1"},
-        planned_fields_by_id={"P1": {"version", "title", "date"}},
+        planned_task_record_ids={"P1"},
+        planned_field_ids_by_record_id={"P1": {"P1:F1", "P1:F2", "P1:F3"}},
     )
     gated = _apply_deterministic_candidate_gates(
         "What is the current Example Game version and title?",
@@ -596,36 +651,65 @@ def test_chunk_candidate_keeps_grounded_record_identity_and_requested_fields():
     )[0]
 
     assert gated["task_record_ids"] == ["P1"]
-    assert gated["field_keys"] == ["version", "title"]
+    assert gated["field_ids"] == ["P1:F1", "P1:F2"]
     assert gated["subject_key"] == "Example Game"
     assert gated["record_key"] == "Version 4.4"
     assert gated["source_grounded"] is True
 
 
-def test_chunk_prompt_uses_actual_task_field_instead_of_language_biased_example():
+def test_chunk_prompt_lists_actual_task_fields_without_an_output_example():
     prompt = build_chunk_candidate_prompt(
         "当前版本是什么？",
         "https://example.test/releases",
         "发布记录",
         {"chunk_id": "c1", "index": 0, "text": "版本 3.0", "token_count": 4},
         1,
-        task_points=[
+        task_records=[
             {
-                "id": "P7",
+                "record_id": "P7",
                 "question": "当前版本是什么？",
                 "subject": "示例项目",
                 "relation": "当前版本",
-                "fields": ["版本号", "发布日期"],
+                "fields": [
+                    {"field_id": "P7:F1", "name": "版本号"},
+                    {"field_id": "P7:F2", "name": "发布日期"},
+                ],
                 "time_scope": "current",
                 "set_semantics": "single",
             }
         ],
     )
 
-    schema_line = prompt.split("格式：", 1)[1].split("。", 1)[0]
-    assert '"task_record_ids":["P7"]' in schema_line
-    assert '"field_keys":["版本号"]' in schema_line
-    assert '"field_keys":["version"]' not in prompt
+    output_contract = prompt.split("任务记录：", 1)[0]
+    task_records = prompt.split("任务记录：", 1)[1]
+    assert '"task_record_ids":["P7"]' not in output_contract
+    assert '"field_ids":["P7:F1"]' not in output_contract
+    assert '"record_id":"P7"' in task_records
+    assert '"field_id":"P7:F1"' in task_records
+    assert '"field_ids":["version"]' not in prompt
+
+
+def test_chunk_prompt_preserves_raw_markdown_for_model_input():
+    prompt = build_chunk_candidate_prompt(
+        "How do I verify Cargo?",
+        "https://example.test/guide",
+        "Guide",
+        {
+            "chunk_id": "c1",
+            "index": 0,
+            "text": (
+                "### Verify\n"
+                "Read [the guide](https://example.test/details), then run "
+                "`cargo --version` with `foo_bar`."
+            ),
+            "token_count": 20,
+        },
+        1,
+    )
+
+    assert "Read [the guide](https://example.test/details)" in prompt
+    assert "`cargo --version` with `foo_bar`" in prompt
+    assert "来源可见文本视图" not in prompt
 
 
 def test_same_subject_other_record_is_preserved_as_candidate_not_exact_support():
@@ -635,7 +719,7 @@ def test_same_subject_other_record_is_preserved_as_candidate_not_exact_support()
                 "supported": True,
                 "record_match": "same_subject_other_record",
                 "task_record_ids": ["P1"],
-                "field_keys": ["版本号"],
+                "field_ids": ["P1:F1"],
                 "record_key": "1.0",
                 "quote": "示例项目 1.0 于 2020 年发布。",
             },
@@ -647,21 +731,21 @@ def test_same_subject_other_record_is_preserved_as_candidate_not_exact_support()
             "text": "示例项目 1.0 于 2020 年发布。",
             "token_count": 10,
         },
-        planned_point_ids={"P1"},
-        planned_fields_by_id={"P1": {"版本号", "发布日期"}},
+        planned_task_record_ids={"P1"},
+        planned_field_ids_by_record_id={"P1": {"P1:F1", "P1:F2"}},
     )
 
     assert candidate["supported"] is True
     # A page-local extractor cannot decide the global current/exact record.
     # Preserve its declaration for audit, but expose the span to later RWKV
-    # comparison only as a candidate record.
-    assert candidate["record_match"] == "candidate_record"
+    # comparison only as a evidence record.
+    assert candidate["record_match"] == "evidence_record_candidate"
     assert candidate["extractor_declared_record_match"] == "same_subject_other_record"
-    assert candidate["field_keys"] == ["版本号"]
+    assert candidate["field_ids"] == ["P1:F1"]
     assert candidate["field_contract_valid"] is True
 
 
-def test_grounding_expands_quote_to_literal_record_header_in_same_chunk():
+def test_grounding_preserves_the_exact_model_quote_without_record_header_replacement():
     chunk = {
         "chunk_id": "release",
         "index": 0,
@@ -674,24 +758,25 @@ def test_grounding_expands_quote_to_literal_record_header_in_same_chunk():
                 "supported": True,
                 "record_match": "same_subject_other_record",
                 "task_record_ids": ["P1"],
-                "field_keys": ["version", "date"],
+                "field_ids": ["P1:F1", "P1:F2"],
                 "record_key": "4.86.0",
                 "quote": "2026-08-10\nDownload the release.",
             }
         ),
         chunk,
-        planned_point_ids={"P1"},
-        planned_fields_by_id={"P1": {"version", "date"}},
+        planned_task_record_ids={"P1"},
+        planned_field_ids_by_record_id={"P1": {"P1:F1", "P1:F2"}},
     )
 
     gated = _apply_deterministic_candidate_gates(
         "latest release version and date", [chunk], [candidate], {}
     )[0]
 
-    assert gated["quote"].startswith("4.86.0\n2026-08-10")
-    assert gated["record_key"] == "4.86.0"
-    assert gated["record_key_quote_expanded"] is True
-    assert "literal_record_key" in gated["grounding_basis"]
+    assert gated["quote"] == "2026-08-10\nDownload the release."
+    assert gated["record_key"] == ""
+    assert "record_key" in gated["ungrounded_routing_labels"]
+    assert gated.get("record_key_quote_expanded") is not True
+    assert gated["grounding_basis"] == "exact"
 
 
 def test_ungrounded_record_grouping_label_is_not_forwarded():
@@ -707,7 +792,7 @@ def test_ungrounded_record_grouping_label_is_not_forwarded():
             }
         ),
         chunk,
-        planned_point_ids={"P1"},
+        planned_task_record_ids={"P1"},
     )
 
     gated = _apply_deterministic_candidate_gates(
@@ -735,7 +820,7 @@ def test_current_plan_schema_activates_markdown_version_command_locator():
         [{"chunk_id": "chunk-1", "index": 0, "text": source, "token_count": 50}],
         {
             "requested_fields": ["installation_method", "version_check_command"],
-            "atomic_points": [
+            "records": [
                 {
                     "task": "extract the installation and verification commands",
                     "objective": "report the exact commands from the source",

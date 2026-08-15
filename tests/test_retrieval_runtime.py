@@ -8,11 +8,171 @@ from unittest.mock import patch
 from agent.orchestrator import Orchestrator, planner_environment_context, runtime_metadata_only
 from agent.planner import Planner
 from agent.state import AgentState
+from agent.task_plan_contract import normalize_task_plan
 from agent.unified_research import run_unified_research_loop
 from tools.registry import ToolRegistry
 from app.services.workspace_files import read_task_report
 from utils.chunker import get_token_count
 from utils.task_events import get_task_events
+
+
+def test_cv_and_writer_share_one_cached_evidence_packet_per_revision():
+    orchestrator = Orchestrator()
+    orchestrator.state.task_id = "SHARED_SELECTED_CONTEXT"
+    orchestrator.state.user_query = "question"
+    task_plan = {
+        "goal": "question",
+        "records": [{"id": "P1", "question": "question"}],
+    }
+    base_context = {
+        "text": "BASE",
+        "selected_evidence": [],
+        "citation_refs": [],
+        "calculation_results": [],
+        "context_stats": {"context_tokens": 1},
+    }
+    with (
+        patch("agent.orchestrator.build_evidence_context", return_value=base_context) as build,
+        patch("agent.orchestrator.append_task_event"),
+    ):
+        first = orchestrator._resolved_writer_context(
+            "question", task_plan, step=1, trigger="planner_finish"
+        )
+        second = orchestrator._resolved_writer_context(
+            "question", task_plan, step=1, trigger="final_writer"
+        )
+
+    assert first is second
+    assert first["text"] == "BASE"
+    assert build.call_count == 1
+
+
+def test_writer_context_preserves_runtime_resource_constraints():
+    orchestrator = Orchestrator()
+    orchestrator.state.task_id = "WRITER_RESOURCE_CONSTRAINTS"
+    orchestrator.state.run_metadata.update(
+        {
+            "context_source_count": 1,
+            "strategy_config": {
+                "context_source_count": 1,
+                "ranking_strategy": "resource-isolated",
+            },
+        }
+    )
+    task_plan = {
+        "goal": "question",
+        "records": [{"id": "P1", "question": "question"}],
+    }
+    base_context = {
+        "text": "BASE",
+        "selected_evidence": [],
+        "citation_refs": [],
+        "calculation_results": [],
+        "context_stats": {"context_tokens": 1},
+    }
+    with (
+        patch("agent.orchestrator.build_evidence_context", return_value=base_context) as build,
+        patch("agent.orchestrator.append_task_event"),
+    ):
+        orchestrator._resolved_writer_context(
+            "question", task_plan, step=1, trigger="planner_finish"
+        )
+
+    constraints = build.call_args.kwargs["constraints"]
+    assert constraints["context_source_count"] == 1
+    assert constraints["strategy_config"] == {
+        "context_source_count": 1,
+        "ranking_strategy": "resource-isolated",
+    }
+    assert constraints["task_plan"] == task_plan
+
+
+def test_writer_context_cache_changes_when_resource_constraints_change():
+    orchestrator = Orchestrator()
+    orchestrator.state.task_id = "WRITER_RESOURCE_CACHE_SCOPE"
+    task_plan = {
+        "goal": "question",
+        "records": [{"id": "P1", "question": "question"}],
+    }
+    base_context = {
+        "text": "BASE",
+        "selected_evidence": [],
+        "citation_refs": [],
+        "calculation_results": [],
+        "context_stats": {"context_tokens": 1},
+    }
+    orchestrator.state.run_metadata["context_source_count"] = 1
+    with (
+        patch("agent.orchestrator.build_evidence_context", return_value=base_context) as build,
+        patch("agent.orchestrator.append_task_event"),
+    ):
+        orchestrator._resolved_writer_context(
+            "question", task_plan, step=1, trigger="planner_finish"
+        )
+        orchestrator.state.run_metadata["context_source_count"] = 3
+        orchestrator._resolved_writer_context(
+            "question", task_plan, step=2, trigger="final_writer"
+        )
+
+    assert build.call_count == 2
+    assert build.call_args.kwargs["constraints"]["context_source_count"] == 3
+
+
+def test_evidence_resolution_is_cached_across_rebuilt_writer_packets():
+    orchestrator = Orchestrator()
+    orchestrator.state.task_id = "SHARED_RECORD_RESOLUTION"
+    task_plan = {
+        "goal": "question",
+        "records": [{"id": "P1", "question": "question"}],
+    }
+    base_context = {
+        "text": "BASE",
+        "evidence_text": "literal",
+        "selected_evidence": [
+            {
+                "ref_id": "S1",
+                "packed_chunks": [{"chunk_id": "c1", "text": "literal"}],
+            }
+        ],
+        "citation_refs": [{"ref_id": "S1"}],
+        "calculation_results": [],
+        "context_stats": {"context_tokens": 1},
+    }
+    resolution = {
+        "status": "resolved",
+        "evidence_record_count": 1,
+        "decisions": [
+            {
+                "task_record_id": "P1",
+                "status": "resolved",
+                "selected_record_ids": ["S1"],
+                "conflicting_record_ids": [],
+                "field_record_ids": {},
+                "missing_fields": [],
+                "needs_more_evidence": False,
+            }
+        ],
+    }
+    with (
+        patch("agent.orchestrator.build_evidence_context", return_value=base_context),
+        patch(
+            "agent.orchestrator.resolve_evidence",
+            return_value=resolution,
+        ) as resolve,
+        patch("agent.orchestrator.append_task_event"),
+    ):
+        first = orchestrator._resolved_writer_context(
+            "question", task_plan, step=1, trigger="planner_finish"
+        )
+        orchestrator._writer_context_cache_signature = "force-packet-rebuild"
+        second = orchestrator._resolved_writer_context(
+            "question", task_plan, step=2, trigger="final_writer"
+        )
+
+    assert first is not second
+    assert resolve.call_count == 1
+    assert first["evidence_resolution"] == resolution
+    assert second["evidence_resolution"] == resolution
 
 
 class FakePlanner:
@@ -81,11 +241,11 @@ class FakePlanner:
         )
         self.rebuild_session(user_query, env_context, observation, phase)
 
-    def mark_replan_progress(self, task_point_id):
-        point_id = str(task_point_id or "")
-        if not self.active_missing_point or point_id != self.active_missing_point:
+    def mark_replan_progress(self, task_record_id):
+        task_record_id = str(task_record_id or "")
+        if not self.active_missing_point or task_record_id != self.active_missing_point:
             return
-        self.replan_progress.append(point_id)
+        self.replan_progress.append(task_record_id)
         self.active_missing_point = ""
 
 
@@ -105,14 +265,14 @@ def test_planner_environment_context_exposes_observable_utc_time():
 def test_planner_routing_snapshot_exposes_zero_bound_factual_points():
     state = AgentState(task_id="POINT_PROGRESS", user_query="answer both facts")
     plan = {
-        "schema_version": "task_plan.v2",
+        "contract": "rwkv.ecra.runtime.task-plan",
         "goal": "answer both facts",
-        "atomic_points": [
+        "records": [
             {"id": "P1", "question": "first fact", "fields": ["date"]},
             {"id": "P2", "question": "second fact", "fields": ["name"]},
         ],
     }
-    state.retrieval.claims.initialize(plan, state.user_query)
+    state.retrieval.evidence_ledger.initialize(plan, state.user_query)
     state.retrieval.record_query(
         "first fact query",
         {
@@ -129,8 +289,8 @@ def test_planner_routing_snapshot_exposes_zero_bound_factual_points():
                             "supported": True,
                             "source_grounded": True,
                             "task_record_ids": ["P1"],
-                            "claim_ids": ["P1"],
-                            "field_keys": ["date"],
+                            "task_record_ids": ["P1"],
+                            "field_ids": ["P1:F1"],
                             "quote": "first fact source body",
                             "source_locator": {"char_start": 0, "char_end": 22},
                             "grounding_basis": "exact",
@@ -140,16 +300,16 @@ def test_planner_routing_snapshot_exposes_zero_bound_factual_points():
             ],
         },
         step=1,
-        task_point_id="P1",
+        task_record_id="P1",
         strategy="rwkv_selected",
     )
 
     snapshot = state.retrieval.planner_routing_snapshot()
 
-    assert snapshot["factual_point_progress"] == [
+    assert snapshot["task_record_progress"] == [
             {
                 "id": "P1",
-                "task_bound_candidate_record_count": 1,
+                "task_bound_evidence_record_count": 1,
                 "candidate_evidence_record_count": 1,
                 "total_evidence_record_count": 1,
                 "attempt_count": 1,
@@ -157,7 +317,7 @@ def test_planner_routing_snapshot_exposes_zero_bound_factual_points():
             },
             {
                 "id": "P2",
-                "task_bound_candidate_record_count": 0,
+                "task_bound_evidence_record_count": 0,
                 "candidate_evidence_record_count": 0,
                 "total_evidence_record_count": 0,
                 "attempt_count": 0,
@@ -166,26 +326,26 @@ def test_planner_routing_snapshot_exposes_zero_bound_factual_points():
     ]
 
 
-def test_planner_prompt_projection_preserves_factual_point_progress():
+def test_planner_prompt_projection_preserves_task_record_progress():
     state = AgentState(task_id="POINT_PROMPT", user_query="answer both facts")
     plan = {
-        "schema_version": "task_plan.v2",
+        "contract": "rwkv.ecra.runtime.task-plan",
         "goal": "answer both facts",
-        "atomic_points": [
+        "records": [
             {"id": "P1", "question": "first fact", "fields": ["date"]},
             {"id": "P2", "question": "second fact", "fields": ["name"]},
         ],
     }
-    state.retrieval.claims.initialize(plan, state.user_query)
+    state.retrieval.evidence_ledger.initialize(plan, state.user_query)
 
     projected = json.loads(
         Planner._replan_environment_projection(state.to_retrieval_context())
     )
 
-    assert projected["retrieval_ledger"]["factual_point_progress"] == [
+    assert projected["retrieval_ledger"]["task_record_progress"] == [
             {
                 "id": "P1",
-                "task_bound_candidate_record_count": 0,
+                "task_bound_evidence_record_count": 0,
                 "candidate_evidence_record_count": 0,
                 "total_evidence_record_count": 0,
                 "attempt_count": 0,
@@ -193,7 +353,7 @@ def test_planner_prompt_projection_preserves_factual_point_progress():
             },
             {
                 "id": "P2",
-                "task_bound_candidate_record_count": 0,
+                "task_bound_evidence_record_count": 0,
                 "candidate_evidence_record_count": 0,
                 "total_evidence_record_count": 0,
                 "attempt_count": 0,
@@ -206,9 +366,9 @@ def test_planner_prompt_projection_preserves_factual_point_progress():
 def test_planner_projection_carries_exact_records_not_whole_page_bindings():
     state = AgentState(task_id="RECORD_PROMPT", user_query="current version and date")
     plan = {
-        "schema_version": "task_plan.v2",
+        "contract": "rwkv.ecra.runtime.task-plan",
         "goal": "current version and date",
-        "atomic_points": [
+        "records": [
             {
                 "id": "P1",
                 "question": "current version and date",
@@ -216,7 +376,7 @@ def test_planner_projection_carries_exact_records_not_whole_page_bindings():
             }
         ],
     }
-    state.retrieval.claims.initialize(plan, state.user_query)
+    state.retrieval.evidence_ledger.initialize(plan, state.user_query)
     state.retrieval.record_query(
         "current release",
         {
@@ -233,7 +393,7 @@ def test_planner_projection_carries_exact_records_not_whole_page_bindings():
                             "supported": True,
                             "source_grounded": True,
                             "task_record_ids": ["P1"],
-                            "field_keys": ["version", "date"],
+                            "field_ids": ["P1:F1", "P1:F2"],
                             "subject_key": "",
                             "record_key": "Version 4.4",
                             "quote": "Version 4.4 was released on 2026-08-01.",
@@ -242,7 +402,7 @@ def test_planner_projection_carries_exact_records_not_whole_page_bindings():
                 }
             ],
         },
-        task_point_id="P1",
+        task_record_id="P1",
     )
 
     projected = json.loads(
@@ -255,6 +415,11 @@ def test_planner_projection_carries_exact_records_not_whole_page_bindings():
     assert records[0]["record_key"] == "Version 4.4"
     assert records[0]["quote"] == "Version 4.4 was released on 2026-08-01."
     assert "Old navigation text" not in json.dumps(records)
+    assert records[0]["field_ids"] == ["P1:F1", "P1:F2"]
+    assert records[0]["retrieval_bindings"]
+    assert "object_alignments" in records[0]
+    assert projected["source_locators"]["sources"]
+    assert list(projected)[0] == "retrieval_ledger"
 
 class FakeOwner:
     def __init__(self, decisions, reviews=None):
@@ -278,23 +443,23 @@ class FakeOwner:
             kwargs.get("query", ""),
             result,
             step=kwargs.get("step", 0),
-            task_point_id=kwargs.get("task_point_id", ""),
+            task_record_id=kwargs.get("task_record_id", ""),
             action=kwargs.get("action", ""),
             phase=kwargs.get("phase", ""),
         )
         return result
 
-    def _cross_validate_research(self, *args, **kwargs):
+    def _review_evidence(self, *args, **kwargs):
         self.review_calls.append({"args": args, "kwargs": kwargs})
         return self.reviews.pop(0)
 
-    def _cross_validate_if_evidence_changed(self, *args, **kwargs):
+    def _review_evidence_if_changed(self, *args, **kwargs):
         revision = int(self.state.retrieval.evidence_revision or 0)
-        if self.state.run_metadata.get("last_cross_validation_evidence_revision") == revision:
+        if self.state.run_metadata.get("last_evidence_review_revision") == revision:
             return None
-        review = self._cross_validate_research(*args, **kwargs)
+        review = self._review_evidence(*args, **kwargs)
         if str(review.get("decision") or "") in {"finish", "replan"}:
-            self.state.run_metadata["last_cross_validation_evidence_revision"] = revision
+            self.state.run_metadata["last_evidence_review_revision"] = revision
         return review
 
     def _complete_model_tool_loop(self, query, action, rounds, step, *, termination_reason):
@@ -312,9 +477,9 @@ class FakeOwner:
 
 def _plan():
     return {
-        "schema_version": "task_plan.v2",
+        "contract": "rwkv.ecra.runtime.task-plan",
         "goal": "question",
-        "atomic_points": [
+        "records": [
             {"id": "P1", "question": "question", "fields": [], "time_scope": "unspecified"}
         ]
     }
@@ -336,10 +501,10 @@ def test_loop_executes_exact_rwkv_tool_and_query(monkeypatch):
             {
                 "action": "web_search",
                 "args": {"query": "exact RWKV query"},
-                "task_point_id": "P1",
+                "task_record_id": "P1",
                 "raw_model_output": "model call",
             },
-            {"action": "finish_task", "args": {}, "task_point_id": "P1"},
+            {"action": "finish_task", "args": {}, "task_record_id": "P1"},
         ]
     )
     monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: name == "web_search"))
@@ -374,20 +539,20 @@ def test_loop_executes_exact_rwkv_tool_and_query(monkeypatch):
             {
                 "agent_state": owner.state,
                 "task_id": owner.state.task_id,
-                "task_point_id": "P1",
+                "task_record_id": "P1",
             },
             None,
         )
     ]
-    assert owner.finished[0]["termination_reason"] == "rwkv_cross_validation_finish"
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
 
 
 def test_finish_request_receives_one_rwkv_binary_review_before_writer():
-    owner = FakeOwner([{"action": "finish_task", "args": {}, "task_point_id": "P1"}])
+    owner = FakeOwner([{"action": "finish_task", "args": {}, "task_record_id": "P1"}])
     answer = run_unified_research_loop(owner, "question", {}, _plan(), 5)
     assert answer == "rwkv final"
     assert owner.finished[0]["rounds"] == []
-    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
     assert len(owner.review_calls) == 1
 
 
@@ -396,7 +561,7 @@ def test_exact_duplicate_is_frozen_and_replanned_without_network_reexecution(mon
     decision = {
         "action": "web_search",
         "args": {"query": "same query"},
-        "task_point_id": "P1",
+        "task_record_id": "P1",
     }
     owner = FakeOwner([decision, decision, {"action": "finish_task", "args": {}}])
     monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
@@ -420,7 +585,7 @@ def test_exact_duplicate_is_frozen_and_replanned_without_network_reexecution(mon
     assert len(owner.planner.rebuilt_sessions) == 1
     assert len(_duplicate_recovery_turns(owner)) == 1
     assert _duplicate_recovery_turns(owner)[0]["observation"]["frozen_path"]["query"] == "same query"
-    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
     assert not hasattr(owner.planner, "begin_replan")
 
 
@@ -428,12 +593,12 @@ def test_duplicate_recovery_runs_only_the_next_rwkv_selected_query(monkeypatch):
     first = {
         "action": "web_search",
         "args": {"query": "same query"},
-        "task_point_id": "P1",
+        "task_record_id": "P1",
     }
     follow_up = {
         "action": "web_search",
         "args": {"query": "RWKV selected missing evidence query"},
-        "task_point_id": "P1",
+        "task_record_id": "P1",
     }
     owner = FakeOwner([first, first, follow_up, {"action": "finish_task", "args": {}}])
     calls = []
@@ -466,12 +631,12 @@ def test_distinct_model_selected_url_is_not_blocked_by_claim_binding(monkeypatch
     first = {
         "action": "web_search",
         "args": {"query": "same query"},
-        "task_point_id": "P1",
+        "task_record_id": "P1",
     }
     alternative = {
         "action": "web_search",
         "args": {"query": "different route with an unsupported page"},
-        "task_point_id": "P1",
+        "task_record_id": "P1",
     }
     owner = FakeOwner([first, first, alternative, {"action": "finish_task", "args": {}}])
     calls = []
@@ -503,7 +668,7 @@ def test_distinct_model_selected_url_is_not_blocked_by_claim_binding(monkeypatch
         "record_query",
         lambda *_args, **_kwargs: {
             "new_source_count": 1,
-            "claim_delta": {"added_source_bindings": 0},
+            "evidence_ledger_delta": {"added_source_bindings": 0},
         },
     )
 
@@ -521,7 +686,7 @@ def test_second_duplicate_hits_resource_boundary_after_one_binary_review(monkeyp
     repeated = {
         "action": "web_search",
         "args": {"query": "same frozen query"},
-        "task_point_id": "P1",
+        "task_record_id": "P1",
     }
     owner = FakeOwner(
         [repeated, repeated, repeated, {"action": "finish_task", "args": {}}],
@@ -546,7 +711,7 @@ def test_second_duplicate_hits_resource_boundary_after_one_binary_review(monkeyp
     assert len(owner.review_calls) == 1
     assert len(_duplicate_recovery_turns(owner)) == 1
     assert owner.state.retrieval.replan_count == 1
-    assert owner.finished[0]["termination_reason"] == "resource_duplicate_limit"
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
     assert any(
         observation.get("status") == "no_new_evidence"
         for observation in owner.planner.observations
@@ -557,7 +722,7 @@ def test_duplicate_stall_allows_only_one_rebuilt_planner_then_stops(monkeypatch)
     repeated = {
         "action": "web_search",
         "args": {"query": "same frozen query"},
-        "task_point_id": "P1",
+        "task_record_id": "P1",
     }
     owner = FakeOwner(
         [repeated, repeated, repeated, repeated, repeated, repeated, repeated, repeated],
@@ -583,19 +748,19 @@ def test_duplicate_stall_allows_only_one_rebuilt_planner_then_stops(monkeypatch)
     assert len(_duplicate_recovery_turns(owner)) == 1
     assert len(owner.planner.rebuilt_sessions) == 1
     assert owner.state.retrieval.replan_count == 1
-    assert owner.finished[0]["termination_reason"] == "resource_duplicate_limit"
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
 
 
-def test_semantically_similar_but_distinct_rwkv_query_is_allowed(monkeypatch):
+def test_equivalent_rwkv_query_remains_model_executable(monkeypatch):
     first = {
         "action": "web_search",
         "args": {"query": "alpha beta gamma delta epsilon official"},
-        "task_point_id": "P1",
+        "task_record_id": "P1",
     }
     equivalent = {
         "action": "web_search",
         "args": {"query": "official epsilon delta gamma beta alpha"},
-        "task_point_id": "P1",
+        "task_record_id": "P1",
     }
     owner = FakeOwner(
         [first, equivalent, {"action": "finish_task", "args": {}}],
@@ -622,19 +787,121 @@ def test_semantically_similar_but_distinct_rwkv_query_is_allowed(monkeypatch):
         ("web_search", {"query": "official epsilon delta gamma beta alpha"}),
     ]
     assert len(_duplicate_recovery_turns(owner)) == 0
-    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
 
 
-def test_exact_retrieval_request_can_be_reextracted_for_another_task_point(monkeypatch):
+def test_same_query_can_fall_back_from_connector_to_web_search(monkeypatch):
+    query = "NOAA NHC active tropical cyclones"
+    owner = FakeOwner(
+        [
+            {
+                "action": "connector_lookup",
+                "args": {"operation": "weather_current", "query": query},
+                "task_record_id": "P1",
+            },
+            {
+                "action": "web_search",
+                "args": {"query": query},
+                "task_record_id": "P1",
+            },
+            {"action": "finish_task", "args": {}, "task_record_id": "P1"},
+        ],
+        reviews=[{"decision": "finish"}],
+    )
+    calls = []
+    monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
+    monkeypatch.setattr(
+        ToolRegistry,
+        "metadata",
+        classmethod(lambda cls, name: {"retrieval_role": "evidence"}),
+    )
+
+    def execute(_cls, action, args, context, phase=None):
+        del context, phase
+        calls.append((action, dict(args)))
+        if action == "connector_lookup":
+            return json.dumps({"status": "no_results", "results": []})
+        return json.dumps(
+            {
+                "status": "ok",
+                "results": [
+                    {
+                        "title": "NHC active storms",
+                        "url": "https://www.nhc.noaa.gov/",
+                        "content": "Active tropical cyclone information.",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(ToolRegistry, "execute", classmethod(execute))
+    answer = run_unified_research_loop(owner, "question", {}, _plan(), 5)
+
+    assert answer == "rwkv final"
+    assert calls == [
+        (
+            "connector_lookup",
+            {"operation": "weather_current", "query": query},
+        ),
+        ("web_search", {"query": query}),
+    ]
+    assert len(_duplicate_recovery_turns(owner)) == 0
+    routes = owner.state.retrieval.planner_routing_snapshot()["queries"]
+    assert [row["action"] for row in routes] == ["connector_lookup", "web_search"]
+    assert routes[0]["operation"] == "weather_current"
+
+
+def test_same_entity_different_requested_field_remains_a_new_route(monkeypatch):
+    owner = FakeOwner(
+        [
+            {
+                "action": "web_search",
+                "args": {"query": "深圳地铁一号线 站点 列表 官方"},
+                "task_record_id": "P1",
+            },
+            {
+                "action": "web_search",
+                "args": {"query": "深圳地铁一号线 首班车 末班车 时间 官方"},
+                "task_record_id": "P1",
+            },
+            {"action": "finish_task", "args": {}, "task_record_id": "P1"},
+        ],
+        reviews=[{"decision": "finish"}],
+    )
+    calls = []
+    monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
+    monkeypatch.setattr(
+        ToolRegistry,
+        "metadata",
+        classmethod(lambda cls, name: {"retrieval_role": "discovery"}),
+    )
+
+    def execute(_cls, action, args, context, phase=None):
+        del context, phase
+        calls.append((action, dict(args)))
+        return json.dumps({"status": "ok", "results": []})
+
+    monkeypatch.setattr(ToolRegistry, "execute", classmethod(execute))
+    answer = run_unified_research_loop(owner, "question", {}, _plan(), 5)
+
+    assert answer == "rwkv final"
+    assert calls == [
+        ("web_search", {"query": "深圳地铁一号线 站点 列表 官方"}),
+        ("web_search", {"query": "深圳地铁一号线 首班车 末班车 时间 官方"}),
+    ]
+    assert len(_duplicate_recovery_turns(owner)) == 0
+
+
+def test_exact_retrieval_request_can_be_reextracted_for_another_task_record(monkeypatch):
     first = {
         "action": "web_search",
         "args": {"query": "one exact shared query"},
-        "task_point_id": "P1",
+        "task_record_id": "P1",
     }
     repeated_for_another_point = {
         "action": "web_search",
         "args": {"query": "one exact shared query"},
-        "task_point_id": "P2",
+        "task_record_id": "P2",
     }
     owner = FakeOwner(
         [first, repeated_for_another_point, {"action": "finish_task", "args": {}}],
@@ -642,7 +909,7 @@ def test_exact_retrieval_request_can_be_reextracted_for_another_task_point(monke
     )
     calls = []
     plan = {
-        "atomic_points": [
+        "records": [
             {"id": "P1", "task": "first fact"},
             {"id": "P2", "task": "second fact"},
         ]
@@ -668,14 +935,14 @@ def test_exact_retrieval_request_can_be_reextracted_for_another_task_point(monke
         ("web_search", {"query": "one exact shared query"}),
     ]
     assert len(_duplicate_recovery_turns(owner)) == 0
-    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
 
 
-def test_cross_validation_protocol_error_cannot_block_writer(monkeypatch):
+def test_evidence_review_protocol_error_cannot_block_writer(monkeypatch):
     repeated = {
         "action": "web_search",
         "args": {"query": "same query"},
-        "task_point_id": "P1",
+        "task_record_id": "P1",
     }
     owner = FakeOwner(
         [repeated, repeated, {"action": "finish_task", "args": {}}],
@@ -707,13 +974,13 @@ def test_cross_validation_protocol_error_cannot_block_writer(monkeypatch):
 def test_planner_finish_replans_only_when_rwkv_binary_review_requests_it(monkeypatch):
     owner = FakeOwner(
         [
-            {"action": "finish_task", "args": {}, "task_point_id": "P1"},
+            {"action": "finish_task", "args": {}, "task_record_id": "P1"},
             {
                 "action": "web_search",
                 "args": {"query": "model selected follow-up"},
-                "task_point_id": "P1",
+                "task_record_id": "P1",
             },
-            {"action": "finish_task", "args": {}, "task_point_id": "P1"},
+            {"action": "finish_task", "args": {}, "task_record_id": "P1"},
         ],
         reviews=[
             {"decision": "replan"},
@@ -751,24 +1018,134 @@ def test_planner_finish_replans_only_when_rwkv_binary_review_requests_it(monkeyp
     assert len(owner.review_calls) == 2
     assert len(owner.planner.rebuilt_sessions) == 1
     assert owner.state.retrieval.replan_count == 1
-    assert owner.finished[0]["termination_reason"] == "rwkv_cross_validation_finish"
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
 
 
-def test_binary_review_never_supplies_or_overrides_replan_task_point(monkeypatch):
+def test_evidence_review_replan_has_a_bounded_two_session_resource_limit():
     owner = FakeOwner(
         [
-            {"action": "finish_task", "args": {}, "task_point_id": "P1"},
+            {"action": "finish_task", "args": {}, "task_record_id": "P1"},
+            {"action": "finish_task", "args": {}, "task_record_id": "P1"},
+            {"action": "finish_task", "args": {}, "task_record_id": "P1"},
+        ],
+        reviews=[
+            {"decision": "replan"},
+            {"decision": "replan"},
+            {"decision": "replan"},
+        ],
+    )
+
+    review_results = [
+        {"decision": "replan"},
+        {"decision": "replan"},
+        {"decision": "replan"},
+    ]
+
+    def review(*args, **kwargs):
+        owner.review_calls.append({"args": args, "kwargs": kwargs})
+        return review_results.pop(0)
+
+    owner._review_evidence_if_changed = review
+
+    answer = run_unified_research_loop(owner, "question", {}, _plan(), 5)
+
+    assert answer == "rwkv final"
+    assert len(owner.review_calls) == 2
+    assert len(owner.planner.rebuilt_sessions) == 2
+    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
+
+
+def test_max_step_exit_honors_rwkv_replan_with_bounded_execution_window(monkeypatch):
+    owner = FakeOwner(
+        [
+            {
+                "action": "web_search",
+                "args": {"query": "first route"},
+                "task_record_id": "P1",
+            },
+            {
+                "action": "web_search",
+                "args": {"query": "rwkv replacement route"},
+                "task_record_id": "P1",
+            },
+            {"action": "finish_task", "args": {}, "task_record_id": "P1"},
+        ],
+        reviews=[{"decision": "replan"}, {"decision": "finish"}],
+    )
+    calls = []
+    monkeypatch.setattr(ToolRegistry, "has", classmethod(lambda cls, name: True))
+    monkeypatch.setattr(
+        ToolRegistry,
+        "metadata",
+        classmethod(lambda cls, name: {"retrieval_role": "discovery"}),
+    )
+
+    def execute(_cls, action, args, context, phase=None):
+        del context, phase
+        calls.append((action, dict(args)))
+        return json.dumps(
+            {
+                "status": "ok",
+                "results": [
+                    {
+                        "title": str(args.get("query") or "source"),
+                        "url": "https://example.test/" + str(len(calls)),
+                        "content": "materially new evidence " + str(len(calls)),
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(ToolRegistry, "execute", classmethod(execute))
+    answer = run_unified_research_loop(owner, "question", {}, _plan(), 1)
+
+    assert answer == "rwkv final"
+    assert calls == [
+        ("web_search", {"query": "first route"}),
+        ("web_search", {"query": "rwkv replacement route"}),
+    ]
+    assert [row["kwargs"]["trigger"] for row in owner.review_calls] == [
+        "evidence_revision",
+        "evidence_revision",
+    ]
+    assert len(owner.planner.rebuilt_sessions) == 1
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
+
+
+def test_planner_protocol_resource_exit_is_cross_validated_before_writer():
+    owner = FakeOwner(
+        [
+            {"planner_error": "invalid first response", "raw_model_output": "bad-1"},
+            {"planner_error": "invalid second response", "raw_model_output": "bad-2"},
+        ],
+        reviews=[{"decision": "finish"}],
+    )
+
+    answer = run_unified_research_loop(owner, "question", {}, _plan(), 5)
+
+    assert answer == "rwkv final"
+    assert len(owner.review_calls) == 1
+    assert owner.review_calls[0]["kwargs"]["trigger"] == (
+        "planner_protocol_resource_boundary"
+    )
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
+
+
+def test_binary_review_never_supplies_or_overrides_replan_task_record(monkeypatch):
+    owner = FakeOwner(
+        [
+            {"action": "finish_task", "args": {}, "task_record_id": "P1"},
             {
                 "action": "web_search",
                 "args": {"query": "another P1 source"},
-                "task_point_id": "P1",
+                "task_record_id": "P1",
             },
             {
                 "action": "web_search",
                 "args": {"query": "another P1 source"},
-                "task_point_id": "P1",
+                "task_record_id": "P1",
             },
-            {"action": "finish_task", "args": {}, "task_point_id": "P1"},
+            {"action": "finish_task", "args": {}, "task_record_id": "P1"},
         ],
         reviews=[
             {"decision": "replan"},
@@ -777,9 +1154,9 @@ def test_binary_review_never_supplies_or_overrides_replan_task_point(monkeypatch
     )
     calls = []
     plan = {
-        "schema_version": "task_plan.v2",
+        "contract": "rwkv.ecra.runtime.task-plan",
         "goal": "mixed question",
-        "atomic_points": [
+        "records": [
             {"id": "P1", "question": "historical fact", "fields": [], "time_scope": "historical"},
             {"id": "P2", "question": "current fact", "fields": [], "time_scope": "current"},
         ]
@@ -815,12 +1192,12 @@ def test_binary_review_never_supplies_or_overrides_replan_task_point(monkeypatch
     assert len(owner.review_calls) == 2
     assert owner.planner.active_missing_point == ""
     assert len(owner.planner.rebuilt_sessions) == 1
-    assert owner.finished[0]["termination_reason"] == "rwkv_cross_validation_finish"
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
 
 
 def test_planner_context_keeps_original_source_spans_after_feedback_changes():
     state = AgentState(task_id="PERSISTENT_EVIDENCE", user_query="question")
-    state.retrieval.claims.initialize(_plan(), "question")
+    state.retrieval.evidence_ledger.initialize(_plan(), "question")
     state.retrieval.record_query(
         "first query",
         {
@@ -840,7 +1217,7 @@ def test_planner_context_keeps_original_source_spans_after_feedback_changes():
                 }
             ],
         },
-        task_point_id="P1",
+        task_record_id="P1",
         step=1,
     )
     state.last_feedback = json.dumps(
@@ -864,7 +1241,7 @@ def test_planner_context_keeps_original_source_spans_after_feedback_changes():
 
 def test_planner_context_prefers_selected_original_chunk_over_page_preamble():
     state = AgentState(task_id="SELECTED_ROUTING_SPAN", user_query="current release")
-    state.retrieval.claims.initialize(_plan(), "current release")
+    state.retrieval.evidence_ledger.initialize(_plan(), "current release")
     state.retrieval.record_query(
         "current release",
         {
@@ -895,7 +1272,7 @@ def test_planner_context_prefers_selected_original_chunk_over_page_preamble():
                 }
             ],
         },
-        task_point_id="P1",
+        task_record_id="P1",
         step=1,
     )
 
@@ -907,7 +1284,7 @@ def test_planner_context_prefers_selected_original_chunk_over_page_preamble():
 
 def test_planner_context_keeps_adjacent_original_context_around_selected_chunk():
     state = AgentState(task_id="SELECTED_ROUTING_NEIGHBOUR", user_query="current release")
-    state.retrieval.claims.initialize(_plan(), "current release")
+    state.retrieval.evidence_ledger.initialize(_plan(), "current release")
     source_chunks = [
         {"chunk_id": "chunk-7", "index": 7, "text": "PRECEDING_VERSION_CONTEXT"},
         {"chunk_id": "chunk-8", "index": 8, "text": "CURRENT_RELEASE_GROUNDED_SECTION"},
@@ -927,7 +1304,7 @@ def test_planner_context_keeps_adjacent_original_context_around_selected_chunk()
                 }
             ],
         },
-        task_point_id="P1",
+        task_record_id="P1",
         step=1,
     )
 
@@ -942,12 +1319,12 @@ def test_planner_context_keeps_adjacent_original_context_around_selected_chunk()
 def test_planner_context_compacts_large_feedback_and_source_bodies():
     state = AgentState(task_id="BOUNDED_ROUTING", user_query="mixed question")
     plan = {
-        "atomic_points": [
+        "records": [
             {"id": "P1", "task": "historical fact"},
             {"id": "P2", "task": "current fact"},
         ]
     }
-    state.retrieval.claims.initialize(plan, "mixed question")
+    state.retrieval.evidence_ledger.initialize(plan, "mixed question")
     state.retrieval.record_query(
         "historical query",
         {
@@ -965,12 +1342,12 @@ def test_planner_context_compacts_large_feedback_and_source_bodies():
                 }
             ],
         },
-        task_point_id="P1",
+        task_record_id="P1",
         step=1,
     )
     state.last_feedback = json.dumps(
         {
-            "status": "cross_validation_replan",
+            "status": "evidence_review_replan",
             "message": "choose a different path",
             "previous_request_status": {
                 "attempted": True,
@@ -990,22 +1367,27 @@ def test_planner_context_compacts_large_feedback_and_source_bodies():
 
     assert get_token_count(context) <= 3000
     assert "ROUTING_SOURCE_MARKER" in context
-    assert '"missing_point_id":"P2"' in context
+    assert '"missing_task_record_id":"P2"' in context
     assert '"evidence_needed":"current fact"' in context
     assert "https://noise.example/499" not in context
 
 
-def test_cross_validation_uses_only_bounded_source_evidence(monkeypatch):
+def test_evidence_review_uses_only_bounded_source_evidence(monkeypatch):
     orchestrator = Orchestrator()
     orchestrator.state.task_id = "COMPACT_CROSS_VALIDATION"
+    monkeypatch.setitem(
+        __import__("agent.orchestrator", fromlist=["DATA_PIPELINE"]).DATA_PIPELINE,
+        "evidence_resolution_enabled",
+        False,
+    )
     orchestrator.state.user_query = "mixed historical and current question"
     plan = {
-        "atomic_points": [
+        "records": [
             {"id": "P1", "task": "historical fact"},
             {"id": "P2", "task": "current fact"},
         ]
     }
-    orchestrator.state.retrieval.claims.initialize(plan, orchestrator.state.user_query)
+    orchestrator.state.retrieval.evidence_ledger.initialize(plan, orchestrator.state.user_query)
     orchestrator.state.run_metadata["freshness_policy"] = {
         "as_of": None,
         "now": "2026-08-12T00:00:00+00:00",
@@ -1020,7 +1402,7 @@ def test_cross_validation_uses_only_bounded_source_evidence(monkeypatch):
                 {
                     "title": "large fetched page",
                     "url": "https://example.com/large",
-                    "claim_ids": ["P1"],
+                    "task_record_ids": ["P1"],
                     "content": "retrieved page body",
                     "model_locator_facts": "LOCATOR " + ("exact source span " * 1000),
                     "source_chunks": [
@@ -1032,15 +1414,26 @@ def test_cross_validation_uses_only_bounded_source_evidence(monkeypatch):
                         }
                         for index in range(6)
                     ],
+                    "chunk_candidates": [
+                        {
+                            "chunk_id": "chunk-0",
+                            "chunk_index": 0,
+                            "supported": True,
+                            "source_grounded": True,
+                            "task_record_ids": ["P1"],
+                            "field_ids": [],
+                            "quote": "ORIGINAL_CHUNK_0 " + ("retrieved page body " * 900),
+                        }
+                    ],
                 }
             ],
         },
-        task_point_id="P1",
+        task_record_id="P1",
         step=1,
     )
 
     def reject_full_routing(*_args, **_kwargs):
-        raise AssertionError("full routing snapshot must not enter cross-validation")
+        raise AssertionError("full routing snapshot must not enter evidence-review")
 
     monkeypatch.setattr(
         orchestrator.state.retrieval,
@@ -1049,21 +1442,15 @@ def test_cross_validation_uses_only_bounded_source_evidence(monkeypatch):
     )
     captured = {}
 
-    def review(_query, _plan, evidence_context, routing_context=""):
+    def review(_query, _plan, evidence_context, routing_context="", **_kwargs):
         captured["context"] = evidence_context
         captured["routing_context"] = routing_context
         return {"decision": "replan"}
 
-    orchestrator.planner.cross_validate_research = review
-    orchestrator.planner.select_replan_focus = lambda *_args, **_kwargs: {
-        "schema_version": "rwkv-replan-focus.v1",
-        "task_point_id": "P2",
-        "missing_field": "current fact",
-        "focus_owner": "rwkv",
-    }
+    orchestrator.planner.review_evidence = review
     monkeypatch.setattr("agent.orchestrator.append_task_event", lambda *_args, **_kwargs: None)
 
-    result = orchestrator._cross_validate_research(
+    result = orchestrator._review_evidence(
         orchestrator.state.user_query,
         plan,
         step=2,
@@ -1071,23 +1458,23 @@ def test_cross_validation_uses_only_bounded_source_evidence(monkeypatch):
 
     assert result["decision"] == "replan"
     assert "planner-routing.v1" not in captured["context"]
-    assert captured["routing_context"] == ""
+    assert '"contract":"rwkv.ecra.runtime.retrieval-routing-state"' in captured["routing_context"]
     assert "2026-08-12T00:00:00+00:00" in captured["context"]
     assert "ORIGINAL_CHUNK_0" in captured["context"]
-    assert "ORIGINAL_CHUNK_2" in captured["context"]
+    assert "ORIGINAL_CHUNK_2" not in captured["context"]
     assert get_token_count(captured["context"]) <= 14000
 
 
-def test_cross_validation_persists_only_binary_routing_state(monkeypatch):
+def test_evidence_review_persists_only_binary_routing_state(monkeypatch):
     orchestrator = Orchestrator()
     orchestrator.state.task_id = "CROSS_VALIDATED_SOURCE_BINDING"
     orchestrator.state.user_query = "current release"
     plan = {
-        "atomic_points": [
+        "records": [
             {"id": "P1", "task": "current release", "evidence_needed": ["version"]}
         ]
     }
-    orchestrator.state.retrieval.claims.initialize(plan, orchestrator.state.user_query)
+    orchestrator.state.retrieval.evidence_ledger.initialize(plan, orchestrator.state.user_query)
     orchestrator.state.retrieval.record_query(
         "official current release",
         {
@@ -1107,11 +1494,11 @@ def test_cross_validation_persists_only_binary_routing_state(monkeypatch):
                 }
             ],
         },
-        task_point_id="P1",
+        task_record_id="P1",
         step=1,
     )
-    orchestrator.planner.cross_validate_research = lambda *_args, **_kwargs: {
-        "schema_version": "rwkv-cross-validation.v3",
+    orchestrator.planner.review_evidence = lambda *_args, **_kwargs: {
+        "contract": "rwkv.ecra.runtime.evidence-review",
         "decision": "finish",
         "selected_action": "write_answer",
     }
@@ -1121,7 +1508,7 @@ def test_cross_validation_persists_only_binary_routing_state(monkeypatch):
         lambda *args, **kwargs: emitted_events.append((args, kwargs)),
     )
 
-    review = orchestrator._cross_validate_research(
+    review = orchestrator._review_evidence(
         orchestrator.state.user_query,
         plan,
         step=2,
@@ -1129,11 +1516,11 @@ def test_cross_validation_persists_only_binary_routing_state(monkeypatch):
 
     assert "validated_source_urls" not in review
     assert "evidence_ref_map" not in review
-    assert emitted_events[-1][0][1] == "cross_validation"
-    assert "task_point_status" not in emitted_events[-1][1]
+    assert emitted_events[-1][0][1] == "evidence_review"
+    assert "task_record_status" not in emitted_events[-1][1]
     assert "validated_source_urls" not in orchestrator.state.run_metadata
-    assert orchestrator.state.run_metadata["last_cross_validation"] == {
-        "schema_version": "rwkv-cross-validation.v3",
+    assert orchestrator.state.run_metadata["last_evidence_review"] == {
+        "contract": "rwkv.ecra.runtime.evidence-review",
         "decision": "finish",
         "trigger": "planner_finish",
         "evidence_revision": 1,
@@ -1142,8 +1529,8 @@ def test_cross_validation_persists_only_binary_routing_state(monkeypatch):
 
 def test_evidence_revision_changes_only_for_materially_new_evidence():
     state = AgentState(task_id="EVIDENCE_REVISION", user_query="current release")
-    state.retrieval.claims.initialize(
-        {"atomic_points": [{"id": "P1", "task": "current release"}]},
+    state.retrieval.evidence_ledger.initialize(
+        {"records": [{"id": "P1", "task": "current release"}]},
         state.user_query,
     )
     base_result = {
@@ -1161,10 +1548,10 @@ def test_evidence_revision_changes_only_for_materially_new_evidence():
     }
 
     first = state.retrieval.record_query(
-        "current release", base_result, task_point_id="P1", step=1
+        "current release", base_result, task_record_id="P1", step=1
     )
     duplicate = state.retrieval.record_query(
-        "current release", base_result, task_point_id="P1", step=2
+        "current release", base_result, task_record_id="P1", step=2
     )
     improved_result = json.loads(json.dumps(base_result))
     improved_result["results"][0]["chunk_candidates"] = [
@@ -1177,7 +1564,7 @@ def test_evidence_revision_changes_only_for_materially_new_evidence():
         }
     ]
     improved = state.retrieval.record_query(
-        "official release", improved_result, task_point_id="P1", step=3
+        "official release", improved_result, task_record_id="P1", step=3
     )
 
     assert first["evidence_revision"] == 1
@@ -1235,8 +1622,8 @@ def test_latest_evidence_revision_is_cross_validated_once(monkeypatch):
     orchestrator = Orchestrator()
     orchestrator.state.task_id = "LATEST_REVISION_REVIEW"
     orchestrator.state.user_query = "current release"
-    plan = {"atomic_points": [{"id": "P1", "task": "current release"}]}
-    orchestrator.state.retrieval.claims.initialize(plan, orchestrator.state.user_query)
+    plan = {"records": [{"id": "P1", "task": "current release"}]}
+    orchestrator.state.retrieval.evidence_ledger.initialize(plan, orchestrator.state.user_query)
     orchestrator.state.retrieval.record_query(
         "current release",
         {
@@ -1252,7 +1639,7 @@ def test_latest_evidence_revision_is_cross_validated_once(monkeypatch):
                 }
             ],
         },
-        task_point_id="P1",
+        task_record_id="P1",
         step=1,
     )
     calls = []
@@ -1260,19 +1647,19 @@ def test_latest_evidence_revision_is_cross_validated_once(monkeypatch):
     def review(*_args, **_kwargs):
         calls.append(orchestrator.state.retrieval.evidence_revision)
         return {
-            "schema_version": "rwkv-cross-validation.v3",
+            "contract": "rwkv.ecra.runtime.evidence-review",
             "decision": "finish",
             "missing_point_id": "",
             "evidence_needed": "",
         }
 
-    orchestrator.planner.cross_validate_research = review
+    orchestrator.planner.review_evidence = review
     monkeypatch.setattr("agent.orchestrator.append_task_event", lambda *_args, **_kwargs: None)
 
-    first = orchestrator._cross_validate_if_evidence_changed(
+    first = orchestrator._review_evidence_if_changed(
         orchestrator.state.user_query, plan, step=2
     )
-    repeated = orchestrator._cross_validate_if_evidence_changed(
+    repeated = orchestrator._review_evidence_if_changed(
         orchestrator.state.user_query, plan, step=3
     )
 
@@ -1281,36 +1668,69 @@ def test_latest_evidence_revision_is_cross_validated_once(monkeypatch):
     assert calls == [1]
 
 
+def test_protocol_error_does_not_close_the_evidence_review_revision(monkeypatch):
+    orchestrator = Orchestrator()
+    orchestrator.state.task_id = "RETRY_PROTOCOL_REVIEW"
+    orchestrator.state.user_query = "current release"
+    plan = normalize_task_plan(
+        {"goal": "current release", "records": [{"question": "current release"}]}
+    )
+    orchestrator.state.retrieval.evidence_ledger.initialize(
+        plan, orchestrator.state.user_query
+    )
+    decisions = iter(["protocol_error", "finish"])
+
+    def review(*_args, **_kwargs):
+        decision = next(decisions)
+        return {
+            "contract": "rwkv.ecra.runtime.evidence-review",
+            "decision": decision,
+        }
+
+    orchestrator.planner.review_evidence = review
+    monkeypatch.setattr(
+        "agent.orchestrator.append_task_event", lambda *_args, **_kwargs: None
+    )
+
+    malformed = orchestrator._review_evidence_if_changed(
+        orchestrator.state.user_query, plan, step=1
+    )
+    accepted = orchestrator._review_evidence_if_changed(
+        orchestrator.state.user_query, plan, step=2
+    )
+    repeated = orchestrator._review_evidence_if_changed(
+        orchestrator.state.user_query, plan, step=3
+    )
+
+    assert malformed["decision"] == "protocol_error"
+    assert accepted["decision"] == "finish"
+    assert repeated is None
+
+
 def test_empty_evidence_revision_is_cross_validated_once(monkeypatch):
     orchestrator = Orchestrator()
     orchestrator.state.task_id = "EMPTY_REVISION_REVIEW"
     orchestrator.state.user_query = "current release"
-    plan = {"atomic_points": [{"id": "P1", "task": "current release"}]}
-    orchestrator.state.retrieval.claims.initialize(plan, orchestrator.state.user_query)
+    plan = {"records": [{"id": "P1", "task": "current release"}]}
+    orchestrator.state.retrieval.evidence_ledger.initialize(plan, orchestrator.state.user_query)
     calls = []
 
     def review(*_args, **_kwargs):
         calls.append(orchestrator.state.retrieval.evidence_revision)
         return {
-            "schema_version": "rwkv-cross-validation.v3",
+            "contract": "rwkv.ecra.runtime.evidence-review",
             "decision": "replan",
             "missing_point_id": "P1",
             "evidence_needed": "official current release",
         }
 
-    orchestrator.planner.cross_validate_research = review
-    orchestrator.planner.select_replan_focus = lambda *_args, **_kwargs: {
-        "schema_version": "rwkv-replan-focus.v1",
-        "task_point_id": "P1",
-        "missing_field": "current release",
-        "focus_owner": "rwkv",
-    }
+    orchestrator.planner.review_evidence = review
     monkeypatch.setattr("agent.orchestrator.append_task_event", lambda *_args, **_kwargs: None)
 
-    first = orchestrator._cross_validate_if_evidence_changed(
+    first = orchestrator._review_evidence_if_changed(
         orchestrator.state.user_query, plan, step=1
     )
-    repeated = orchestrator._cross_validate_if_evidence_changed(
+    repeated = orchestrator._review_evidence_if_changed(
         orchestrator.state.user_query, plan, step=2
     )
 
@@ -1319,42 +1739,42 @@ def test_empty_evidence_revision_is_cross_validated_once(monkeypatch):
     assert calls == [0]
 
 
-def test_new_unique_frozen_route_reopens_cross_validation_once(monkeypatch):
+def test_route_churn_does_not_reopen_an_unchanged_evidence_revision(monkeypatch):
     orchestrator = Orchestrator()
     orchestrator.state.task_id = "ROUTING_REVISION_REVIEW"
     orchestrator.state.user_query = "current release"
-    plan = {"atomic_points": [{"id": "P1", "task": "current release"}]}
-    orchestrator.state.retrieval.claims.initialize(plan, orchestrator.state.user_query)
+    plan = {"records": [{"id": "P1", "task": "current release"}]}
+    orchestrator.state.retrieval.evidence_ledger.initialize(plan, orchestrator.state.user_query)
     calls: list[str] = []
 
-    def review(_query, _plan, _evidence_context, routing_context=""):
+    def review(_query, _plan, _evidence_context, routing_context="", **_kwargs):
         calls.append(routing_context)
         return {
-            "schema_version": "rwkv-cross-validation.v3",
+            "contract": "rwkv.ecra.runtime.evidence-review",
             "decision": "finish",
         }
 
-    orchestrator.planner.cross_validate_research = review
+    orchestrator.planner.review_evidence = review
     monkeypatch.setattr("agent.orchestrator.append_task_event", lambda *_args, **_kwargs: None)
 
-    initial = orchestrator._cross_validate_if_evidence_changed(
+    initial = orchestrator._review_evidence_if_changed(
         orchestrator.state.user_query, plan, step=1
     )
     orchestrator.state.retrieval.freeze_path(
         "current release official",
         action="web_search",
         arguments={"query": "current release official"},
-        task_point_id="P1",
+        task_record_id="P1",
         step=2,
         reason="exact_duplicate_request",
     )
-    route_changed = orchestrator._cross_validate_if_evidence_changed(
+    route_changed = orchestrator._review_evidence_if_changed(
         orchestrator.state.user_query,
         plan,
         step=3,
         trigger="duplicate_resource_boundary",
     )
-    repeated = orchestrator._cross_validate_if_evidence_changed(
+    repeated = orchestrator._review_evidence_if_changed(
         orchestrator.state.user_query,
         plan,
         step=4,
@@ -1362,10 +1782,9 @@ def test_new_unique_frozen_route_reopens_cross_validation_once(monkeypatch):
     )
 
     assert initial["decision"] == "finish"
-    assert route_changed["decision"] == "finish"
+    assert route_changed is None
     assert repeated is None
-    assert calls[0] == ""
-    assert '"frozen_paths":[' in calls[1]
+    assert len(calls) == 1
 
 
 def test_freeze_path_counts_repeats_without_creating_false_route_revisions():
@@ -1374,7 +1793,7 @@ def test_freeze_path_counts_repeats_without_creating_false_route_revisions():
         "same query",
         action="web_search",
         arguments={"query": "same query"},
-        task_point_id="P1",
+        task_record_id="P1",
         step=2,
         reason="exact_duplicate_request",
     )
@@ -1382,7 +1801,7 @@ def test_freeze_path_counts_repeats_without_creating_false_route_revisions():
         "same query",
         action="web_search",
         arguments={"query": "same query"},
-        task_point_id="P1",
+        task_record_id="P1",
         step=5,
         reason="exact_duplicate_request",
     )
@@ -1392,6 +1811,148 @@ def test_freeze_path_counts_repeats_without_creating_false_route_revisions():
     assert state.retrieval.frozen_paths[0]["first_step"] == 2
     assert state.retrieval.frozen_paths[0]["last_step"] == 5
     assert state.retrieval.frozen_paths[0]["blocked_count"] == 2
+
+
+def test_planner_route_identity_preserves_same_query_connector_operations():
+    state = AgentState(task_id="ROUTE_OPERATIONS", user_query="weather and alerts")
+    for step, operation in enumerate(("weather_current", "weather_alerts"), start=1):
+        arguments = {"operation": operation, "query": "Shanghai"}
+        state.retrieval.record_query(
+            "Shanghai",
+            {"status": "ok", "results": []},
+            step=step,
+            task_record_id="P1",
+            action="connector_lookup",
+            arguments=arguments,
+        )
+
+    snapshot = state.retrieval.planner_routing_snapshot()
+    assert [row["operation"] for row in snapshot["queries"]] == [
+        "weather_current",
+        "weather_alerts",
+    ]
+    assert len({row["route_id"] for row in snapshot["queries"]}) == 2
+    assert [row["arguments"]["operation"] for row in snapshot["queries"]] == [
+        "weather_current",
+        "weather_alerts",
+    ]
+
+    projection = json.loads(
+        Planner._replan_environment_projection(state.to_retrieval_context())
+    )
+    routes = projection["retrieval_ledger"]["route_history"]
+    assert len(routes) == 2
+    assert [row["operation"] for row in routes] == [
+        "weather_current",
+        "weather_alerts",
+    ]
+
+
+def test_connector_runtime_unavailability_is_visible_to_next_planner_request():
+    state = AgentState(task_id="CONNECTOR_RUNTIME", user_query="latest release")
+    state.retrieval.record_query(
+        "owner/repository",
+        {
+            "status": "error",
+            "error_class": "rate_limited",
+            "connector": "github",
+            "connector_runtime": {
+                "provider": "connector.github",
+                "operation": "github_release",
+                "status": "rate_limited",
+                "available": False,
+                "cooldown_seconds": 300,
+                "error_class": "provider_error",
+                "message": "403 rate limit exceeded",
+            },
+            "results": [],
+        },
+        step=3,
+        task_record_id="P1",
+        action="connector_lookup",
+        arguments={
+            "operation": "github_release",
+            "query": "owner/repository",
+        },
+    )
+
+    runtime_rows = state.retrieval.planner_routing_snapshot()["connector_runtime"]
+    assert len(runtime_rows) == 1
+    assert runtime_rows[0]["provider"] == "connector.github"
+    assert runtime_rows[0]["status"] == "rate_limited"
+    assert runtime_rows[0]["available"] is False
+    assert runtime_rows[0]["cooldown_active"] is True
+    assert 1 <= runtime_rows[0]["retry_after_seconds"] <= 300
+
+    body = Planner._replan_environment_projection(state.to_retrieval_context())
+    projection = json.loads(body)
+    visible = projection["retrieval_ledger"]["connector_runtime"][0]
+    assert visible["provider"] == "connector.github"
+    assert visible["status"] == "rate_limited"
+    assert visible["available"] is False
+    assert visible["cooldown_active"] is True
+
+    state.retrieval.reset()
+    assert state.retrieval.planner_routing_snapshot()["connector_runtime"] == []
+
+
+def test_failed_route_preserves_tool_error_semantics_for_replan():
+    state = AgentState(task_id="ROUTE_ERROR", user_query="latest game release")
+    state.retrieval.record_query(
+        "Warframe latest major update official name and release date",
+        {
+            "status": "error",
+            "error_class": "invalid_repository_identifier",
+            "message": (
+                "github_release requires an explicit owner/repository identifier "
+                "or GitHub repository URL"
+            ),
+            "results": [],
+        },
+        step=1,
+        task_record_id="P1",
+        action="connector_lookup",
+        arguments={
+            "operation": "github_release",
+            "query": "Warframe latest major update official name and release date",
+        },
+    )
+
+    snapshot = state.retrieval.planner_routing_snapshot()
+    assert snapshot["queries"][0]["error_class"] == "invalid_repository_identifier"
+    assert "explicit owner/repository" in snapshot["queries"][0]["error_message"]
+
+    projection = json.loads(
+        Planner._replan_environment_projection(state.to_retrieval_context())
+    )
+    route = projection["retrieval_ledger"]["route_history"][0]
+    assert route["error_class"] == "invalid_repository_identifier"
+    assert "explicit owner/repository" in route["error_message"]
+
+
+def test_frozen_route_projection_keeps_operation_and_bounded_arguments():
+    state = AgentState(task_id="FROZEN_ARGUMENTS", user_query="weather alerts")
+    frozen = state.retrieval.freeze_path(
+        "Shanghai",
+        action="connector_lookup",
+        arguments={
+            "operation": "weather_alerts",
+            "query": "Shanghai",
+            "region": "CN-SH",
+        },
+        task_record_id="P2",
+        step=4,
+        reason="exact_duplicate_request",
+    )
+
+    projected = state.retrieval.planner_routing_snapshot()["frozen_paths"][0]
+    assert projected["route_id"] == frozen["route_id"]
+    assert projected["operation"] == "weather_alerts"
+    assert projected["arguments"] == {
+        "operation": "weather_alerts",
+        "query": "Shanghai",
+        "region": "CN-SH",
+    }
 
 
 def test_runtime_has_no_answer_quality_status_classifier():
@@ -1418,8 +1979,11 @@ def test_rwkv_answer_is_identical_in_return_event_and_report():
     class ExactRWKV:
         provider = "local_13b"
 
-        def text_completion(self, _prompt, max_tokens=0):
+        def text_completion(self, _prompt, max_tokens=0, stop=None):
             assert max_tokens > 0
+            from utils.rwkv_prompt import FINAL_ANSWER_STOP_SUFFIXES
+
+            assert stop == FINAL_ANSWER_STOP_SUFFIXES
             return SimpleNamespace(content=output)
 
     with tempfile.TemporaryDirectory() as directory:

@@ -315,7 +315,7 @@ class ChunkContractTests(unittest.TestCase):
                             {
                                 "chunk_id": "chunk-1",
                                 "supported": True,
-                                "claim_ids": ["P1"],
+                                "task_record_ids": ["P1"],
                                 "facts": ["release date is 2025-04-16"],
                                 "quote": "The release date is 2025-04-16.",
                             }

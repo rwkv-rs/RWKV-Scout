@@ -9,7 +9,7 @@
     "claim_count": 3,
     "oracle_event_count": 5,
     "oracle_tool_call_count": 1,
-    "oracle_cross_validation_count": 1,
+    "oracle_evidence_assessment_count": 1,
     "instruction_tokens": 26,
     "answer_tokens": 61,
     "contamination": {

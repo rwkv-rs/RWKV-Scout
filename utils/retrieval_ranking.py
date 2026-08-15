@@ -24,7 +24,28 @@ def rrf_fuse(
     limit = max(1, int(pool_limit or 48))
     merged: dict[str, dict[str, Any]] = {}
     for provider_index, result in enumerate(provider_results, start=1):
-        provider = str(result.get("provider") or f"provider_{provider_index}")
+        # One backend may return independent rankings for several RWKV-authored
+        # query lanes.  Treat each lane as its own RRF list while retaining the
+        # physical provider name in the surrounding result for audit/UI use.
+        ranking_stream = str(
+            result.get("ranking_stream")
+            or result.get("provider")
+            or f"provider_{provider_index}"
+        )
+        physical_provider = str(
+            result.get("provider") or f"provider_{provider_index}"
+        )
+        result_query = {
+            "query_id": str(result.get("retrieval_query_id") or ""),
+            "task_record_id": str(result.get("retrieval_query_task_record_id") or ""),
+            "intent": str(result.get("retrieval_query_intent") or ""),
+            "query": str(
+                result.get("retrieval_query_text") or result.get("query") or ""
+            )[:500],
+        }
+        result_query = {
+            key: value for key, value in result_query.items() if str(value or "").strip()
+        }
         for rank, raw in enumerate(result.get("results") or [], start=1):
             if not isinstance(raw, Mapping):
                 continue
@@ -40,13 +61,41 @@ def rrf_fuse(
                     "snippet": str(raw.get("snippet") or "")[:1000],
                     "provider_ranks": {},
                     "discovery_providers": [],
+                    "ranking_streams": [],
+                    "discovery_queries": [],
                 },
             )
-            previous = row["provider_ranks"].get(provider)
+            previous = row["provider_ranks"].get(ranking_stream)
             if previous is None or rank < previous:
-                row["provider_ranks"][provider] = rank
-            if provider not in row["discovery_providers"]:
-                row["discovery_providers"].append(provider)
+                row["provider_ranks"][ranking_stream] = rank
+            if ranking_stream not in row["ranking_streams"]:
+                row["ranking_streams"].append(ranking_stream)
+            if physical_provider not in row["discovery_providers"]:
+                row["discovery_providers"].append(physical_provider)
+            raw_queries = raw.get("discovery_queries") or []
+            if isinstance(raw_queries, Mapping):
+                raw_queries = [raw_queries]
+            query_rows = [
+                dict(value) for value in raw_queries if isinstance(value, Mapping)
+            ]
+            if result_query:
+                query_rows.append(result_query)
+            seen_queries = {
+                (
+                    str(value.get("query_id") or ""),
+                    str(value.get("query") or "").casefold(),
+                )
+                for value in row["discovery_queries"]
+            }
+            for query_row in query_rows:
+                identity_row = (
+                    str(query_row.get("query_id") or ""),
+                    str(query_row.get("query") or "").casefold(),
+                )
+                if identity_row in seen_queries:
+                    continue
+                seen_queries.add(identity_row)
+                row["discovery_queries"].append(query_row)
             if len(str(raw.get("snippet") or "")) > len(str(row.get("snippet") or "")):
                 row["snippet"] = str(raw.get("snippet") or "")[:1000]
             if not str(row.get("title") or "").strip() and raw.get("title"):

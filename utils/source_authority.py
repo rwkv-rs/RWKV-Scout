@@ -11,7 +11,7 @@ import re
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-from agent.task_plan_contract import point_question, task_points
+from agent.task_plan_contract import record_question, record_id, task_records
 
 
 _NON_AUTHORITY_HOSTS = {
@@ -131,16 +131,16 @@ def explicit_domains(value: Any) -> list[str]:
     return output
 
 
-def required_domains_for_task_point(
+def required_domains_for_task_record(
     task_plan: Mapping[str, Any] | None,
-    task_point_id: str = "",
+    task_record_id: str = "",
     *,
     fallback_query: str = "",
 ) -> list[str]:
-    """Narrow a request-wide official-domain set to one atomic claim.
+    """Narrow a request-wide official-domain set to one atomic task_record.
 
     A comparison can legitimately require several first-party domains.  The
-    retrieval route must not silently send every claim to the first domain in
+    retrieval route must not silently send every task_record to the first domain in
     that global list.  Explicit point metadata wins; otherwise domains are
     selected only when their entity label has an unambiguous lexical match in
     the active point.  If no safe match exists the full set is returned, which
@@ -161,18 +161,18 @@ def required_domains_for_task_point(
     if len(global_domains) <= 1:
         return global_domains
 
-    point_id = str(task_point_id or "").strip()
+    task_record_id = str(task_record_id or "").strip()
     point = next(
         (
             value
-            for value in task_points(plan)
+            for value in task_records(plan)
             if isinstance(value, Mapping)
-            and str(value.get("id") or "").strip() == point_id
+            and record_id(value) == task_record_id
         ),
         None,
     )
     if isinstance(point, Mapping):
-        descriptor = point_question(point)
+        descriptor = record_question(point)
     else:
         descriptor = str(fallback_query or "").strip()
     if not descriptor:
@@ -241,7 +241,7 @@ def infer_candidate_authority_domains(
 
     This is a bootstrap for an official-source task whose plan omitted a
     domain.  It does not determine truth.  The selected host is subsequently
-    crawled and its retained page spans still pass the normal claim gates.
+    crawled and its retained page spans still pass the normal task_record gates.
     """
 
     entities = _entity_tokens(query)
@@ -445,6 +445,6 @@ __all__ = [
     "explicit_domains",
     "hostname",
     "infer_candidate_authority_domains",
-    "required_domains_for_task_point",
+    "required_domains_for_task_record",
     "resolve_source_policy",
 ]

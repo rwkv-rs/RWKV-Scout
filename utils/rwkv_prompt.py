@@ -28,11 +28,17 @@ FLOWER_DELIMITER = "✿"
 JSON_CALL_STOP_SUFFIXES = (
     "\n```",
     "\nUser:",
-    "User:",
     "\nSystem:",
-    "System:",
     "\nAssistant:",
-    "Assistant:",
+)
+
+# Final prose is never repaired or trimmed after generation. Stop only when
+# the model starts a new transcript role, preserving Markdown/code fences and
+# every user-facing token before that protocol boundary.
+FINAL_ANSWER_STOP_SUFFIXES = (
+    "\nUser:",
+    "\nSystem:",
+    "\nAssistant:",
 )
 
 

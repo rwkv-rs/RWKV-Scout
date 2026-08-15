@@ -187,11 +187,12 @@ class ExperimentPipelineTests(unittest.TestCase):
             )
             self.assertFalse(forbidden_agent_hints.intersection(row), row)
 
-    def test_task_plan_merges_duplicate_factual_points_without_keeping_gates(self):
+    def test_task_plan_preserves_record_count_and_factual_fields_without_gates(self):
         plan = Planner._validate_task_plan(
             {
+                "contract": "rwkv.ecra.runtime.task-plan",
                 "goal": "verify one fact",
-                "atomic_points": [
+                "records": [
                     {
                         "id": "P1",
                         "task": "Find the fact",
@@ -209,14 +210,27 @@ class ExperimentPipelineTests(unittest.TestCase):
                 ],
             }
         )
-        self.assertEqual(len(plan["atomic_points"]), 1)
-        point = plan["atomic_points"][0]
-        self.assertEqual(point["id"], "P1")
-        self.assertEqual(point["source_ids"], ["P1", "P2"])
-        self.assertEqual(point["question"], "Find the fact")
-        self.assertEqual(point["fields"], [])
-        self.assertNotIn("evidence_needed", point)
-        self.assertNotIn("acceptance_criteria", point)
+        self.assertEqual(plan["contract"], "rwkv.ecra.runtime.task-plan")
+        self.assertEqual(len(plan["records"]), 2)
+        first, second = plan["records"]
+        self.assertEqual(first["record_id"], "P1")
+        self.assertEqual(second["record_id"], "P2")
+        self.assertEqual(first["question"], "Find the fact — Verify the fact")
+        self.assertEqual(second["question"], "find the fact — verify the fact")
+        self.assertEqual(
+            first["fields"],
+            [{"field_id": "P1:F1", "name": "official page"}],
+        )
+        self.assertEqual(
+            second["fields"],
+            [
+                {"field_id": "P2:F1", "name": "archived page"},
+                {"field_id": "P2:F2", "name": "official page"},
+            ],
+        )
+        for record in plan["records"]:
+            self.assertNotIn("evidence_needed", record)
+            self.assertNotIn("acceptance_criteria", record)
 
     def test_routing_observation_keeps_candidate_urls_before_evidence_rows(self):
         observation = Planner._compact_observation(
@@ -276,13 +290,10 @@ class ExperimentPipelineTests(unittest.TestCase):
             constraints={"strategy_config": {"context_source_count": 3}},
             query="requested fact",
         )
-        self.assertEqual([item["ref_id"] for item in context["selected_evidence"]], ["S1", "S2", "S3"])
+        self.assertEqual(context["selected_evidence"], [])
         self.assertLessEqual(context["context_tokens"], 10000)
-        self.assertIn(
-            "[S3] UNBOUND SOURCE EXCERPT: Source 3",
-            context["text"],
-        )
-        self.assertEqual(context["usable_evidence_count"], 3)
+        self.assertNotIn("UNBOUND SOURCE EXCERPT", context["text"])
+        self.assertEqual(context["usable_evidence_count"], 0)
         self.assertEqual(
             sum(item["chunk_count"] for item in context["selected_evidence"]),
             context["chunk_count"],
@@ -320,7 +331,7 @@ class ExperimentPipelineTests(unittest.TestCase):
             },
             constraints={"strategy_config": {"context_source_count": 1}},
         )
-        self.assertEqual(context["selected_evidence"][0]["url"], "https://nginx.org/en/")
+        self.assertEqual(context["selected_evidence"], [])
 
     def test_duplicate_source_rows_do_not_consume_context_slots(self):
         body = "The primary source states the release date is 2026-07-30. " * 12
@@ -358,11 +369,8 @@ class ExperimentPipelineTests(unittest.TestCase):
             constraints={"strategy_config": {"context_source_count": 3}},
             query="release date",
         )
-        self.assertEqual(context["duplicate_source_count"], 1)
-        self.assertEqual(
-            [item["url"] for item in context["selected_evidence"]],
-            ["https://example.org/fact/#section", "https://example.net/confirmation"],
-        )
+        self.assertEqual(context["duplicate_source_count"], 0)
+        self.assertEqual(context["selected_evidence"], [])
 
     def test_configured_source_count_is_only_a_resource_cap(self):
         relevant = "The WebSocket reverse proxy uses the Upgrade header. " * 8
@@ -392,10 +400,8 @@ class ExperimentPipelineTests(unittest.TestCase):
             constraints={"strategy_config": {"context_source_count": 2}},
             query="WebSocket reverse proxy Upgrade header",
         )
-        self.assertEqual(
-            [item["url"] for item in context["selected_evidence"]],
-            ["https://example.org/websocket", "https://example.org/downloads"],
-        )
+        self.assertEqual(context["selected_evidence"], [])
+        self.assertNotIn("unbound_fallback_source_limit", context["context_stats"])
 
     def test_experiment_model_contract_is_the_active_rwkv_13b_profile(self):
         profile = get_experiment_model_config()
@@ -848,9 +854,9 @@ class ExperimentPipelineTests(unittest.TestCase):
             orchestrator.state.user_query = "find stations"
             orchestrator.state.run_metadata = {"max_tool_steps": 3}
             plan = {
-                "schema_version": "task_plan.v1",
+                "contract": "rwkv.ecra.runtime.task-plan",
                 "goal": "find stations",
-                "atomic_points": [
+                "records": [
                     {
                         "id": "P1",
                         "task": "find stations",
@@ -922,7 +928,7 @@ class ExperimentPipelineTests(unittest.TestCase):
                 orchestrator.planner.rebuild_session_after_review = (
                     lambda *_args, **_kwargs: None
                 )
-                orchestrator._cross_validate_research = lambda *_args, **_kwargs: {
+                orchestrator._review_evidence = lambda *_args, **_kwargs: {
                     "decision": "replan",
                     "missing_point_id": "P1",
                     "evidence_needed": "station list",
@@ -934,13 +940,13 @@ class ExperimentPipelineTests(unittest.TestCase):
             # creates a replacement query of its own.
             self.assertEqual([item[0] for item in executed], ["web_search"])
             self.assertEqual(len(synthesis_calls), 1)
-            # A duplicate boundary now gives the RWKV cross-validator one
-            # bounded opportunity to request a genuinely different plan.  If
-            # the replanned session still repeats the same route, the global
-            # step budget remains the final deterministic safety boundary.
+            # A duplicate boundary gives the RWKV cross-validator one bounded
+            # opportunity to request a new Planner session. The rebuilt RWKV
+            # Planner may then finish from unchanged retained evidence; the
+            # controller does not override that second model decision.
             self.assertEqual(
                 synthesis_calls[0]["termination_reason"],
-                "resource_max_steps",
+                "resource_duplicate_limit",
             )
 
     def test_runtime_gate_is_persisted_and_released(self):
@@ -1037,6 +1043,9 @@ class ExperimentPipelineTests(unittest.TestCase):
                             "top_k": 50,
                             "top_p": 0.35,
                         },
+                        request_max_tokens=640,
+                        finish_reason="stop",
+                        stop=["\nUser:", "\nAssistant:"],
                     )
                     trace = _trace_summary("SAMPLING_TRACE")
             finally:
@@ -1045,6 +1054,9 @@ class ExperimentPipelineTests(unittest.TestCase):
             self.assertEqual(call["request_stage"], "planner_replan")
             self.assertEqual(call["sampling_policy_reason"], "repeated_strategy_failure")
             self.assertEqual(call["temperature"], 0.35)
+            self.assertEqual(call["request_max_tokens"], 640)
+            self.assertEqual(call["finish_reason"], "stop")
+            self.assertEqual(call["stop"], ["\nUser:", "\nAssistant:"])
             self.assertEqual(
                 call["sampling_parameters"],
                 {"temperature": 0.35, "top_k": 50, "top_p": 0.35},
@@ -1056,8 +1068,9 @@ class ExperimentPipelineTests(unittest.TestCase):
         self.assertTrue(validate_risk_answer("仅供参考，请咨询专业人员。", policy)["valid"])
 
         class FakeLLM:
-            def text_completion(self, prompt, max_tokens=384):
+            def text_completion(self, prompt, max_tokens=384, stop=None):
                 self.prompt = prompt
+                self.stop = stop
                 return type("Response", (), {"content": "仅供参考，请咨询专业人员。"})()
 
         llm = FakeLLM()

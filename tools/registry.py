@@ -57,7 +57,7 @@ class ToolRegistry:
         "agentic_tool_loop",
         "run_metadata",
         "task_plan",
-        "task_point_id",
+        "task_record_id",
     }
 
     @classmethod
@@ -290,6 +290,7 @@ class ToolRegistry:
                     "arguments": meta.get("argument_schema") or {"type": "object", "additionalProperties": False},
                     "plugin": meta.get("plugin", ""),
                     "capabilities": list(meta.get("capabilities") or ()),
+                    "accepted_object_types": meta.get("accepted_object_types") or {},
                     "retrieval_role": meta.get("retrieval_role", ""),
                     "phase": meta.get("phase", ""),
                     "category": meta.get("category", "internal"),
@@ -312,6 +313,7 @@ class ToolRegistry:
         category: str = "internal",
         description: str = "",
         argument_schema: dict[str, Any] | None = None,
+        accepted_object_types: dict[str, Iterable[str]] | Iterable[str] = (),
     ):
         def decorator(func: Callable):
             model_description = str(description or signature or "").strip()
@@ -360,6 +362,21 @@ class ToolRegistry:
                 if isinstance(argument_schema, dict) and argument_schema
                 else inferred_argument_schema
             )
+            if isinstance(accepted_object_types, dict):
+                declared_object_types: dict[str, list[str]] | list[str] = {
+                    str(operation): [
+                        str(value)
+                        for value in values
+                        if str(value).strip()
+                    ]
+                    for operation, values in accepted_object_types.items()
+                }
+            else:
+                declared_object_types = [
+                    str(value)
+                    for value in accepted_object_types
+                    if str(value).strip()
+                ]
             cls._tools[name] = {
                 "name": name,
                 "func": func,
@@ -375,6 +392,7 @@ class ToolRegistry:
                 "allowed_args": tuple(allowed),
                 "required_args": tuple(required),
                 "argument_schema": declared_argument_schema,
+                "accepted_object_types": declared_object_types,
             }
             return func
         return decorator

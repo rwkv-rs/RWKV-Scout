@@ -9,9 +9,9 @@ def _case() -> dict:
     output = "<think>保留原始过程</think>\n精确输出"
     chunk_text = "CUDA 11.8\npip3 install torch --index-url https://example/cu118"
     ledger = {
-        "schema_version": "claim-ledger.v1",
-        "claim_count": 1,
-        "claims": [{"claim_id": "P1", "status": "supported"}],
+        "schema_version": "task_record-ledger.v1",
+        "task_record_count": 1,
+        "task_records": [{"task_record_id": "P1", "status": "supported"}],
     }
     return {
         "case_id": "case/exact",
@@ -43,7 +43,7 @@ def _case() -> dict:
                 {
                     "seq": 3,
                     "type": "synthesis",
-                    "claim_ledger": ledger,
+                    "evidence_ledger": ledger,
                     "context_text": chunk_text,
                     "selected_evidence": [
                         {
@@ -71,7 +71,7 @@ def test_case_audit_preserves_exact_model_and_chunk_payloads():
     assert model_event["output"] == case["trace"]["events"][0]["output"]
     assert retrieval_event["chunk"]["text"] == case["trace"]["events"][1]["chunk"]["text"]
     assert audit["evidence_chain"]["final_context_text"] == case["trace"]["events"][2]["context_text"]
-    assert audit["evidence_chain"]["claim_ledger"] == case["trace"]["events"][2]["claim_ledger"]
+    assert audit["evidence_chain"]["evidence_ledger"] == case["trace"]["events"][2]["evidence_ledger"]
     assert audit["integrity"]["all_events_accounted_for"] is True
     assert audit["integrity"]["grouped_event_count"] == 4
     assert audit["integrity"]["model_calls_with_nonempty_output"] == 1
@@ -89,7 +89,7 @@ def test_case_audit_counts_one_logical_query_for_decision_and_execution_events()
             "phase": "DISCOVERY",
             "action": "web_search",
             "args": {"query": "site:nodejs.org fetch stable"},
-            "task_point_id": "P1",
+            "task_record_id": "P1",
         },
         {
             "seq": 11,

@@ -52,7 +52,7 @@ def test_merge_deduplicates_same_source_before_writer_context():
     assert merged["results"][0]["candidate_queries"] == ["first", "second"]
 
 
-def test_context_source_count_is_a_resource_limit_not_answer_rule():
+def test_context_source_count_cannot_admit_unbound_raw_pages():
     context = build_evidence_context(
         {
             "results": [
@@ -62,7 +62,8 @@ def test_context_source_count_is_a_resource_limit_not_answer_rule():
         },
         {"strategy_config": {"context_source_count": 1}},
     )
-    assert len(context["selected_evidence"]) == 1
+    assert context["selected_evidence"] == []
+    assert "unbound_fallback_source_limit" not in context["context_stats"]
 
 
 def test_prompt_variant_cannot_rewrite_rwkv_answer():

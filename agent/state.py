@@ -6,11 +6,18 @@ import os
 import hashlib
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Set
 
-from agent.claim_ledger import ClaimLedger
+from agent.evidence_ledger import EvidenceLedger
+from agent.runtime_contracts import (
+    EVIDENCE_RECORD_SET_CONTRACT,
+    PLANNER_EVIDENCE_CONTRACT,
+    RETRIEVAL_INFRASTRUCTURE_CONTRACT,
+    RETRIEVAL_ROUTING_CONTRACT,
+)
 from agent.retrieval_object_contract import (
     merge_candidate_observations,
     merge_mapping_rows,
@@ -18,7 +25,14 @@ from agent.retrieval_object_contract import (
 from config import get_llm_context_length
 from utils.chunker import get_token_count
 from utils.context_budget import routing_observation_tokens
-from utils.retrieval_ledger import RetrievalLedger, canonical_url
+from utils.retrieval_ledger import (
+    RetrievalLedger,
+    bounded_request_arguments,
+    canonical_url,
+    request_key,
+    result_error_observation,
+    route_id,
+)
 
 
 _SOURCE_BODY_FIELDS = (
@@ -93,12 +107,12 @@ class RetrievalEpisodeState:
     The planner, orchestrator, validator and final synthesizer must observe
     the same evidence ledger.  Keeping these collections on the task state
     prevents a replan or phase transition from creating a fresh local view
-    and losing the already collected page/point bindings.
+    and losing the already collected page/task-record bindings.
     """
 
     rounds: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
-    rounds_by_point: Dict[str, list[tuple[str, dict[str, Any]]]] = field(default_factory=dict)
-    point_state: Dict[str, dict[str, Any]] = field(default_factory=dict)
+    rounds_by_task_record: Dict[str, list[tuple[str, dict[str, Any]]]] = field(default_factory=dict)
+    task_record_state: Dict[str, dict[str, Any]] = field(default_factory=dict)
     last_discovery_results: list[dict[str, Any]] = field(default_factory=list)
     last_retrieval_failure: dict[str, Any] | None = None
     # The evidence store is task-scoped and shared by the planner, tools and
@@ -106,7 +120,7 @@ class RetrievalEpisodeState:
     # transcript: a follow-up search adds to this store instead of creating a
     # second recovery conversation.
     sources: Dict[str, dict[str, Any]] = field(default_factory=dict)
-    sources_by_claim: Dict[str, Dict[str, dict[str, Any]]] = field(default_factory=dict)
+    sources_by_task_record: Dict[str, Dict[str, dict[str, Any]]] = field(default_factory=dict)
     deterministic_results: list[dict[str, Any]] = field(default_factory=list)
     attempted_urls: Set[str] = field(default_factory=set)
     url_attempt_counts: Dict[str, int] = field(default_factory=dict)
@@ -114,10 +128,11 @@ class RetrievalEpisodeState:
     coverage: Dict[str, dict[str, Any]] = field(default_factory=dict)
     frozen_paths: list[dict[str, Any]] = field(default_factory=list)
     infrastructure_events: list[dict[str, Any]] = field(default_factory=list)
+    connector_runtime: Dict[str, dict[str, Any]] = field(default_factory=dict)
     replan_count: int = 0
     evidence_revision: int = 0
     progress: RetrievalLedger = field(default_factory=RetrievalLedger)
-    claims: ClaimLedger = field(default_factory=ClaimLedger)
+    evidence_ledger: EvidenceLedger = field(default_factory=EvidenceLedger)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     @staticmethod
@@ -137,8 +152,10 @@ class RetrievalEpisodeState:
         result: dict[str, Any],
         *,
         step: int = 0,
-        task_point_id: str = "",
+        task_record_id: str = "",
         strategy: str = "",
+        action: str = "",
+        arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Merge one research round into the shared evidence store."""
 
@@ -146,17 +163,97 @@ class RetrievalEpisodeState:
         added: list[str] = []
         material_changed = False
         canonical_result_items: dict[str, dict[str, Any]] = {}
+        route_arguments = dict(arguments or {})
+        route_action = str(action or "").strip()
+        route_operation = str(route_arguments.get("operation") or "").strip()
+        route_request_key = request_key(route_action, route_arguments)
+        route_identity = route_id(
+            route_action,
+            route_arguments,
+            task_record_id=str(task_record_id or ""),
+        )
+        error_observation = result_error_observation(result)
         with self._lock:
             self.query_history.append(
                 {
                     "query": query_text,
+                    "action": route_action,
+                    "operation": route_operation,
+                    "arguments": route_arguments,
+                    "request_key": route_request_key,
+                    "route_id": route_identity,
                     "step": int(step or 0),
                     "status": str(result.get("status") or ""),
+                    "error_class": error_observation["error_class"],
+                    "error_message": error_observation["error_message"],
                     "new_source_count": 0,
-                    "task_point_id": str(task_point_id or ""),
+                    "task_record_id": str(task_record_id or ""),
                     "strategy": str(strategy or ""),
                 }
             )
+            connector_runtime = result.get("connector_runtime")
+            if route_action == "connector_lookup" and isinstance(
+                connector_runtime, dict
+            ):
+                runtime_record = {
+                    "provider": str(
+                        connector_runtime.get("provider")
+                        or result.get("provider")
+                        or f"connector.{result.get('connector') or 'unknown'}"
+                    )[:160],
+                    "operation": str(
+                        connector_runtime.get("operation") or route_operation
+                    )[:120],
+                    "status": str(
+                        connector_runtime.get("status") or "available"
+                    )[:80],
+                    "available": bool(
+                        connector_runtime.get("available", True)
+                    ),
+                    "cooldown_seconds": max(
+                        0, int(connector_runtime.get("cooldown_seconds") or 0)
+                    ),
+                    "error_class": str(
+                        connector_runtime.get("error_class")
+                        or result.get("error_class")
+                        or ""
+                    )[:160],
+                    "message": str(
+                        connector_runtime.get("message")
+                        or result.get("message")
+                        or ""
+                    )[:500],
+                    "observed_step": int(step or 0),
+                }
+                runtime_record["cooldown_until_monotonic"] = (
+                    time.monotonic() + runtime_record["cooldown_seconds"]
+                    if not runtime_record["available"]
+                    else 0.0
+                )
+                provider_key = runtime_record["provider"].casefold()
+                self.connector_runtime[provider_key] = runtime_record
+                self.query_history[-1]["connector_runtime"] = {
+                    key: value
+                    for key, value in runtime_record.items()
+                    if key != "cooldown_until_monotonic"
+                }
+            retrieval_query_plan = result.get("retrieval_query_plan") or {}
+            if isinstance(retrieval_query_plan, dict):
+                executed_queries = [
+                    {
+                        "query_id": str(row.get("query_id") or "")[:40],
+                        "task_record_id": str(row.get("task_record_id") or "")[:120],
+                        "intent": str(row.get("intent") or "")[:120],
+                        "query": str(row.get("query") or "")[:500],
+                    }
+                    for row in retrieval_query_plan.get("queries") or []
+                    if isinstance(row, dict) and str(row.get("query") or "").strip()
+                ][:6]
+                if executed_queries:
+                    self.query_history[-1]["executed_queries"] = executed_queries
+                    self.query_history[-1]["retrieval_query_plan_status"] = str(
+                        retrieval_query_plan.get("status") or ""
+                    )[:80]
             extraction = result.get("model_extraction") or {}
             if isinstance(extraction, dict):
                 unresolved_chunks = int(extraction.get("unresolved_chunk_count") or 0)
@@ -170,7 +267,7 @@ class RetrievalEpisodeState:
                             "kind": "model_extraction_incomplete",
                             "query": query_text,
                             "step": int(step or 0),
-                            "task_point_id": str(task_point_id or ""),
+                            "task_record_id": str(task_record_id or ""),
                             "unresolved_chunk_count": unresolved_chunks,
                             "degraded_page_count": degraded_pages,
                             "transport_error_count": int(extraction.get("transport_error_count") or 0),
@@ -201,10 +298,10 @@ class RetrievalEpisodeState:
                     continue
                 item = dict(item)
                 # Route scope and evidence binding are separate contracts.
-                # ``task_point_id`` records what RWKV tried to retrieve; only
+                # ``task_record_id`` records what RWKV tried to retrieve; only
                 # the chunk extractor may bind an ordinary web span to a
-                # factual record via ``claim_ids``.
-                item.setdefault("attempt_task_point_id", str(task_point_id or ""))
+                # factual record via ``task_record_ids``.
+                item.setdefault("attempt_task_record_id", str(task_record_id or ""))
                 item.setdefault("retrieval_query", query_text)
                 item.setdefault("retrieval_strategy", str(strategy or ""))
                 request = (
@@ -219,7 +316,7 @@ class RetrievalEpisodeState:
                 )
                 binding = {
                     "task_record_id": str(
-                        request.get("task_record_id") or task_point_id or ""
+                        request.get("task_record_id") or task_record_id or ""
                     ),
                     "request_id": str(request.get("request_id") or ""),
                     "object_alignment": alignment,
@@ -250,7 +347,7 @@ class RetrievalEpisodeState:
                     # Keep the richest representation when the same URL is
                     # encountered by a focused follow-up search.
                     current = self.sources[key]
-                    prior_claim_ids = list(current.get("claim_ids") or [])
+                    prior_task_record_ids = list(current.get("task_record_ids") or [])
                     prior_selected = list(current.get("selected_source_chunks") or [])
                     prior_candidates = list(current.get("chunk_candidates") or [])
                     prior_bindings = list(current.get("retrieval_bindings") or [])
@@ -267,15 +364,15 @@ class RetrievalEpisodeState:
                         self.sources[key] = {**current, **item}
                         material_changed = True
                     current = self.sources[key]
-                    current["claim_ids"] = list(dict.fromkeys([
+                    current["task_record_ids"] = list(dict.fromkeys([
                         *[
                             str(value)
-                            for value in prior_claim_ids
+                            for value in prior_task_record_ids
                             if str(value).strip()
                         ],
                         *[
                             str(value)
-                            for value in item.get("claim_ids") or []
+                            for value in item.get("task_record_ids") or []
                             if str(value).strip()
                         ],
                     ]))
@@ -449,17 +546,17 @@ class RetrievalEpisodeState:
                         current["retrieval_requests"] = prior_requests[:16]
                 canonical_source = dict(self.sources[key])
                 canonical_result_items[key] = canonical_source
-                bound_claim_ids = [
+                bound_task_record_ids = [
                     str(value).strip()
-                    for value in canonical_source.get("claim_ids") or []
+                    for value in canonical_source.get("task_record_ids") or []
                     if str(value).strip()
                 ]
-                for claim_id in bound_claim_ids:
-                    point_sources = self.sources_by_claim.setdefault(claim_id, {})
-                    current_point_source = point_sources.get(key)
-                    if current_point_source != canonical_source:
+                for task_record_id in bound_task_record_ids:
+                    record_sources = self.sources_by_task_record.setdefault(task_record_id, {})
+                    current_record_source = record_sources.get(key)
+                    if current_record_source != canonical_source:
                         material_changed = True
-                        point_sources[key] = canonical_source
+                        record_sources[key] = canonical_source
             self.query_history[-1]["new_source_count"] = len(added)
             self.rounds.append((query_text, result))
             self.last_discovery_results[:] = [
@@ -467,23 +564,23 @@ class RetrievalEpisodeState:
             ]
         source_resolution = result.get("source_resolution") or {}
         if isinstance(source_resolution, dict):
-            self.claims.update_required_domains(source_resolution.get("required_domains") or [])
-        claim_result = {
+            self.evidence_ledger.update_required_domains(source_resolution.get("required_domains") or [])
+        ledger_result = {
             **result,
             "results": list(canonical_result_items.values()),
         }
-        claim_delta = self.claims.ingest(
+        ledger_delta = self.evidence_ledger.ingest(
             query_text,
-            claim_result,
-            task_point_id=task_point_id,
+            ledger_result,
+            task_record_id=task_record_id,
             strategy=strategy,
             step=step,
         )
         material_changed = material_changed or int(
-            claim_delta.get("added_source_bindings") or 0
-        ) > 0 or int(claim_delta.get("added_evidence_records") or 0) > 0 or int(
-            claim_delta.get("added_unassigned_sources") or 0
-        ) > 0 or int(claim_delta.get("updated_evidence_records") or 0) > 0
+            ledger_delta.get("added_source_bindings") or 0
+        ) > 0 or int(ledger_delta.get("added_evidence_records") or 0) > 0 or int(
+            ledger_delta.get("added_unassigned_sources") or 0
+        ) > 0 or int(ledger_delta.get("updated_evidence_records") or 0) > 0
         with self._lock:
             if material_changed:
                 self.evidence_revision += 1
@@ -492,10 +589,44 @@ class RetrievalEpisodeState:
             "new_source_keys": added,
             "new_source_count": len(added),
             "total_sources": len(self.sources),
-            "claim_delta": claim_delta,
+            "evidence_ledger_delta": ledger_delta,
             "evidence_revision": evidence_revision,
             "material_changed": material_changed,
         }
+
+    def connector_runtime_snapshot(self) -> list[dict[str, Any]]:
+        """Return current per-provider availability for RWKV routing context."""
+
+        now = time.monotonic()
+        with self._lock:
+            output: list[dict[str, Any]] = []
+            for row in self.connector_runtime.values():
+                projected = {
+                    key: row.get(key)
+                    for key in (
+                        "provider",
+                        "operation",
+                        "status",
+                        "available",
+                        "cooldown_seconds",
+                        "error_class",
+                        "message",
+                        "observed_step",
+                    )
+                }
+                cooldown_until = float(row.get("cooldown_until_monotonic") or 0.0)
+                remaining = max(0, int(round(cooldown_until - now)))
+                projected["cooldown_active"] = bool(
+                    not projected["available"] and remaining > 0
+                )
+                projected["retry_after_seconds"] = remaining
+                if not projected["available"] and remaining <= 0:
+                    projected["available"] = True
+                    projected["cooldown_active"] = False
+                    projected["prior_status"] = projected["status"]
+                    projected["status"] = "available_for_retry"
+                output.append(projected)
+            return output
 
     def source_records(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -507,7 +638,7 @@ class RetrievalEpisodeState:
         result: dict[str, Any],
         *,
         step: int = 0,
-        task_point_id: str = "",
+        task_record_id: str = "",
     ) -> None:
         """Persist an exact successful calculator/time result for replanning."""
 
@@ -516,7 +647,7 @@ class RetrievalEpisodeState:
         record = {
             "tool": str(action or ""),
             "step": int(step or 0),
-            "task_point_id": str(task_point_id or ""),
+            "task_record_id": str(task_record_id or ""),
             "result": dict(result),
         }
         with self._lock:
@@ -544,14 +675,14 @@ class RetrievalEpisodeState:
         max_total_chars = max(512, int(max_total_chars or 512))
         with self._lock:
             all_sources = [dict(item) for item in self.sources.values()]
-            sources_by_claim = {
-                point_id: [dict(item) for item in values.values()]
-                for point_id, values in self.sources_by_claim.items()
+            sources_by_task_record = {
+                task_record_id: [dict(item) for item in values.values()]
+                for task_record_id, values in self.sources_by_task_record.items()
             }
 
-        # Give every explicitly bound task point one source before using the
+        # Give every explicitly bound task record one source before using the
         # remaining budget for recent material. This is context packing, not a
-        # judgement that the selected source proves the point.
+        # judgement that the selected source proves the Task Record.
         selected: list[dict[str, Any]] = []
         selected_keys: set[str] = set()
 
@@ -562,9 +693,9 @@ class RetrievalEpisodeState:
             selected.append(item)
             selected_keys.add(key)
 
-        for point_sources in sources_by_claim.values():
-            if point_sources:
-                select(point_sources[0])
+        for record_sources in sources_by_task_record.values():
+            if record_sources:
+                select(record_sources[0])
         for item in reversed(all_sources):
             select(item)
         if len(selected) < max_sources:
@@ -611,9 +742,9 @@ class RetrievalEpisodeState:
                     "source_id": f"R{source_index}",
                     "title": str(item.get("title") or ""),
                     "url": str(item.get("url") or ""),
-                    "claim_ids": [
+                    "task_record_ids": [
                         str(value)
-                        for value in item.get("claim_ids") or []
+                        for value in item.get("task_record_ids") or []
                         if str(value).strip()
                     ],
                     "published": item.get("published") or item.get("published_at") or "",
@@ -642,7 +773,7 @@ class RetrievalEpisodeState:
             )
 
         return {
-            "schema_version": "planner-evidence.v1",
+            "contract": PLANNER_EVIDENCE_CONTRACT,
             "source_count": len(all_sources),
             "visible_source_count": len(projected),
             "visible_chars": sum(item["visible_chars"] for item in projected),
@@ -658,17 +789,17 @@ class RetrievalEpisodeState:
         max_quote_chars: int = 600,
         max_total_chars: int = 3200,
     ) -> dict[str, Any]:
-        """Project grounded RWKV-selected candidate records for the next decision.
+        """Project grounded RWKV-selected evidence records for the next decision.
 
-        Records are interleaved across task points. This is persistent working
+        Records are interleaved across task records. This is persistent working
         memory, not a deterministic finish decision: RWKV still decides
         whether the visible records satisfy the user's requested fields.
         """
 
-        snapshot = self.claims.snapshot(max_spans_per_claim=0)
-        per_point: list[list[dict[str, Any]]] = []
-        for claim in snapshot.get("claims") or []:
-            if not isinstance(claim, dict):
+        snapshot = self.evidence_ledger.snapshot(max_spans_per_record=0)
+        per_task_record: list[list[dict[str, Any]]] = []
+        for task_record in snapshot.get("task_records") or []:
+            if not isinstance(task_record, dict):
                 continue
             rows = [
                 {
@@ -677,14 +808,14 @@ class RetrievalEpisodeState:
                     )[:80],
                     "task_record_id": str(
                         record.get("task_record_id")
-                        or claim.get("claim_id")
+                        or task_record.get("task_record_id")
                         or ""
                     )[:80],
                     "subject_key": str(record.get("subject_key") or "")[:240],
                     "record_key": str(record.get("record_key") or "")[:240],
-                    "field_keys": [
+                    "field_ids": [
                         str(value)[:120]
-                        for value in record.get("field_keys") or []
+                        for value in record.get("field_ids") or []
                         if str(value).strip()
                     ][:16],
                     "support_state": str(record.get("support_state") or "")[:80],
@@ -725,22 +856,22 @@ class RetrievalEpisodeState:
                     )[:80],
                     "quote": str(record.get("quote") or ""),
                 }
-                for record in claim.get("evidence_records") or []
+                for record in task_record.get("evidence_records") or []
                 if isinstance(record, dict)
                 and str(record.get("quote") or "").strip()
             ]
             if rows:
-                per_point.append(rows)
+                per_task_record.append(rows)
 
         selected: list[dict[str, Any]] = []
         cursor = 0
         remaining = max(256, int(max_total_chars or 256))
         while (
             len(selected) < max(1, int(max_records or 1))
-            and any(cursor < len(rows) for rows in per_point)
+            and any(cursor < len(rows) for rows in per_task_record)
             and remaining > 0
         ):
-            for rows in per_point:
+            for rows in per_task_record:
                 if cursor >= len(rows) or len(selected) >= max_records:
                     continue
                 row = dict(rows[cursor])
@@ -754,39 +885,39 @@ class RetrievalEpisodeState:
                 remaining -= len(visible)
             cursor += 1
 
-        total_records = sum(len(rows) for rows in per_point)
+        total_records = sum(len(rows) for rows in per_task_record)
         return {
-            "schema_version": "planner-records.v1",
+            "contract": EVIDENCE_RECORD_SET_CONTRACT,
             "record_count": total_records,
             "visible_record_count": len(selected),
             "truncated": len(selected) < total_records,
             "records": selected,
         }
 
-    def infrastructure_report(self, *, claim_ids: list[str] | None = None) -> dict[str, Any]:
-        """Return unresolved retrieval/model failures, optionally by Claim."""
+    def infrastructure_report(self, *, task_record_ids: list[str] | None = None) -> dict[str, Any]:
+        """Return unresolved retrieval/model failures, optionally by Task Record."""
 
-        requested = {str(value) for value in (claim_ids or []) if str(value).strip()}
+        requested = {str(value) for value in (task_record_ids or []) if str(value).strip()}
         with self._lock:
             events = [
                 dict(item)
                 for item in self.infrastructure_events
                 if not requested
-                or not str(item.get("task_point_id") or "")
-                or str(item.get("task_point_id") or "") in requested
+                or not str(item.get("task_record_id") or "")
+                or str(item.get("task_record_id") or "") in requested
             ]
-        affected_claim_ids = sorted(
+        affected_task_record_ids = sorted(
             {
-                str(item.get("task_point_id") or "")
+                str(item.get("task_record_id") or "")
                 for item in events
-                if str(item.get("task_point_id") or "")
+                if str(item.get("task_record_id") or "")
             }
         )
         return {
-            "schema_version": "retrieval-infrastructure.v1",
+            "contract": RETRIEVAL_INFRASTRUCTURE_CONTRACT,
             "complete": not events,
             "event_count": len(events),
-            "affected_claim_ids": affected_claim_ids,
+            "affected_task_record_ids": affected_task_record_ids,
             "unresolved_chunk_count": sum(int(item.get("unresolved_chunk_count") or 0) for item in events),
             "degraded_page_count": sum(int(item.get("degraded_page_count") or 0) for item in events),
             "transport_error_count": sum(int(item.get("transport_error_count") or 0) for item in events),
@@ -803,8 +934,16 @@ class RetrievalEpisodeState:
                 "queries": [
                     {
                         "query": item.get("query", ""),
+                        "action": item.get("action", ""),
+                        "operation": item.get("operation", ""),
+                        "arguments": dict(item.get("arguments") or {}),
                         "status": item.get("status", ""),
                         "new_source_count": item.get("new_source_count", 0),
+                        "executed_queries": [
+                            dict(value)
+                            for value in item.get("executed_queries") or []
+                            if isinstance(value, dict)
+                        ][:6],
                     }
                     for item in self.query_history[-max_queries:]
                 ],
@@ -817,11 +956,11 @@ class RetrievalEpisodeState:
                     for item in list(self.sources.values())[-max_sources:]
                 ],
                 "coverage": dict(self.coverage),
-                "claim_ledger": self.claims.snapshot(max_spans_per_claim=0),
+                "evidence_ledger": self.evidence_ledger.snapshot(max_spans_per_record=0),
                 "attempted_url_count": len(self.attempted_urls),
-                "claim_source_counts": {
-                    point_id: len(values)
-                    for point_id, values in self.sources_by_claim.items()
+                "task_record_source_counts": {
+                    task_record_id: len(values)
+                    for task_record_id, values in self.sources_by_task_record.items()
                 },
                 "frozen_path_count": len(self.frozen_paths),
                 "frozen_paths": [dict(item) for item in self.frozen_paths[-8:]],
@@ -839,20 +978,20 @@ class RetrievalEpisodeState:
     ) -> dict[str, Any]:
         """Return a small routing projection for the next RWKV decision.
 
-        Full source bodies, Claim source records, infrastructure events and
+        Full source bodies, Task Record source records, infrastructure events and
         URL histories remain in persistent state and the audit trace.  A
-        planner only needs progress, point bindings, recent requests and the
+        planner only needs progress, Task Record bindings, recent requests and the
         frozen paths it must avoid; replaying the complete ledger crowds the
         actual replan instruction out of a 16K context window.
         """
 
         with self._lock:
             infrastructure = self.infrastructure_report()
-            claim_snapshot = self.claims.snapshot(max_spans_per_claim=0)
-            factual_point_progress = [
+            evidence_ledger_snapshot = self.evidence_ledger.snapshot(max_spans_per_record=0)
+            task_record_progress = [
                 {
-                    "id": str(row.get("claim_id") or "")[:120],
-                    "task_bound_candidate_record_count": int(
+                    "id": str(row.get("task_record_id") or "")[:120],
+                    "task_bound_evidence_record_count": int(
                         row.get("evidence_record_count") or 0
                     ),
                     "candidate_evidence_record_count": int(
@@ -864,26 +1003,42 @@ class RetrievalEpisodeState:
                     "attempt_count": int(row.get("attempt_count") or 0),
                     "retrieval_state": str(row.get("retrieval_state") or "")[:80],
                 }
-                for row in claim_snapshot.get("claims") or []
-                if isinstance(row, dict) and str(row.get("claim_id") or "").strip()
+                for row in evidence_ledger_snapshot.get("task_records") or []
+                if isinstance(row, dict) and str(row.get("task_record_id") or "").strip()
             ]
             return {
-                "schema_version": "planner-routing.v1",
+                "contract": RETRIEVAL_ROUTING_CONTRACT,
                 "evidence_revision": self.evidence_revision,
                 "round_count": len(self.query_history),
                 "source_count": len(self.sources),
+                "connector_runtime": self.connector_runtime_snapshot(),
                 # Observable grounded candidate-span counts only. Zero is not
                 # a truth, sufficiency, or completion decision.
-                "factual_point_progress": factual_point_progress,
+                "task_record_progress": task_record_progress,
                 "unassigned_source_count": int(
-                    claim_snapshot.get("unassigned_source_count") or 0
+                    evidence_ledger_snapshot.get("unassigned_source_count") or 0
                 ),
                 "queries": [
                     {
                         "query": str(item.get("query") or "")[:500],
+                        "action": str(item.get("action") or "")[:120],
+                        "operation": str(item.get("operation") or "")[:120],
+                        "arguments": bounded_request_arguments(
+                            item.get("arguments")
+                            if isinstance(item.get("arguments"), dict)
+                            else {}
+                        ),
+                        "route_id": str(item.get("route_id") or "")[:40],
                         "status": str(item.get("status") or "")[:80],
+                        "error_class": str(item.get("error_class") or "")[:160],
+                        "error_message": str(item.get("error_message") or "")[:600],
                         "new_source_count": int(item.get("new_source_count") or 0),
-                        "task_point_id": str(item.get("task_point_id") or "")[:120],
+                        "task_record_id": str(item.get("task_record_id") or "")[:120],
+                        "executed_queries": [
+                            dict(value)
+                            for value in item.get("executed_queries") or []
+                            if isinstance(value, dict)
+                        ][:6],
                     }
                     for item in self.query_history[-max(1, int(max_queries or 1)) :]
                 ],
@@ -891,9 +1046,9 @@ class RetrievalEpisodeState:
                     {
                         "title": str(item.get("title") or "")[:300],
                         "url": str(item.get("url") or "")[:500],
-                        "claim_ids": [
+                        "task_record_ids": [
                             str(value)[:120]
-                            for value in item.get("claim_ids") or []
+                            for value in item.get("task_record_ids") or []
                             if str(value).strip()
                         ][:8],
                         "published": str(
@@ -926,7 +1081,13 @@ class RetrievalEpisodeState:
                         "route_id": str(item.get("route_id") or "")[:40],
                         "query": str(item.get("query") or "")[:500],
                         "action": str(item.get("action") or "")[:120],
-                        "task_point_id": str(item.get("task_point_id") or "")[:120],
+                        "operation": str(item.get("operation") or "")[:120],
+                        "arguments": bounded_request_arguments(
+                            item.get("arguments")
+                            if isinstance(item.get("arguments"), dict)
+                            else {}
+                        ),
+                        "task_record_id": str(item.get("task_record_id") or "")[:120],
                         "step": int(item.get("step") or 0),
                         "first_step": int(item.get("first_step") or item.get("step") or 0),
                         "last_step": int(item.get("last_step") or item.get("step") or 0),
@@ -941,8 +1102,8 @@ class RetrievalEpisodeState:
                 "retrieval_infrastructure": {
                     "complete": bool(infrastructure.get("complete")),
                     "event_count": int(infrastructure.get("event_count") or 0),
-                    "affected_claim_ids": list(
-                        infrastructure.get("affected_claim_ids") or []
+                    "affected_task_record_ids": list(
+                        infrastructure.get("affected_task_record_ids") or []
                     )[:16],
                     "unresolved_chunk_count": int(
                         infrastructure.get("unresolved_chunk_count") or 0
@@ -959,7 +1120,7 @@ class RetrievalEpisodeState:
         *,
         action: str = "",
         arguments: dict[str, Any] | None = None,
-        task_point_id: str = "",
+        task_record_id: str = "",
         step: int = 0,
         reason: str = "",
     ) -> dict[str, Any]:
@@ -976,7 +1137,8 @@ class RetrievalEpisodeState:
             "query": " ".join(str(query or "").split()).strip(),
             "action": str(action or ""),
             "arguments": dict(arguments or {}),
-            "task_point_id": str(task_point_id or ""),
+            "operation": str((arguments or {}).get("operation") or ""),
+            "task_record_id": str(task_record_id or ""),
             "first_step": int(step or 0),
             "last_step": int(step or 0),
             # Historical readers use ``step``. Keep it as the most recent
@@ -985,18 +1147,12 @@ class RetrievalEpisodeState:
             "reason": str(reason or "")[:500],
             "blocked_count": 1,
         }
-        identity = json.dumps(
-            {
-                "action": record["action"],
-                "arguments": record["arguments"],
-                "task_point_id": record["task_point_id"],
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
+        record["request_key"] = request_key(record["action"], record["arguments"])
+        record["route_id"] = route_id(
+            record["action"],
+            record["arguments"],
+            task_record_id=record["task_record_id"],
         )
-        record["route_id"] = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
         with self._lock:
             existing = next(
                 (
@@ -1025,12 +1181,12 @@ class RetrievalEpisodeState:
 
     def reset(self) -> None:
         self.rounds.clear()
-        self.rounds_by_point.clear()
-        self.point_state.clear()
+        self.rounds_by_task_record.clear()
+        self.task_record_state.clear()
         self.last_discovery_results.clear()
         self.last_retrieval_failure = None
         self.sources.clear()
-        self.sources_by_claim.clear()
+        self.sources_by_task_record.clear()
         self.deterministic_results.clear()
         self.attempted_urls.clear()
         self.url_attempt_counts.clear()
@@ -1038,9 +1194,10 @@ class RetrievalEpisodeState:
         self.coverage.clear()
         self.frozen_paths.clear()
         self.infrastructure_events.clear()
+        self.connector_runtime.clear()
         self.replan_count = 0
         self.progress.reset()
-        self.claims.reset()
+        self.evidence_ledger.reset()
 
 
 @dataclass
@@ -1155,16 +1312,38 @@ class AgentState:
         """
         def compact_review(value: Any) -> dict[str, Any]:
             review = value if isinstance(value, dict) else {}
-            return {
+            output = {
                 key: review.get(key)
                 for key in (
                     "decision",
-                    "missing_point_id",
-                    "evidence_needed",
                     "trigger",
                 )
                 if key in review
             }
+            gap = review.get("gap") or {}
+            if isinstance(gap, dict):
+                output["gap"] = {
+                    key: gap.get(key)
+                    for key in (
+                        "task_record_id",
+                        "gap_type",
+                        "field_ids",
+                        "evidence_record_ids",
+                        "conflict_record_ids",
+                        "excluded_route_ids",
+                    )
+                    if key in gap
+                }
+            legacy_missing = str(
+                review.get("missing_task_record_id")
+                or review.get("missing_point_id")
+                or ""
+            ).strip()
+            if legacy_missing:
+                output["missing_task_record_id"] = legacy_missing
+            if review.get("evidence_needed"):
+                output["evidence_needed"] = review.get("evidence_needed")
+            return output
 
         def compact_feedback(raw: str) -> dict[str, Any] | str:
             try:
@@ -1180,7 +1359,7 @@ class AgentState:
                     "error_class",
                     "repeat_count",
                     "replan_count",
-                    "missing_point_id",
+                    "missing_task_record_id",
                     "evidence_needed",
                     "stalled_actions_after_replan",
                     "max_stalled_actions_after_replan",
@@ -1188,6 +1367,13 @@ class AgentState:
                 )
                 if key in value
             }
+            legacy_missing = str(
+                value.get("missing_task_record_id")
+                or value.get("missing_point_id")
+                or ""
+            ).strip()
+            if legacy_missing:
+                output["missing_task_record_id"] = legacy_missing
             if value.get("message"):
                 output["message"] = str(value.get("message") or "")[:600]
             request = value.get("request") or {}
@@ -1200,25 +1386,18 @@ class AgentState:
             frozen = value.get("frozen_path") or {}
             if isinstance(frozen, dict):
                 output["frozen_path"] = {
+                    "route_id": str(frozen.get("route_id") or "")[:40],
                     "query": str(frozen.get("query") or "")[:500],
                     "action": str(frozen.get("action") or "")[:120],
-                    "task_point_id": str(frozen.get("task_point_id") or "")[:120],
+                    "operation": str(frozen.get("operation") or "")[:120],
+                    "arguments": bounded_request_arguments(
+                        frozen.get("arguments")
+                        if isinstance(frozen.get("arguments"), dict)
+                        else {}
+                    ),
+                    "task_record_id": str(frozen.get("task_record_id") or "")[:120],
                     "step": int(frozen.get("step") or 0),
                     "reason": str(frozen.get("reason") or "")[:240],
-                }
-            previous = value.get("previous_request_status") or {}
-            if isinstance(previous, dict):
-                output["previous_request_status"] = {
-                    key: previous.get(key)
-                    for key in (
-                        "attempted",
-                        "count",
-                        "match_type",
-                        "matched_query",
-                        "similarity",
-                        "threshold",
-                    )
-                    if key in previous
                 }
             for review_key in ("evidence_review", "pending_replan"):
                 review = value.get(review_key)
@@ -1255,7 +1434,7 @@ class AgentState:
             )
         )
         lines.append(
-            "RWKV-selected grounded candidate records "
+            "RWKV-selected grounded evidence records "
             "(working memory; no record is pre-declared correct/current):"
         )
         lines.append(
@@ -1293,7 +1472,7 @@ class AgentState:
 
         # A huge feedback object or unusually dense CJK source may still
         # exceed the routing budget. Rebuild with much smaller locators rather
-        # than slicing through JSON and hiding the missing-point/frozen-path
+        # than slicing through JSON and hiding the missing-record/frozen-path
         # records at the end.
         compact_lines: list[str] = []
         skip_evidence_payload = False

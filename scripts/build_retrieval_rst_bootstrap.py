@@ -18,7 +18,7 @@ from scripts.build_retrieval_rst_pilot import (
     ROOT,
     _bundle,
     _claim,
-    _cross_validation,
+    _oracle_evidence_assessment,
     _fact,
     _plan,
     _source,
@@ -165,7 +165,7 @@ def build_current_release(root: Path, index: int, values: tuple[str, ...]) -> Pa
         {"type": "task_plan", "content": _plan(points)},
         {"type": "tool_call", "tool": "web_search", "args": {"query": f"{name} current official release"}},
         {"type": "tool_result", "tool": "web_search", "content": {"results": sources}},
-        {"type": "cross_validation", "content": _cross_validation({"P1": [version_fact, date_fact, theme_fact]})},
+        {"type": "oracle_evidence_assessment", "content": _oracle_evidence_assessment({"P1": [version_fact, date_fact, theme_fact]})},
         {"type": "final", "content": answer},
     ]
     contract = {
@@ -236,7 +236,7 @@ def build_temporal(root: Path, index: int, values: tuple[str, ...]) -> Path:
         {"type": "tool_result", "tool": "web_search", "content": {"results": sources[:3]}},
         {"type": "tool_call", "tool": "web_search", "args": {"query": f"site:updates.{slug}.invalid current live release"}},
         {"type": "tool_result", "tool": "web_search", "content": {"results": sources[3:]}},
-        {"type": "cross_validation", "content": _cross_validation({"P1": [reveal_fact, launch_fact], "P2": [anniversary_fact], "P3": [current_fact, theme_fact]})},
+        {"type": "oracle_evidence_assessment", "content": _oracle_evidence_assessment({"P1": [reveal_fact, launch_fact], "P2": [anniversary_fact], "P3": [current_fact, theme_fact]})},
         {"type": "final", "content": answer},
     ]
     claims = [
@@ -297,7 +297,7 @@ def build_direct_page(root: Path, index: int, values: tuple[str, ...]) -> Path:
         {"type": "task_plan", "content": _plan([{"id": "P1", "objective": "Read the explicit page and bind both requested settings."}])},
         {"type": "tool_call", "tool": "direct_page", "args": {"url": url}},
         {"type": "tool_result", "tool": "direct_page", "content": source},
-        {"type": "cross_validation", "content": _cross_validation({"P1": [fact_one, fact_two]})},
+        {"type": "oracle_evidence_assessment", "content": _oracle_evidence_assessment({"P1": [fact_one, fact_two]})},
         {"type": "final", "content": answer},
     ]
     contract = {
@@ -383,7 +383,7 @@ def build_howto(root: Path, index: int, values: tuple[str, ...]) -> Path:
         {"type": "task_plan", "content": _plan([{"id": "P1", "objective": "Find official launcher requirements."}, {"id": "P2", "objective": f"Find and correctly label {bundle}-specific guidance."}])},
         {"type": "tool_call", "tool": "web_search", "args": {"query": f"{desktop} {bundle} start menu launcher"}},
         {"type": "tool_result", "tool": "web_search", "content": {"results": sources}},
-        {"type": "cross_validation", "content": _cross_validation({"P1": [path_fact, fields_fact], "P2": [procedure_fact]})},
+        {"type": "oracle_evidence_assessment", "content": _oracle_evidence_assessment({"P1": [path_fact, fields_fact], "P2": [procedure_fact]})},
         {"type": "final", "content": answer},
     ]
     contract = {
@@ -450,7 +450,7 @@ def build_derived_date(root: Path, index: int, values: tuple[Any, ...]) -> Path:
         {"type": "tool_result", "tool": "direct_page", "content": source},
         {"type": "tool_call", "tool": "date_diff", "args": {"operation": "add_years", "date": launch, "years": years}},
         {"type": "tool_result", "tool": "date_diff", "content": {"result": result}},
-        {"type": "cross_validation", "content": _cross_validation({"P1": [result_fact]})},
+        {"type": "oracle_evidence_assessment", "content": _oracle_evidence_assessment({"P1": [result_fact]})},
         {"type": "final", "content": answer},
     ]
     contract = {

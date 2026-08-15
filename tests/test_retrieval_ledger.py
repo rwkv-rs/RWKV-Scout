@@ -63,6 +63,27 @@ class RetrievalLedgerTests(unittest.TestCase):
         self.assertEqual(status["count"], 1)
         self.assertEqual(status["last"]["new_url_count"], 1)
 
+    def test_query_status_can_observe_one_tool_without_cross_tool_conflation(self):
+        ledger = RetrievalLedger()
+        ledger.record(
+            "same object",
+            {"status": "no_results", "results": []},
+            step=1,
+            action="connector_lookup",
+            arguments={"operation": "weather_current", "query": "same object"},
+        )
+
+        connector_status = ledger.query_status(
+            "same object", action="connector_lookup"
+        )
+        web_status = ledger.query_status("same object", action="web_search")
+
+        self.assertTrue(connector_status["attempted"])
+        self.assertFalse(web_status["attempted"])
+        self.assertEqual(
+            connector_status["last"]["operation"], "weather_current"
+        )
+
     def test_blocked_duplicate_is_observable_without_counting_as_a_search(self):
         ledger = RetrievalLedger()
         ledger.record(
@@ -101,26 +122,26 @@ class RetrievalLedgerTests(unittest.TestCase):
                 "深圳地铁一号线 站点 列表 官方",
                 "深圳地铁一号线 首班车 末班车 时间 官方",
             ),
-            0.88,
+            0.60,
         )
 
-    def test_equivalent_query_freeze_is_scoped_to_one_task_point(self):
+    def test_equivalent_query_freeze_is_scoped_to_one_task_record(self):
         ledger = RetrievalLedger()
         ledger.record(
             "Zenless Zone Zero current version theme official",
             {"status": "ok", "results": [{"url": "https://example.com/current"}]},
             step=1,
-            task_point_id="P2",
+            task_record_id="P2",
             action="web_search",
         )
 
         same_point = ledger.query_status(
             "official current theme Zenless Zone Zero version",
-            task_point_id="P2",
+            task_record_id="P2",
         )
         different_point = ledger.query_status(
             "official current theme Zenless Zone Zero version",
-            task_point_id="P1",
+            task_record_id="P1",
         )
 
         self.assertTrue(same_point["attempted"])
@@ -133,28 +154,49 @@ class RetrievalLedgerTests(unittest.TestCase):
             "web_search",
             arguments,
             {"status": "ok", "results": []},
-            task_point_id="P1",
+            task_record_id="P1",
         )
 
         self.assertIsNotNone(
-            ledger.request_status("web_search", arguments, task_point_id="P1")
+            ledger.request_status("web_search", arguments, task_record_id="P1")
         )
         self.assertIsNone(
-            ledger.request_status("web_search", arguments, task_point_id="P2")
+            ledger.request_status("web_search", arguments, task_record_id="P2")
         )
 
         ledger.record_request(
             "web_search",
             arguments,
             {"status": "ok", "results": []},
-            task_point_id="P2",
+            task_record_id="P2",
         )
         self.assertIsNotNone(
-            ledger.request_status("web_search", arguments, task_point_id="P1")
+            ledger.request_status("web_search", arguments, task_record_id="P1")
         )
         self.assertIsNotNone(
-            ledger.request_status("web_search", arguments, task_point_id="P2")
+            ledger.request_status("web_search", arguments, task_record_id="P2")
         )
+
+    def test_unbound_request_scope_is_not_a_task_record_wildcard(self):
+        ledger = RetrievalLedger()
+        arguments = {"query": "same query"}
+        ledger.record_request(
+            "web_search",
+            arguments,
+            {"status": "ok", "results": []},
+            task_record_id="P1",
+        )
+
+        assert ledger.request_status("web_search", arguments, task_record_id="P1")
+        assert ledger.request_status("web_search", arguments, task_record_id="") is None
+
+        ledger.record_request(
+            "web_search",
+            arguments,
+            {"status": "ok", "results": []},
+            task_record_id="",
+        )
+        assert ledger.request_status("web_search", arguments, task_record_id="")
 
     def test_branch_view_contains_shared_progress_and_branch_scope(self):
         ledger = RetrievalLedger()
@@ -163,7 +205,7 @@ class RetrievalLedgerTests(unittest.TestCase):
             {"results": [{"url": "https://example.com/founder"}]},
             step=1,
             branch_id="B1",
-            task_point_id="P1",
+            task_record_id="P1",
             action="web_search",
         )
         ledger.record(
@@ -171,12 +213,12 @@ class RetrievalLedgerTests(unittest.TestCase):
             {"results": [{"url": "https://example.com/paper"}]},
             step=2,
             branch_id="B2",
-            task_point_id="P2",
+            task_record_id="P2",
             action="web_search",
         )
-        view = ledger.observation(branch_id="B2", task_point_id="P2")
+        view = ledger.observation(branch_id="B2", task_record_id="P2")
         self.assertEqual(view["branch_id"], "B2")
-        self.assertEqual(view["task_point_id"], "P2")
+        self.assertEqual(view["task_record_id"], "P2")
         self.assertEqual(view["retrieved_url_count"], 2)
         self.assertEqual(len(view["branch_searches"]), 1)
         self.assertEqual(view["branch_searches"][0]["query"], "papers")
@@ -195,13 +237,13 @@ class RetrievalLedgerTests(unittest.TestCase):
                 action="web_search",
                 phase="GENERIC_WEB",
                 branch_id="B1",
-                task_point_id="P1",
+                task_record_id="P1",
             )
         self.assertEqual(enriched["retrieval_delta"]["new_url_count"], 1)
         self.assertEqual(enriched["retrieval_ledger"]["total_searches"], 1)
         self.assertTrue(any(call.args[1] == "retrieval_ledger" for call in append_event.call_args_list))
 
-    def test_failed_exact_request_is_shared_across_the_episode(self):
+    def test_failed_exact_request_status_remains_in_its_route_scope(self):
         ledger = RetrievalLedger()
         args = {"url": "https://example.com/unavailable", "max_chars": 20000}
         ledger.record_request(
@@ -209,13 +251,45 @@ class RetrievalLedgerTests(unittest.TestCase):
             args,
             {"status": "error", "message": "TLS failure", "results": []},
             step=4,
-            task_point_id="P1",
+            task_record_id="P1",
         )
-        status = ledger.request_status("fetch_web_url", dict(args))
+        status = ledger.request_status(
+            "fetch_web_url", dict(args), task_record_id="P1"
+        )
         self.assertIsNotNone(status)
         self.assertTrue(status["failed"])
         self.assertEqual(status["failed_attempts"], 1)
-        self.assertEqual(ledger.observation(task_point_id="P2")["failed_requests"][0]["action"], "fetch_web_url")
+        self.assertEqual(status["last_error_class"], "")
+        self.assertIsNone(ledger.request_status("fetch_web_url", dict(args)))
+        self.assertEqual(ledger.observation(task_record_id="P2")["failed_requests"][0]["action"], "fetch_web_url")
+
+    def test_tool_error_semantics_are_preserved_without_reclassification(self):
+        ledger = RetrievalLedger()
+        result = {
+            "status": "error",
+            "error_class": "invalid_repository_identifier",
+            "message": "github_release requires an explicit owner/repository identifier",
+            "results": [],
+        }
+        recorded = ledger.record_request(
+            "connector_lookup",
+            {"operation": "github_release", "query": "Warframe latest update"},
+            result,
+            step=1,
+            task_record_id="P1",
+        )
+        delta = ledger.record(
+            "Warframe latest update",
+            result,
+            step=1,
+            task_record_id="P1",
+            action="connector_lookup",
+            arguments={"operation": "github_release", "query": "Warframe latest update"},
+        )
+
+        self.assertEqual(recorded["last_error_class"], "invalid_repository_identifier")
+        self.assertEqual(delta["error_class"], "invalid_repository_identifier")
+        self.assertIn("explicit owner/repository", delta["error_message"])
 
     def test_planner_compact_observation_preserves_ledger_context(self):
         rendered = Planner._compact_observation(

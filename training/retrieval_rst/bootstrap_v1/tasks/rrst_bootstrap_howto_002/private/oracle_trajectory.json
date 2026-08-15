@@ -4,18 +4,30 @@
     {
       "type": "task_plan",
       "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
         "goal": "Answer every requested field from frozen evidence without inventing facts.",
-        "atomic_points": [
+        "records": [
           {
-            "id": "P1",
-            "objective": "Find official launcher requirements."
+            "record_id": "P1",
+            "question": "Find official launcher requirements.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
           },
           {
-            "id": "P2",
-            "objective": "Find and correctly label RunCapsule-specific guidance."
+            "record_id": "P2",
+            "question": "Find and correctly label RunCapsule-specific guidance.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
           }
-        ],
-        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote."
+        ]
       }
     },
     {
@@ -52,7 +64,7 @@
       }
     },
     {
-      "type": "cross_validation",
+      "type": "oracle_evidence_assessment",
       "content": {
         "decision": "finish",
         "missing_points": [],

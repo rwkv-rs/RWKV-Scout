@@ -6,11 +6,12 @@ from agent.page_evidence import (
     build_chunk_candidate_prompt,
     parse_chunk_candidate,
 )
-from agent.claim_ledger import ClaimLedger
+from agent.evidence_ledger import EvidenceLedger
 from agent.retrieval_object_contract import (
     attach_result_object_contract,
     explicit_object_targets,
     github_repository_target,
+    merge_candidate_observations,
     object_alignment,
     retrieval_request_contract,
     rwkv_subject_alignment,
@@ -25,6 +26,35 @@ from tools.registry import ToolRegistry
 from tools.web_search_generic import _merge_candidates
 from utils.evidence_quality import clean_page_body
 from utils.html_markdown import html_to_markdown
+
+
+def test_candidate_merge_preserves_canonical_and_historical_binding_keys():
+    merged = merge_candidate_observations(
+        [
+            {
+                "chunk_id": "c1",
+                "quote": "Version 4.4",
+                "task_record_ids": ["P1"],
+                "field_ids": ["P1:F1"],
+                "claim_ids": ["legacy-a"],
+                "field_keys": ["version"],
+            }
+        ],
+        [
+            {
+                "chunk_id": "c1",
+                "quote": "Version 4.4",
+                "task_point_ids": ["legacy-b"],
+                "field_keys": ["date"],
+            }
+        ],
+    )
+
+    assert merged[0]["task_record_ids"] == ["P1"]
+    assert merged[0]["claim_ids"] == ["legacy-a"]
+    assert merged[0]["task_point_ids"] == ["legacy-b"]
+    assert merged[0]["field_ids"] == ["P1:F1"]
+    assert merged[0]["field_keys"] == ["version", "date"]
 
 
 def test_github_target_parser_does_not_consume_natural_language_suffix():
@@ -72,7 +102,7 @@ def test_result_contract_carries_request_and_source_identity_without_fact_judgme
         task_record_id="P1",
         task_plan={
             "goal": "find bun release",
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "question": "find bun release",
@@ -108,7 +138,7 @@ def test_task_record_uses_registry_plus_rwkv_subject_as_typed_scope():
     contract = task_record_contract(
         {
             "goal": "crates.io 上 serde 的最新版本是什么？",
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "question": "crates.io 上 serde 的最新版本是什么？",
@@ -133,7 +163,7 @@ def test_task_record_uses_registry_plus_rwkv_subject_as_typed_scope():
 def test_task_record_does_not_copy_multiple_goal_objects_into_every_point():
     plan = {
         "goal": "Compare owner/repo-a with owner/repo-b",
-        "atomic_points": [
+        "records": [
             {
                 "id": "P1",
                 "question": "Find the latest release of owner/repo-a",
@@ -162,7 +192,7 @@ def test_task_record_uses_single_goal_object_as_transport_fallback():
     contract = task_record_contract(
         {
             "goal": "Find the latest release of owner/project",
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "question": "Find the release date",
@@ -194,7 +224,7 @@ def test_object_alignment_is_identifier_transport_not_truth_judgment():
 def test_candidate_ranking_prioritizes_exact_typed_object_without_dropping_conflict():
     plan = {
         "goal": "oven-sh/bun latest release",
-        "atomic_points": [
+        "records": [
             {
                 "id": "P1",
                 "question": "oven-sh/bun latest release",
@@ -253,7 +283,7 @@ def test_singleton_task_keeps_object_scope_when_optional_point_id_is_omitted():
         {"query": "oven-sh/bun latest release"},
         task_plan={
             "goal": "oven-sh/bun latest release",
-            "atomic_points": [
+            "records": [
                 {
                     "id": "P1",
                     "question": "oven-sh/bun latest release",
@@ -271,7 +301,7 @@ def test_singleton_task_keeps_object_scope_when_optional_point_id_is_omitted():
     )
 
 
-def test_empty_task_point_does_not_erase_existing_provider_object_alignment():
+def test_empty_task_record_does_not_erase_existing_provider_object_alignment():
     result = attach_result_object_contract(
         {
             "status": "ok",
@@ -294,7 +324,7 @@ def test_empty_task_point_does_not_erase_existing_provider_object_alignment():
         arguments={"query": "compare repositories"},
         task_plan={
             "goal": "Compare owner/repo-a with owner/repo-b",
-            "atomic_points": [
+            "records": [
                 {"id": "P1", "question": "owner/repo-a", "subject": "owner/repo-a"},
                 {"id": "P2", "question": "owner/repo-b", "subject": "owner/repo-b"},
             ],
@@ -395,7 +425,7 @@ def test_page_extractor_contract_never_declares_chunk_local_currentness():
         "Release history",
         {"chunk_id": "chunk-1", "index": 0, "text": "Version 1.0 - 2025\nVersion 2.0 - 2026"},
         1,
-        task_points=[
+        task_records=[
             {
                 "id": "P1",
                 "question": "latest version",
@@ -414,7 +444,7 @@ def test_page_extractor_contract_never_declares_chunk_local_currentness():
                 "supported": True,
                 "record_match": "exact_requested_record",
                 "task_record_ids": ["P1"],
-                "field_keys": ["version"],
+                "field_ids": ["P1:F1"],
                 "source_subject": "Example",
                 "source_record_key": "Version 1.0",
                 "quote": "Version 1.0 - 2025",
@@ -424,7 +454,7 @@ def test_page_extractor_contract_never_declares_chunk_local_currentness():
         {"P1"},
         {"P1": {"version"}},
     )
-    assert parsed["record_match"] == "candidate_record"
+    assert parsed["record_match"] == "evidence_record_candidate"
     assert parsed["extractor_declared_record_match"] == "exact_requested_record"
 
 
@@ -438,8 +468,8 @@ def test_record_key_can_locate_verbatim_markdown_table_line_without_rewriting_it
         "chunk_index": 0,
         "supported": True,
         "task_record_ids": ["P1"],
-        "claim_ids": ["P1"],
-        "field_keys": ["release_tag", "release_date"],
+        "task_record_ids": ["P1"],
+        "field_ids": ["P1:F1", "P1:F2"],
         "subject_key": "oven-sh/bun",
         "record_key": "1.3.14 (12 May 2026)",
         "quote": "Released | 1.3.14 (12 May 2026)",
@@ -448,11 +478,10 @@ def test_record_key_can_locate_verbatim_markdown_table_line_without_rewriting_it
         "oven-sh/bun latest release",
         [{"chunk_id": "chunk-1", "index": 0, "text": source}],
         [candidate],
-        {"atomic_points": [{"id": "P1", "fields": ["release_tag", "release_date"]}]},
+        {"records": [{"id": "P1", "fields": ["release_tag", "release_date"]}]},
     )
-    assert rows[0]["source_grounded"] is True
-    assert rows[0]["quote"] == source.splitlines()[1]
-    assert "https://github.com/oven-sh/bun" in rows[0]["quote"]
+    assert rows[0]["source_grounded"] is False
+    assert rows[0]["quote"] == "Released | 1.3.14 (12 May 2026)"
 
 
 def test_pre_code_yaml_and_exact_punctuation_survive_cleaning():
@@ -469,7 +498,7 @@ def test_pre_code_yaml_and_exact_punctuation_survive_cleaning():
 
 def test_context_groups_multiple_spans_from_one_observable_source_record():
     source_object = {
-        "schema_version": "retrieval-object.v1",
+        "contract": "rwkv.ecra.runtime.retrieval-object",
         "source_object_id": "github:owner/project",
         "source_object_type": "github_repository",
         "source_record_id": "v2.0.0",
@@ -481,7 +510,7 @@ def test_context_groups_multiple_spans_from_one_observable_source_record():
             "evidence_record_id": "E-version",
             "task_record_id": "P1",
             "record_key": "v2.0.0",
-            "field_keys": ["version"],
+            "field_ids": ["P1:F1"],
             "quote": "Version v2.0.0",
             "chunk_id": "chunk-1",
             "url": source_object["source_url"],
@@ -491,7 +520,7 @@ def test_context_groups_multiple_spans_from_one_observable_source_record():
             "evidence_record_id": "E-date",
             "task_record_id": "P1",
             "record_key": "v2.0.0",
-            "field_keys": ["date"],
+            "field_ids": ["P1:F2"],
             "quote": "Published 2026-08-13",
             "chunk_id": "chunk-2",
             "url": source_object["source_url"],
@@ -501,10 +530,10 @@ def test_context_groups_multiple_spans_from_one_observable_source_record():
     context = build_evidence_context(
         {
             "results": [],
-            "claim_ledger": {
-                "claims": [
+            "evidence_ledger": {
+                "task_records": [
                     {
-                        "claim_id": "P1",
+                        "task_record_id": "P1",
                         "question": "latest release",
                         "fields": ["version", "date"],
                         "evidence_records": records,
@@ -519,13 +548,13 @@ def test_context_groups_multiple_spans_from_one_observable_source_record():
     assert "Version v2.0.0" in context["text"]
     assert "Published 2026-08-13" in context["text"]
     metadata = context["selected_evidence"][0]["record_metadata"]
-    assert metadata["field_keys"] == ["version", "date"]
+    assert metadata["field_ids"] == ["P1:F1", "P1:F2"]
 
 
 def test_related_repository_objects_stay_distinct_from_tool_result_to_writer_context():
     plan = {
         "goal": "find the latest oven-sh/bun release",
-        "atomic_points": [
+        "records": [
             {
                 "id": "P1",
                 "question": "latest oven-sh/bun release",
@@ -556,7 +585,7 @@ def test_related_repository_objects_stay_distinct_from_tool_result_to_writer_con
                         "supported": True,
                         "source_grounded": True,
                         "task_record_ids": ["P1"],
-                        "field_keys": ["tag"],
+                        "field_ids": ["P1:F1"],
                         "source_subject": full_name,
                         "source_record_key": tag,
                         "record_key": tag,
@@ -572,17 +601,17 @@ def test_related_repository_objects_stay_distinct_from_tool_result_to_writer_con
         task_record_id="P1",
         task_plan=plan,
     )
-    ledger = ClaimLedger()
+    ledger = EvidenceLedger()
     ledger.initialize(plan, plan["goal"])
     ledger.ingest(
         "oven-sh/bun",
         result,
-        task_point_id="P1",
+        task_record_id="P1",
         strategy="rwkv_selected",
         step=1,
     )
     context = build_evidence_context(
-        {"results": result["results"], "claim_ledger": ledger.snapshot()},
+        {"results": result["results"], "evidence_ledger": ledger.snapshot()},
         constraints={"task_plan": plan, "context_source_count": 8},
         query=plan["goal"],
     )
@@ -601,7 +630,7 @@ def test_related_repository_objects_stay_distinct_from_tool_result_to_writer_con
 def test_omitted_optional_point_id_keeps_exact_object_first_end_to_end():
     plan = {
         "goal": "find the latest oven-sh/bun release",
-        "atomic_points": [
+        "records": [
             {
                 "id": "P1",
                 "question": "latest oven-sh/bun release",
@@ -630,7 +659,7 @@ def test_omitted_optional_point_id_keeps_exact_object_first_end_to_end():
                         "supported": True,
                         "source_grounded": True,
                         "task_record_ids": ["P1"],
-                        "field_keys": ["tag"],
+                        "field_ids": ["P1:F1"],
                         "source_subject": full_name,
                         "source_record_key": tag,
                         "record_key": tag,
@@ -654,11 +683,11 @@ def test_omitted_optional_point_id_keeps_exact_object_first_end_to_end():
         "conflict",
         "exact",
     ]
-    ledger = ClaimLedger()
+    ledger = EvidenceLedger()
     ledger.initialize(plan, plan["goal"])
-    ledger.ingest(plan["goal"], result, task_point_id="", step=1)
+    ledger.ingest(plan["goal"], result, task_record_id="", step=1)
     context = build_evidence_context(
-        {"results": result["results"], "claim_ledger": ledger.snapshot()},
+        {"results": result["results"], "evidence_ledger": ledger.snapshot()},
         constraints={"task_plan": plan, "context_source_count": 8},
         query=plan["goal"],
     )
@@ -668,7 +697,7 @@ def test_omitted_optional_point_id_keeps_exact_object_first_end_to_end():
     )
 
 
-def test_unkeyed_spans_from_one_source_object_share_one_unresolved_block():
+def test_unkeyed_spans_from_one_source_object_remain_atomic_records():
     source_object = {
         "source_object_id": "url:https://docs.example.test/guide",
         "source_object_type": "page_body",
@@ -680,7 +709,8 @@ def test_unkeyed_spans_from_one_source_object_share_one_unresolved_block():
             "evidence_record_id": "E-1",
             "task_record_id": "P1",
             "record_key": "",
-            "field_keys": ["permission"],
+            "record_span_id": "SPAN-1",
+            "field_ids": ["P1:F1"],
             "quote": "id-token: write",
             "chunk_id": "chunk-1",
             "url": source_object["source_url"],
@@ -690,7 +720,8 @@ def test_unkeyed_spans_from_one_source_object_share_one_unresolved_block():
             "evidence_record_id": "E-2",
             "task_record_id": "P1",
             "record_key": "",
-            "field_keys": ["example"],
+            "record_span_id": "SPAN-2",
+            "field_ids": ["P1:F2"],
             "quote": "contents: read",
             "chunk_id": "chunk-2",
             "url": source_object["source_url"],
@@ -699,10 +730,10 @@ def test_unkeyed_spans_from_one_source_object_share_one_unresolved_block():
     ]
     context = build_evidence_context(
         {
-            "claim_ledger": {
-                "claims": [
+            "evidence_ledger": {
+                "task_records": [
                     {
-                        "claim_id": "P1",
+                        "task_record_id": "P1",
                         "question": "minimal permissions",
                         "fields": ["permission", "example"],
                         "evidence_records": records,
@@ -712,18 +743,143 @@ def test_unkeyed_spans_from_one_source_object_share_one_unresolved_block():
         },
         query="minimal permissions",
     )
-    assert context["context_stats"]["source_count"] == 1
+    assert context["context_stats"]["source_count"] == 2
     assert "record identity unresolved" in context["text"]
+    assert "SPAN-1" not in context["text"]
+    assert "SPAN-2" not in context["text"]
+    assert context["selected_evidence"][0]["record_metadata"]["record_span_id"] == "SPAN-1"
+    assert context["selected_evidence"][1]["record_metadata"]["record_span_id"] == "SPAN-2"
     assert "id-token: write" in context["text"]
     assert "contents: read" in context["text"]
 
 
+def test_atomic_candidate_records_use_token_bounded_limit_beyond_legacy_page_cap():
+    records = [
+        {
+            "evidence_record_id": f"E-{index}",
+            "task_record_id": "P1",
+            "record_key": "",
+            "record_span_id": f"SPAN-{index}",
+            "quote": f"Exact grounded span {index}.",
+            "chunk_id": f"chunk-{index}",
+            "url": f"https://docs.example.test/page-{index}",
+            "source_object": {
+                "source_object_id": f"url:https://docs.example.test/page-{index}",
+                "source_object_type": "page_body",
+                "source_record_id": "",
+            },
+        }
+        for index in range(12)
+    ]
+    context = build_evidence_context(
+        {
+            "evidence_ledger": {
+                "task_records": [
+                    {
+                        "task_record_id": "P1",
+                        "question": "collect exact spans",
+                        "fields": ["value"],
+                        "evidence_records": records,
+                    }
+                ]
+            }
+        },
+        query="collect exact spans",
+    )
+
+    assert context["context_stats"]["legacy_page_source_limit"] == 8
+    assert context["context_stats"]["evidence_record_source_limit"] == 24
+    assert context["context_stats"]["source_count"] == 12
+    assert context["context_stats"]["configured_source_limit"] == 24
+    assert context["text"].count("RWKV-CANDIDATE SOURCE SPAN") == 12
+    assert "SOURCE OBJECT SPANS" not in context["text"]
+
+
+def test_atomic_candidate_record_packet_still_obeys_exact_token_budget():
+    records = [
+        {
+            "evidence_record_id": f"E-{index}",
+            "task_record_id": "P1",
+            "record_span_id": f"SPAN-{index}",
+            "quote": (f"Grounded span {index}. " * 80).strip(),
+            "chunk_id": f"chunk-{index}",
+            "url": f"https://docs.example.test/page-{index}",
+            "source_object": {
+                "source_object_id": f"url:https://docs.example.test/page-{index}",
+                "source_object_type": "page_body",
+            },
+        }
+        for index in range(20)
+    ]
+    context = build_evidence_context(
+        {
+            "evidence_ledger": {
+                "task_records": [
+                    {
+                        "task_record_id": "P1",
+                        "question": "collect bounded spans",
+                        "fields": ["value"],
+                        "evidence_records": records,
+                    }
+                ]
+            }
+        },
+        query="collect bounded spans",
+        token_budget=1200,
+    )
+
+    assert context["context_tokens"] <= 1200
+    assert context["context_stats"]["source_count"] <= 20
+    assert context["context_truncated"] is True
+
+
+def test_same_atomic_span_bound_to_two_task_records_packs_one_exact_quote():
+    source_object = {
+        "source_object_id": "url:https://docs.example.test/shared",
+        "source_object_type": "page_body",
+        "source_record_id": "",
+    }
+    task_records = []
+    for task_record_id, field in (("P1", "date"), ("P2", "version")):
+        task_records.append(
+            {
+                "task_record_id": task_record_id,
+                "question": field,
+                "fields": [field],
+                "evidence_records": [
+                    {
+                        "evidence_record_id": f"E-{task_record_id}",
+                        "task_record_id": task_record_id,
+                        "record_span_id": "SPAN-shared",
+                        "field_ids": [f"{task_record_id}:F1"],
+                        "quote": "One exact source span supports both requested fields.",
+                        "chunk_id": "chunk-1",
+                        "chunk_index": 0,
+                        "url": "https://docs.example.test/shared",
+                        "source_object": source_object,
+                    }
+                ],
+            }
+        )
+
+    context = build_evidence_context(
+        {"evidence_ledger": {"task_records": task_records}},
+        query="return the date and version",
+    )
+
+    assert context["context_stats"]["source_count"] == 1
+    assert context["context_stats"]["chunk_count"] == 1
+    selected = context["selected_evidence"][0]
+    assert selected["task_record_ids"] == ["P1", "P2"]
+    assert selected["packed_chunks"][0]["field_ids"] == ["P1:F1", "P2:F1"]
+
+
 def test_shared_source_merge_preserves_task_scoped_candidates_and_bindings():
     state = RetrievalEpisodeState()
-    state.claims.initialize(
+    state.evidence_ledger.initialize(
         {
             "goal": "Read two records from one release page",
-            "atomic_points": [
+            "records": [
                 {"id": "P1", "question": "version", "fields": ["version"]},
                 {"id": "P2", "question": "date", "fields": ["date"]},
             ],
@@ -731,7 +887,7 @@ def test_shared_source_merge_preserves_task_scoped_candidates_and_bindings():
         "Read two records from one release page",
     )
 
-    def result(point_id: str, quote: str, field: str) -> dict:
+    def result(task_record_id: str, quote: str, field: str) -> dict:
         return {
             "status": "ok",
             "results": [
@@ -739,20 +895,20 @@ def test_shared_source_merge_preserves_task_scoped_candidates_and_bindings():
                     "url": "https://example.test/releases",
                     "title": "Releases",
                     "content": quote,
-                    "claim_ids": [point_id],
+                    "task_record_ids": [task_record_id],
                     "chunk_candidates": [
                         {
                             "supported": True,
                             "source_grounded": True,
-                            "chunk_id": f"chunk-{point_id}",
-                            "task_record_ids": [point_id],
-                            "field_keys": [field],
+                            "chunk_id": f"chunk-{task_record_id}",
+                            "task_record_ids": [task_record_id],
+                            "field_ids": [f"{task_record_id}:F1"],
                             "quote": quote,
                         }
                     ],
                     "retrieval_request": {
-                        "request_id": f"R-{point_id}",
-                        "task_record_id": point_id,
+                        "request_id": f"R-{task_record_id}",
+                        "task_record_id": task_record_id,
                     },
                     "object_alignment": {
                         "relation": "not_explicitly_scoped",
@@ -761,8 +917,8 @@ def test_shared_source_merge_preserves_task_scoped_candidates_and_bindings():
             ],
         }
 
-    state.record_query("version query", result("P1", "Version 2.0", "version"), task_point_id="P1")
-    state.record_query("date query", result("P2", "Released 2026-08-13", "date"), task_point_id="P2")
+    state.record_query("version query", result("P1", "Version 2.0", "version"), task_record_id="P1")
+    state.record_query("date query", result("P2", "Released 2026-08-13", "date"), task_record_id="P2")
 
     source = state.source_records()[0]
     assert {row["quote"] for row in source["chunk_candidates"]} == {
@@ -804,10 +960,10 @@ def test_shared_source_merge_preserves_later_exact_object_alignment():
     }
 
 
-def test_shared_source_refreshes_every_bound_task_point_with_canonical_source():
+def test_shared_source_refreshes_every_bound_task_record_with_canonical_source():
     state = RetrievalEpisodeState()
 
-    def payload(point_id: str, quote: str, request_id: str) -> dict:
+    def payload(task_record_id: str, quote: str, request_id: str) -> dict:
         return {
             "status": "ok",
             "results": [
@@ -815,10 +971,10 @@ def test_shared_source_refreshes_every_bound_task_point_with_canonical_source():
                     "url": "https://example.test/releases",
                     "title": "Release table",
                     "content": "Version 2.0\nReleased 2026-08-13",
-                    "claim_ids": [point_id],
+                    "task_record_ids": [task_record_id],
                     "retrieval_request": {
                         "request_id": request_id,
-                        "task_record_id": point_id,
+                        "task_record_id": task_record_id,
                     },
                     "object_alignment": {"relation": "exact"},
                     "chunk_candidates": [
@@ -827,24 +983,24 @@ def test_shared_source_refreshes_every_bound_task_point_with_canonical_source():
                             "source_grounded": True,
                             "chunk_id": "table-record-1",
                             "quote": quote,
-                            "task_record_ids": [point_id],
+                            "task_record_ids": [task_record_id],
                         }
                     ],
                 }
             ],
         }
 
-    state.record_query("version", payload("P1", "Version 2.0", "R-1"), task_point_id="P1")
+    state.record_query("version", payload("P1", "Version 2.0", "R-1"), task_record_id="P1")
     state.record_query(
         "release date",
         payload("P2", "Released 2026-08-13", "R-2"),
-        task_point_id="P2",
+        task_record_id="P2",
     )
 
-    p1_source = next(iter(state.sources_by_claim["P1"].values()))
-    p2_source = next(iter(state.sources_by_claim["P2"].values()))
+    p1_source = next(iter(state.sources_by_task_record["P1"].values()))
+    p2_source = next(iter(state.sources_by_task_record["P2"].values()))
     for source in (p1_source, p2_source):
-        assert set(source["claim_ids"]) == {"P1", "P2"}
+        assert set(source["task_record_ids"]) == {"P1", "P2"}
         assert {row["request_id"] for row in source["retrieval_requests"]} == {
             "R-1",
             "R-2",
@@ -858,7 +1014,7 @@ def test_shared_source_refreshes_every_bound_task_point_with_canonical_source():
 def test_round_merge_unions_task_bindings_for_the_same_grounded_span():
     url = "https://example.test/releases"
 
-    def result(point_id: str) -> dict:
+    def result(task_record_id: str) -> dict:
         return {
             "status": "ok",
             "results": [
@@ -878,8 +1034,8 @@ def test_round_merge_unions_task_bindings_for_the_same_grounded_span():
                             "source_grounded": True,
                             "chunk_id": "table-record-1",
                             "quote": "Version 2.0 released 2026-08-13.",
-                            "task_record_ids": [point_id],
-                            "claim_ids": [point_id],
+                            "task_record_ids": [task_record_id],
+                            "task_record_ids": [task_record_id],
                         }
                     ],
                 }
@@ -895,14 +1051,14 @@ def test_round_merge_unions_task_bindings_for_the_same_grounded_span():
     candidates = merged["results"][0]["chunk_candidates"]
     assert len(candidates) == 1
     assert set(candidates[0]["task_record_ids"]) == {"P1", "P2"}
-    assert set(candidates[0]["claim_ids"]) == {"P1", "P2"}
+    assert set(candidates[0]["task_record_ids"]) == {"P1", "P2"}
 
 
 def test_object_identity_survives_round_merge_state_ledger_and_writer_context():
     plan = {
-        "schema_version": "task_plan.v2",
+        "contract": "rwkv.ecra.runtime.task-plan",
         "goal": "Find the current release of owner/project.",
-        "atomic_points": [
+        "records": [
             {
                 "id": "P1",
                 "question": "What is the current owner/project release?",
@@ -930,7 +1086,7 @@ def test_object_identity_survives_round_merge_state_ledger_and_writer_context():
                     "source_excerpt": body,
                     "evidence_origin": "fetched_page_body",
                     "body_verified": True,
-                    "claim_ids": ["P1"],
+                    "task_record_ids": ["P1"],
                     "source_object": {
                         "source_object_id": "github:owner/project",
                         "source_object_type": "github_repository",
@@ -947,9 +1103,9 @@ def test_object_identity_survives_round_merge_state_ledger_and_writer_context():
                             "chunk_id": "release-record-v2",
                             "quote": "owner/project release v2.0 was published on 2026-08-13.",
                             "task_record_ids": ["P1"],
-                            "claim_ids": ["P1"],
+                            "task_record_ids": ["P1"],
                             "record_key": "v2.0",
-                            "field_keys": ["version", "date"],
+                            "field_ids": ["P1:F1", "P1:F2"],
                         }
                     ],
                 }
@@ -965,21 +1121,21 @@ def test_object_identity_survives_round_merge_state_ledger_and_writer_context():
         ],
     )
     state = RetrievalEpisodeState()
-    state.claims.initialize(plan, plan["goal"])
+    state.evidence_ledger.initialize(plan, plan["goal"])
     state.record_query(
         "owner/project release",
         merged,
-        task_point_id="P1",
+        task_record_id="P1",
         step=1,
     )
 
     source = state.source_records()[0]
-    claim_snapshot = state.claims.snapshot()
-    record = claim_snapshot["claims"][0]["evidence_records"][0]
+    evidence_ledger_snapshot = state.evidence_ledger.snapshot()
+    record = evidence_ledger_snapshot["task_records"][0]["evidence_records"][0]
     planner_source = state.planner_evidence_snapshot()["sources"][0]
     planner_record = state.planner_record_snapshot()["records"][0]
     context = build_evidence_context(
-        {"results": state.source_records(), "claim_ledger": claim_snapshot},
+        {"results": state.source_records(), "evidence_ledger": evidence_ledger_snapshot},
         constraints={"task_plan": plan, "context_source_count": 2},
         query=plan["goal"],
     )
@@ -989,14 +1145,12 @@ def test_object_identity_survives_round_merge_state_ledger_and_writer_context():
             "unresolved",
             "exact",
         }
-    assert (
-        context["selected_evidence"][0]["context_selection"][
-            "object_alignment_relation"
-        ]
-        == "exact"
-    )
+    assert len(context["selected_evidence"]) == 1
+    assert context["selected_evidence"][0]["evidence_record_id"] == record["evidence_record_id"]
     assert "owner/project release v2.0" in context["text"]
-    assert "alignment observations" in context["text"]
+    assert "Compact record identity" in context["text"]
+    assert '"relation":"exact"' in context["text"]
+    assert '"retrieval_requests"' not in context["text"]
     assert '"relation":"unresolved"' in context["text"]
     assert '"relation":"exact"' in context["text"]
 
@@ -1079,9 +1233,6 @@ def test_round_merge_preserves_later_candidates_and_all_object_alignments():
         constraints={"context_source_count": 1},
         query="owner/project releases",
     )
-    assert (
-        context["selected_evidence"][0]["context_selection"][
-            "object_alignment_relation"
-        ]
-        == "exact"
-    )
+    # Round merging preserves retrieval metadata, but a raw merged page is not
+    # itself an Evidence Record and therefore cannot enter the Writer lane.
+    assert context["selected_evidence"] == []

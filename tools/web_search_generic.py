@@ -19,13 +19,19 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 from agent.page_evidence import build_page_chunks, extract_single_page_evidence, select_grounded_source_chunks
+from agent.retrieval_query_plan import (
+    generate_retrieval_query_plan,
+    public_retrieval_query_plan,
+    single_retrieval_query_plan,
+)
+from agent.runtime_contracts import MODEL_EXTRACTION_DIAGNOSTICS_CONTRACT
 from agent.retrieval_object_contract import (
     explicit_object_targets,
     object_alignment,
     source_object_contract,
     task_record_contract,
 )
-from agent.task_plan_contract import point_question, task_points
+from agent.task_plan_contract import record_question, record_id, task_records
 from clients.llm_client import LLMClient
 from config import DATA_PIPELINE, get_llm_context_length
 from tools.registry import ToolRegistry
@@ -44,7 +50,7 @@ from utils.source_authority import (
     annotate_source,
     explicit_domains,
     infer_candidate_authority_domains,
-    required_domains_for_task_point,
+    required_domains_for_task_record,
     resolve_source_policy,
 )
 from utils.web_retrieval import candidate_score, normalize_url, retrieval_url_identity
@@ -96,6 +102,54 @@ def _parse_result(value: Any) -> dict[str, Any]:
     return {"status": "error", "results": []}
 
 
+def _annotate_retrieval_query_result(
+    value: Any,
+    lane: dict[str, Any],
+    *,
+    adapter: str,
+) -> dict[str, Any]:
+    """Attach query-lane provenance without changing provider payload meaning."""
+
+    result = _parse_result(value)
+    provider = str(result.get("provider") or adapter or "web")
+    query_id = str(lane.get("query_id") or "Q1")
+    query_row = {
+        "query_id": query_id,
+        "task_record_id": str(lane.get("task_record_id") or ""),
+        "intent": str(lane.get("intent") or ""),
+        "query": str(lane.get("query") or "")[:500],
+    }
+    query_row = {
+        key: item for key, item in query_row.items() if str(item or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    for raw in result.get("results") or []:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        existing = item.get("discovery_queries") or []
+        if isinstance(existing, dict):
+            existing = [existing]
+        item["discovery_queries"] = [
+            *[dict(row) for row in existing if isinstance(row, dict)],
+            query_row,
+        ]
+        rows.append(item)
+    result.update(
+        {
+            "provider": provider,
+            "backend_provider": provider,
+            "ranking_stream": f"{provider}::{query_id}",
+            "retrieval_query_id": query_id,
+            "retrieval_query_task_record_id": str(lane.get("task_record_id") or ""),
+            "retrieval_query_intent": str(lane.get("intent") or ""),
+            "retrieval_query_text": str(lane.get("query") or "")[:500],
+            "results": rows,
+        }
+    )
+    return result
+
+
 def _pipeline_concurrency(name: str, default: int, *, maximum: int = 64) -> int:
     try:
         return max(1, min(int(DATA_PIPELINE.get(name, default) or default), maximum))
@@ -127,6 +181,36 @@ def _shared_source_urls(agent_state: Any) -> set[str]:
         and int((attempt_counts or {}).get(url, 0) or 0) >= failed_retry_limit
     }
     return accepted | frozen_failures
+
+
+def _admit_cached_and_novel_candidates(
+    candidates: list[dict[str, Any]],
+    seen_urls: set[str],
+    *,
+    limit: int,
+    per_domain_limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Select cached and network candidates without letting either crowd the other."""
+
+    cached = select_domain_diverse(
+        [
+            dict(item)
+            for item in candidates
+            if retrieval_url_identity(str(item.get("url") or "")) in seen_urls
+        ],
+        limit=limit,
+        per_domain_limit=per_domain_limit,
+    )
+    novel = select_domain_diverse(
+        [
+            dict(item)
+            for item in candidates
+            if retrieval_url_identity(str(item.get("url") or "")) not in seen_urls
+        ],
+        limit=limit,
+        per_domain_limit=per_domain_limit,
+    )
+    return cached, novel
 
 
 def _host(url: str) -> str:
@@ -243,8 +327,8 @@ def _official_cross_script_relevance(
     An English official URL cannot lexically contain the Chinese procedural
     half of a mixed-language query. A verified sitemap route with one exact
     Latin topic token is therefore enough to fetch the page, but never enough
-    by itself to support a Claim. The fetched body must still pass RWKV span
-    extraction, source authority, Claim binding, and relation validation.
+    by itself to support a Task Record. The fetched body must still pass RWKV span
+    extraction, source authority, Task Record binding, and relation validation.
     """
 
     result = dict(relevance or {})
@@ -304,6 +388,81 @@ def _merge_candidates(
         authority_query,
         {"task_plan": task_plan or {}},
     )
+    required_domain = str((source_policy.get("required_domains") or [""])[0])
+
+    def query_routes(item: dict[str, Any]) -> list[dict[str, str]]:
+        raw_routes = item.get("discovery_queries") or []
+        if isinstance(raw_routes, dict):
+            raw_routes = [raw_routes]
+        routes = [
+            {
+                "query_id": str(value.get("query_id") or "")[:40],
+                "task_record_id": str(value.get("task_record_id") or "")[:120],
+                "intent": str(value.get("intent") or "")[:120],
+                "query": " ".join(str(value.get("query") or "").split())[:500],
+            }
+            for value in raw_routes
+            if isinstance(value, dict) and str(value.get("query") or "").strip()
+        ]
+        route_texts = {route["query"].casefold() for route in routes}
+        if route_texts.isdisjoint({str(query).casefold()}):
+            routes.insert(
+                0,
+                {
+                    "query_id": "Q1",
+                    "task_record_id": "",
+                    "intent": "planner_primary",
+                    "query": str(query),
+                },
+            )
+        distinct: list[dict[str, str]] = []
+        seen_route_queries: set[str] = set()
+        for route in routes:
+            signature = route["query"].casefold()
+            if not signature or signature in seen_route_queries:
+                continue
+            seen_route_queries.add(signature)
+            distinct.append(route)
+        return distinct[:16]
+
+    def best_route_relevance(item: dict[str, Any]) -> tuple[dict[str, Any], float]:
+        evaluated: list[tuple[tuple[int, int, int, int, float], dict[str, Any], float]] = []
+        routes = query_routes(item)
+        for route in routes:
+            route_query = route["query"]
+            relevance = candidate_relevance(
+                item,
+                route_query,
+                domain=required_domain,
+                constraint_query=constraint_query or query,
+            )
+            relevance = _official_cross_script_relevance(
+                item,
+                relevance,
+                query=route_query,
+                constraint_query=constraint_query,
+                source_policy=source_policy,
+            )
+            relevance["matched_query"] = dict(route)
+            relevance["evaluated_query_count"] = len(routes)
+            try:
+                route_score = float(relevance.get("score") or 0.0)
+            except (TypeError, ValueError):
+                route_score = 0.0
+            rank = (
+                int(bool(relevance.get("raw_threshold_satisfied"))),
+                int(bool(relevance.get("anchor_satisfied"))),
+                int(bool(relevance.get("literal_satisfied"))),
+                len(relevance.get("term_hits") or []),
+                route_score,
+            )
+            evaluated.append((rank, relevance, candidate_score(route_query, item)))
+        if not evaluated:
+            return {}, candidate_score(query, item)
+        _rank, selected_relevance, _selected_score = max(
+            evaluated, key=lambda value: value[0]
+        )
+        return selected_relevance, max(value[2] for value in evaluated)
     requested_targets = explicit_object_targets(
         "\n".join(
             value
@@ -314,8 +473,8 @@ def _merge_candidates(
             if value
         )
     )
-    for point in task_points(task_plan or {}, fallback_query=constraint_query or query):
-        task_contract = task_record_contract(task_plan or {}, str(point.get("id") or ""))
+    for point in task_records(task_plan or {}, fallback_query=constraint_query or query):
+        task_contract = task_record_contract(task_plan or {}, record_id(point))
         for target in task_contract.get("requested_object_targets") or []:
             if not isinstance(target, dict):
                 continue
@@ -348,6 +507,14 @@ def _merge_candidates(
                     "source": str(item.get("source") or result.get("provider") or "web"),
                 }
             )
+            discovery_queries = item.get("discovery_queries") or []
+            if isinstance(discovery_queries, dict):
+                discovery_queries = [discovery_queries]
+            row["discovery_queries"] = [
+                dict(value)
+                for value in discovery_queries
+                if isinstance(value, dict)
+            ][:16]
             row["source_object"] = source_object_contract(row)
             row["object_alignment"] = object_alignment(
                 requested_targets,
@@ -358,25 +525,13 @@ def _merge_candidates(
                 authority_query,
                 {"task_plan": task_plan or {}},
             )
-            relevance = candidate_relevance(
-                row,
-                query,
-                domain=str((source_policy.get("required_domains") or [""])[0]),
-                constraint_query=constraint_query or query,
-            )
-            relevance = _official_cross_script_relevance(
-                row,
-                relevance,
-                query=query,
-                constraint_query=constraint_query,
-                source_policy=source_policy,
-            )
+            relevance, route_candidate_score = best_route_relevance(row)
             # Discovery relevance is a soft ranking feature.  Search snippets
             # are frequently sparse, translated, or generated from navigation
             # text; rejecting here can discard the useful page before its body
             # is fetched.  Only protocol/safety exclusions above are hard.
             row["query_relevance"] = relevance
-            row["candidate_score"] = candidate_score(query, row)
+            row["candidate_score"] = route_candidate_score
             row["discovery_score"] = float(item.get("discovery_score") or 0.0)
             row["provider_ranks"] = {
                 str(key): int(value)
@@ -428,6 +583,27 @@ def _merge_candidates(
             if source and source not in sources:
                 sources.append(source)
             existing["discovery_providers"] = sources
+            known_queries = {
+                (
+                    str(value.get("query_id") or ""),
+                    str(value.get("query") or "").casefold(),
+                )
+                for value in existing.get("discovery_queries") or []
+                if isinstance(value, dict)
+            }
+            for value in row.get("discovery_queries") or []:
+                if not isinstance(value, dict):
+                    continue
+                query_identity = (
+                    str(value.get("query_id") or ""),
+                    str(value.get("query") or "").casefold(),
+                )
+                if query_identity in known_queries:
+                    continue
+                known_queries.add(query_identity)
+                existing.setdefault("discovery_queries", []).append(dict(value))
+                if len(existing["discovery_queries"]) >= 16:
+                    break
             if len(row.get("snippet") or "") > len(existing.get("snippet") or ""):
                 existing["snippet"] = row["snippet"]
 
@@ -436,22 +612,10 @@ def _merge_candidates(
     # belongs to the final merged candidate, not whichever provider happened
     # to arrive first.  Recompute it after deduplication so provider order
     # cannot leave a canonical page carrying stale term hits.
-    required_domain = str((source_policy.get("required_domains") or [""])[0])
     for item in merged.values():
-        relevance = candidate_relevance(
-            item,
-            query,
-            domain=required_domain,
-            constraint_query=constraint_query or query,
-        )
-        item["query_relevance"] = _official_cross_script_relevance(
-            item,
-            relevance,
-            query=query,
-            constraint_query=constraint_query,
-            source_policy=source_policy,
-        )
-        item["candidate_score"] = candidate_score(query, item)
+        relevance, route_candidate_score = best_route_relevance(item)
+        item["query_relevance"] = relevance
+        item["candidate_score"] = route_candidate_score
 
     generic_ranking_terms = {
         "document", "documentation", "docs", "example", "examples", "guide",
@@ -826,28 +990,28 @@ def _resolve_failed_page_fetches(
     return resolved
 
 
-def _claim_evidence_focus(
+def _task_record_evidence_focus(
     query: str,
     task_plan: dict[str, Any] | None,
-    task_point_id: str,
+    task_record_id: str,
 ) -> str:
-    """Bind the unchanged extractor prompt to the active atomic claim."""
+    """Bind the unchanged extractor prompt to the active atomic task_record."""
 
-    point_id = str(task_point_id or "").strip()
-    if not point_id:
+    task_record_id = str(task_record_id or "").strip()
+    if not task_record_id:
         return str(query or "").strip()
     plan = task_plan if isinstance(task_plan, dict) else {}
     point = next(
         (
             item
-            for item in task_points(plan)
-            if isinstance(item, dict) and str(item.get("id") or "").strip() == point_id
+            for item in task_records(plan)
+            if isinstance(item, dict) and record_id(item) == task_record_id
         ),
         None,
     )
     if not isinstance(point, dict):
         return str(query or "").strip()
-    return (point_question(point) or str(query or "").strip())[:1600]
+    return (record_question(point) or str(query or "").strip())[:1600]
 
 
 def _requests_recency(value: Any) -> bool:
@@ -914,6 +1078,32 @@ def _cached_page_result(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _cached_extraction_matches_scope(
+    record: dict[str, Any],
+    *,
+    task_record_id: str,
+    evidence_focus: str,
+) -> bool:
+    """Return whether a cached projection was extracted for this exact route."""
+
+    requested_scope = str(task_record_id or "").strip()
+    if "attempt_task_record_id" not in record:
+        # Historical records did not persist extraction scope.  A task_record-bound
+        # request can use its locator binding as a conservative compatibility
+        # signal; an unbound request must re-extract because empty is not a
+        # wildcard over those old task_record-specific projections.
+        return bool(
+            requested_scope
+            and str(record.get("locator_task_record_id") or "").strip() == requested_scope
+        )
+    cached_scope = str(record.get("attempt_task_record_id") or "").strip()
+    if cached_scope != requested_scope:
+        return False
+    cached_focus = " ".join(str(record.get("locator_query") or "").split()).casefold()
+    requested_focus = " ".join(str(evidence_focus or "").split()).casefold()
+    return bool(cached_focus and requested_focus and cached_focus == requested_focus)
+
+
 def _compact_page(
     query: str,
     candidate: dict[str, Any],
@@ -921,7 +1111,7 @@ def _compact_page(
     llm: LLMClient,
     task_id: str,
     task_plan: dict[str, Any] | None = None,
-    task_point_id: str = "",
+    task_record_id: str = "",
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     pages = [item for item in fetched.get("results") or [] if isinstance(item, dict)]
     if len(pages) != 1:
@@ -934,7 +1124,7 @@ def _compact_page(
 
     page = pages[0]
     url = str(page.get("url") or candidate["url"])
-    evidence_focus = _claim_evidence_focus(query, task_plan, task_point_id)
+    evidence_focus = _task_record_evidence_focus(query, task_plan, task_record_id)
     raw_page_text = str(page.get("page_excerpt") or page.get("content") or "").strip()
     if page.get("body_cleaned") is True:
         page_text = raw_page_text
@@ -1147,13 +1337,13 @@ def _compact_page(
     if not source_excerpt:
         return None, page_evidence
 
-    rwkv_bound_claim_ids = list(
+    rwkv_bound_task_record_ids = list(
         dict.fromkeys(
-            str(claim_id).strip()
+            str(task_record_id).strip()
             for candidate_row in (evidence.get("candidates") or [])
             if isinstance(candidate_row, dict)
-            for claim_id in (candidate_row.get("claim_ids") or [])
-            if str(claim_id).strip()
+            for task_record_id in (candidate_row.get("task_record_ids") or [])
+            if str(task_record_id).strip()
         )
     )
 
@@ -1209,18 +1399,18 @@ def _compact_page(
         "chunk_candidates": evidence.get("chunk_candidates") or evidence.get("candidates") or [],
         "source_chunks": source_chunks,
         "selected_source_chunks": selected_source_chunks,
-        "claim_ids": rwkv_bound_claim_ids[:8],
+        "task_record_ids": rwkv_bound_task_record_ids[:8],
         # The Planner-selected point scopes the retrieval attempt and the
         # extractor prompt; it is not evidence that every fetched page proves
-        # that point. Only RWKV chunk bindings enter ``claim_ids`` above.
-        "attempt_task_point_id": task_point_id,
-        "locator_claim_id": (
-            rwkv_bound_claim_ids[0] if len(rwkv_bound_claim_ids) == 1 else ""
+        # that point. Only RWKV chunk bindings enter ``task_record_ids`` above.
+        "attempt_task_record_id": task_record_id,
+        "locator_task_record_id": (
+            rwkv_bound_task_record_ids[0] if len(rwkv_bound_task_record_ids) == 1 else ""
         ),
-        "claim_binding_origin": (
+        "task_record_binding_origin": (
             "rwkv_chunk_binding"
             if any(
-                candidate_row.get("claim_ids")
+                candidate_row.get("task_record_ids")
                 for candidate_row in (evidence.get("candidates") or [])
                 if isinstance(candidate_row, dict)
             )
@@ -1229,6 +1419,11 @@ def _compact_page(
         "locator_query": evidence_focus,
         "candidate_rank": candidate.get("candidate_rank"),
         "discovery_providers": candidate.get("discovery_providers") or [],
+        "discovery_queries": [
+            dict(value)
+            for value in candidate.get("discovery_queries") or []
+            if isinstance(value, dict)
+        ][:16],
         "authority": candidate.get("authority") or {},
         "model_extraction_status": page_evidence["model_extraction_status"],
         "model_extraction_degraded": page_evidence["extraction_degraded"],
@@ -1305,7 +1500,7 @@ def _model_extraction_diagnostics(pages: list[dict[str, Any]]) -> dict[str, Any]
             }
         )
     return {
-        "schema_version": "model-extraction-diagnostics.v1",
+        "contract": MODEL_EXTRACTION_DIAGNOSTICS_CONTRACT,
         "complete": not rows,
         "degraded_page_count": len(rows),
         "unresolved_chunk_count": sum(int(row["unresolved_chunk_count"]) for row in rows),
@@ -1313,6 +1508,36 @@ def _model_extraction_diagnostics(pages: list[dict[str, Any]]) -> dict[str, Any]
         "recovered_chunk_count": recovered_chunks,
         "pages": rows[:16],
     }
+
+
+def _recent_executed_queries(
+    retrieval: Any,
+    *,
+    history_limit: int = 8,
+    query_limit: int = 32,
+) -> list[str]:
+    """Flatten Planner and query expansion lanes into next-round query history."""
+
+    history = getattr(retrieval, "query_history", []) if retrieval is not None else []
+    recent: list[str] = []
+    seen: set[str] = set()
+    for item in list(history)[-max(1, int(history_limit)) :]:
+        if not isinstance(item, dict):
+            continue
+        values: list[Any] = [item.get("query")]
+        values.extend(
+            row.get("query")
+            for row in item.get("executed_queries") or []
+            if isinstance(row, dict)
+        )
+        for value in values:
+            query_value = " ".join(str(value or "").split()).strip()[:500]
+            marker = query_value.casefold()
+            if not query_value or marker in seen:
+                continue
+            seen.add(marker)
+            recent.append(query_value)
+    return recent[-max(1, int(query_limit)) :]
 
 
 @ToolRegistry.register(
@@ -1327,6 +1552,7 @@ def _model_extraction_diagnostics(pages: list[dict[str, Any]]) -> dict[str, Any]
     signature="""[Tool] web_search
 - Function: perform one bounded general-web retrieval transaction.
 - Parameters: query (one concise search query or one complete http/https URL), max_results (optional output-size hint). The backend independently over-recalls provider candidates and may fetch up to its configured evidence budget.
+- For a search phrase, the backend may ask RWKV for a few Task-Record-aware complementary queries and execute them concurrently; supply the best primary query instead of manually listing cosmetic variants. A complete URL is fetched directly and is never expanded.
 - Pipeline: discovery, candidate admission/ranking, bounded page fetch, Markdown extraction, adaptive evidence extraction (cleaned pages up to the configured threshold stay single-pass; longer pages are chunked).
 - Provider selection, URL fetching, page cleaning and chunk aggregation are internal backend steps; do not invent a provider-specific tool name.
 - The result is evidence only. It is not a final answer and does not decide whether the user's task is complete.""",
@@ -1337,17 +1563,17 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     agent_state = kwargs.get("agent_state")
     task_plan = kwargs.get("task_plan") if isinstance(kwargs.get("task_plan"), dict) else {}
     effective_task_plan = dict(task_plan)
-    task_point_id = str(kwargs.get("task_point_id") or "").strip()
+    task_record_id = str(kwargs.get("task_record_id") or "").strip()
     original_goal = str(kwargs.get("original_goal") or query).strip()
-    point_count = len(task_points(task_plan, fallback_query=original_goal))
+    task_record_count = len(task_records(task_plan, fallback_query=original_goal))
     constraint_query = (
-        _claim_evidence_focus(query, task_plan, task_point_id)
-        if task_point_id and point_count > 1
+        _task_record_evidence_focus(query, task_plan, task_record_id)
+        if task_record_id and task_record_count > 1
         else original_goal
     )
-    scoped_domains = required_domains_for_task_point(
+    scoped_domains = required_domains_for_task_record(
         effective_task_plan,
-        task_point_id,
+        task_record_id,
         fallback_query=query,
     )
     # A hostname invented by the task-plan model is useful as a discovery
@@ -1401,6 +1627,74 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         )
     if not query:
         return json.dumps({"status": "error", "message": "query is empty", "results": []}, ensure_ascii=False)
+
+    direct_url = _extract_direct_url(query) or _extract_single_goal_url(
+        kwargs.get("original_goal")
+    )
+    evidence_ledger_snapshot: dict[str, Any] = {}
+    retrieval = getattr(agent_state, "retrieval", None)
+    evidence_ledger = (
+        getattr(retrieval, "evidence_ledger", None)
+        if retrieval is not None
+        else None
+    )
+    if evidence_ledger is not None and hasattr(evidence_ledger, "snapshot"):
+        try:
+            evidence_ledger_snapshot = evidence_ledger.snapshot(max_spans_per_record=0)
+        except Exception:
+            evidence_ledger_snapshot = {}
+    recent_queries = _recent_executed_queries(retrieval)
+    query_plan_enabled = bool(
+        DATA_PIPELINE.get("retrieval_query_plan_enabled", True)
+        and kwargs.get("agentic_tool_loop")
+        and not direct_url
+    )
+    if query_plan_enabled:
+        runtime_metadata = getattr(agent_state, "run_metadata", {})
+        runtime_metadata = runtime_metadata if isinstance(runtime_metadata, dict) else {}
+        runtime_context = " ".join(
+            str(runtime_metadata.get(key) or "").strip()
+            for key in ("current_utc_datetime", "current_utc_date")
+            if str(runtime_metadata.get(key) or "").strip()
+        )
+        retrieval_query_plan = generate_retrieval_query_plan(
+            query,
+            original_goal,
+            effective_task_plan,
+            LLMClient(),
+            task_record_id=task_record_id,
+            evidence_ledger_snapshot=evidence_ledger_snapshot,
+            recent_queries=recent_queries,
+            runtime_context=runtime_context,
+        )
+    else:
+        retrieval_query_plan = single_retrieval_query_plan(
+            query,
+            task_record_id=task_record_id,
+            status="direct_url" if direct_url else "disabled",
+        )
+    query_lanes = [
+        dict(item)
+        for item in retrieval_query_plan.get("queries") or []
+        if isinstance(item, dict) and str(item.get("query") or "").strip()
+    ] or single_retrieval_query_plan(query, task_record_id=task_record_id)["queries"]
+    retrieval_query_plan_view = public_retrieval_query_plan(retrieval_query_plan)
+    append_task_event(
+        task_id,
+        "retrieval_query_plan",
+        phase="DISCOVERY",
+        action="web_search",
+        query=query,
+        task_record_id=task_record_id,
+        status=retrieval_query_plan.get("status", ""),
+        expanded=bool(retrieval_query_plan.get("expanded")),
+        queries=query_lanes,
+        attempts=int(retrieval_query_plan.get("attempts") or 0),
+        error=str(retrieval_query_plan.get("error") or "")[:1000],
+        raw_model_output=str(retrieval_query_plan.get("raw_model_output") or ""),
+        prompt=str(retrieval_query_plan.get("prompt") or ""),
+        decision_owner="rwkv" if query_plan_enabled else "backend",
+    )
 
     def source_resolution_payload() -> dict[str, Any]:
         value = effective_task_plan.get("source_resolution") or {}
@@ -1460,51 +1754,65 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             "chunk_target_tokens": DATA_PIPELINE.get("web_chunk_tokens", 4096),
             "chunk_max_tokens": DATA_PIPELINE.get("web_chunk_max_tokens", 2400),
             "page_evidence_concurrency": DATA_PIPELINE.get("web_page_evidence_concurrency", 8),
+            "retrieval_query_plan_enabled": query_plan_enabled,
+            "retrieval_query_plan_count": len(query_lanes),
+            "retrieval_query_plan_concurrency": DATA_PIPELINE.get("retrieval_query_plan_concurrency", 4),
         },
     )
 
-    def run_keyless() -> dict[str, Any]:
-        return _parse_result(
+    def run_keyless(lane: dict[str, Any]) -> dict[str, Any]:
+        return _annotate_retrieval_query_result(
             search_web_keyless(
-                query,
+                str(lane.get("query") or query),
                 max_results=provider_result_limit,
                 fetch_pages=0,
                 task_id=task_id,
                 agentic_tool_loop=True,
                 constraint_query=constraint_query,
-            )
+            ),
+            lane,
+            adapter="web.keyless",
         )
 
-    def run_tavily() -> dict[str, Any]:
-        return _parse_result(
+    def run_tavily(lane: dict[str, Any]) -> dict[str, Any]:
+        return _annotate_retrieval_query_result(
             search_web_tavily(
-                query,
+                str(lane.get("query") or query),
                 max_results=provider_result_limit,
                 search_depth="advanced",
                 topic="general",
                 task_id=task_id,
-            )
+            ),
+            lane,
+            adapter="web.tavily",
         )
 
-    def run_official_site() -> dict[str, Any]:
-        return discover_official_urls(
-            query,
-            source_policy.get("required_domains") or [],
-            max_results=provider_result_limit,
-            prefer_recent=_requests_recency(original_goal),
-            constraint_query=constraint_query,
+    def run_official_site(lane: dict[str, Any]) -> dict[str, Any]:
+        return _annotate_retrieval_query_result(
+            discover_official_urls(
+                str(lane.get("query") or query),
+                source_policy.get("required_domains") or [],
+                max_results=provider_result_limit,
+                prefer_recent=_requests_recency(original_goal),
+                constraint_query=constraint_query,
+            ),
+            lane,
+            adapter="official site adapter",
         )
 
-    def run_model_domain_hypothesis() -> dict[str, Any]:
-        return discover_official_urls(
-            query,
-            model_domain_hypotheses,
-            max_results=provider_result_limit,
-            prefer_recent=_requests_recency(original_goal),
-            constraint_query=constraint_query,
+    def run_model_domain_hypothesis(lane: dict[str, Any]) -> dict[str, Any]:
+        return _annotate_retrieval_query_result(
+            discover_official_urls(
+                str(lane.get("query") or query),
+                model_domain_hypotheses,
+                max_results=provider_result_limit,
+                prefer_recent=_requests_recency(original_goal),
+                constraint_query=constraint_query,
+            ),
+            lane,
+            adapter="official site adapter",
         )
 
-    direct_url = _extract_direct_url(query) or _extract_single_goal_url(kwargs.get("original_goal"))
     if direct_url:
         provider_results: list[dict[str, Any]] = []
         candidate_pool_shadow: list[dict[str, Any]] = []
@@ -1523,29 +1831,44 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             ]
         )
     else:
-        provider_jobs = (
-            [run_official_site, run_keyless, run_tavily]
-            if source_policy.get("required") and source_policy.get("required_domains")
-            else [run_model_domain_hypothesis, run_keyless, run_tavily]
-            if model_domain_hypotheses
-            else [run_keyless, run_tavily]
-        )
+        provider_jobs: list[
+            tuple[Any, dict[str, Any], str]
+        ] = []
+        primary_lane = query_lanes[0]
+        # Sitemap discovery is domain-scoped and can be expensive; run it once
+        # for the primary lane. General providers receive every query lane.
+        if source_policy.get("required") and source_policy.get("required_domains"):
+            provider_jobs.append((run_official_site, primary_lane, "official_site"))
+        elif model_domain_hypotheses:
+            provider_jobs.append(
+                (run_model_domain_hypothesis, primary_lane, "official_site_hypothesis")
+            )
+        for lane in query_lanes:
+            provider_jobs.extend(
+                (
+                    (run_keyless, lane, "keyless"),
+                    (run_tavily, lane, "tavily"),
+                )
+            )
         provider_results: list[dict[str, Any]] = [
             {"status": "error", "provider_errors": ["provider did not complete"], "results": []}
             for _ in provider_jobs
         ]
+        query_concurrency = _pipeline_concurrency(
+            "retrieval_query_plan_concurrency", 4, maximum=6
+        )
         pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=min(
                 max(
                     _pipeline_concurrency("web_provider_concurrency", 2),
-                    3 if len(provider_jobs) == 3 else 2,
+                    min(len(query_lanes), query_concurrency) * 2,
                 ),
                 len(provider_jobs),
             )
         )
         futures = {
-            submit_with_context(pool, job): index
-            for index, job in enumerate(provider_jobs)
+            submit_with_context(pool, job, lane): index
+            for index, (job, lane, _adapter) in enumerate(provider_jobs)
         }
         cancelled = False
         try:
@@ -1554,11 +1877,16 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                 try:
                     provider_results[index] = future.result()
                 except Exception as exc:
-                    provider_results[index] = {
-                        "status": "error",
-                        "provider_errors": [f"{type(exc).__name__}: {exc}"],
-                        "results": [],
-                    }
+                    _job, lane, adapter = provider_jobs[index]
+                    provider_results[index] = _annotate_retrieval_query_result(
+                        {
+                            "status": "error",
+                            "provider_errors": [f"{type(exc).__name__}: {exc}"],
+                            "results": [],
+                        },
+                        lane,
+                        adapter=adapter,
+                    )
         except concurrent.futures.TimeoutError:
             cancelled = True
             # This exception can be the acceptance runner's SIGALRM case
@@ -1632,7 +1960,11 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         resolved_preferred_domains = list(preferred_domains)
         verified_aliases: list[dict[str, Any]] = []
         for provider_result in provider_results:
-            if str(provider_result.get("provider") or "") != "official site adapter":
+            if str(
+                provider_result.get("backend_provider")
+                or provider_result.get("provider")
+                or ""
+            ) != "official site adapter":
                 continue
             aliases = [
                 dict(value)
@@ -1700,6 +2032,11 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         provider_statuses = [
             {
                 "provider": result.get("provider") or "unknown",
+                "ranking_stream": result.get("ranking_stream") or "",
+                "query_id": result.get("retrieval_query_id") or "",
+                "task_record_id": result.get("retrieval_query_task_record_id") or "",
+                "intent": result.get("retrieval_query_intent") or "",
+                "query": result.get("retrieval_query_text") or result.get("query") or "",
                 "status": result.get("status") or "error",
                 "count": int(result.get("count") or len(result.get("results") or [])),
                 "errors": result.get("provider_errors") or [],
@@ -1762,15 +2099,12 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                 constraint_query=constraint_query,
                 policy_query=original_goal,
             )
-            candidates = select_domain_diverse(
-                candidate_pool,
-                limit=max_pages,
-                per_domain_limit=_pipeline_concurrency(
-                    "web_per_domain_fetch_limit", 3, maximum=16
-                ),
-            )
-            for rank, item in enumerate(candidates, start=1):
+            for rank, item in enumerate(candidate_pool, start=1):
                 item["candidate_rank"] = rank
+            # Novelty is not known until the shared evidence store is read.
+            # Keep the complete fused pool here; applying the fetch slice now
+            # would let cached Top-N URLs permanently hide a novel rank N+1.
+            candidates = list(candidate_pool)
         else:
             candidate_pool = list(legacy_candidates)
             candidates = list(legacy_candidates)
@@ -1806,6 +2140,8 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             providers=[
                 {
                     "provider": result.get("provider") or "unknown",
+                    "ranking_stream": result.get("ranking_stream") or "",
+                    "query_id": result.get("retrieval_query_id") or "",
                     "raw_count": len(result.get("results") or []),
                     "status": result.get("status") or "error",
                 }
@@ -1828,6 +2164,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                     "rrf_rank": item.get("rrf_rank"),
                     "rrf_score": item.get("rrf_score"),
                     "provider_ranks": item.get("provider_ranks") or {},
+                    "discovery_queries": item.get("discovery_queries") or [],
                 }
                 for item in candidates
             ],
@@ -1843,49 +2180,55 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     # store. Reuse is handled from the store; do not refetch the same page as
     # a second recovery path.
     seen_urls = _shared_source_urls(agent_state)
-    novel_candidates = [
-        item for item in candidates
-        if retrieval_url_identity(str(item.get("url") or "")) not in seen_urls
-    ]
+    discovered_candidates = [dict(item) for item in candidates]
+    per_domain_fetch_limit = _pipeline_concurrency(
+        "web_per_domain_fetch_limit", 3, maximum=16
+    )
+    processing_candidates, novel_candidates = _admit_cached_and_novel_candidates(
+        discovered_candidates,
+        seen_urls,
+        limit=max_pages,
+        per_domain_limit=per_domain_fetch_limit,
+    )
     reused_records = []
     retrieval = getattr(agent_state, "retrieval", None)
     stored_sources = getattr(retrieval, "sources", {}) if retrieval is not None else {}
-    claim_sources = (
-        getattr(retrieval, "sources_by_claim", {}).get(task_point_id, {})
-        if retrieval is not None and task_point_id
+    task_record_sources = (
+        getattr(retrieval, "sources_by_task_record", {}).get(task_record_id, {})
+        if retrieval is not None and task_record_id
         else {}
     )
-    if not novel_candidates and stored_sources:
-        discovered_urls = {
-            retrieval_url_identity(str(item.get("url") or ""))
-            for item in candidates
-            if isinstance(item, dict) and str(item.get("url") or "").strip()
-        }
-        claim_by_url = {
+    if stored_sources:
+        stored_by_url = {
             retrieval_url_identity(str(item.get("url") or "")): item
-            for item in claim_sources.values()
+            for item in stored_sources.values()
             if isinstance(item, dict) and str(item.get("url") or "").strip()
         }
-        for item in stored_sources.values():
+        task_record_by_url = {
+            retrieval_url_identity(str(item.get("url") or "")): item
+            for item in task_record_sources.values()
+            if isinstance(item, dict) and str(item.get("url") or "").strip()
+        }
+        # Preserve candidate ranking while projecting already fetched URLs
+        # back to their cached page bodies.  Cached and novel candidates are
+        # two inputs to the same round, not mutually exclusive branches.
+        for candidate in processing_candidates:
+            normalized = retrieval_url_identity(str(candidate.get("url") or ""))
+            item = task_record_by_url.get(normalized) or stored_by_url.get(normalized)
             if not isinstance(item, dict):
                 continue
-            normalized = retrieval_url_identity(str(item.get("url") or ""))
-            if normalized not in discovered_urls:
-                continue
-            reused_records.append(dict(claim_by_url.get(normalized) or item))
-            if len(reused_records) >= max_pages:
-                break
-    if novel_candidates:
-        candidates = novel_candidates
-    elif not reused_records and seen_urls:
+            reused_records.append(dict(item))
+    candidates = novel_candidates
+    if not reused_records and not novel_candidates and seen_urls:
         result = {
             "status": "no_new_evidence",
             "real_network": False,
             "provider": "evidence_store",
             "retrieval_role": "discovery",
             "query": query,
+            "retrieval_query_plan": retrieval_query_plan_view,
             "count": 0,
-            "candidate_count": len(candidates),
+            "candidate_count": len(discovered_candidates),
             "fetched_count": 0,
             "results": [],
             "sources": [],
@@ -1923,16 +2266,17 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                     "discovery_score",
                     "query_relevance",
                     "discovery_providers",
+                    "discovery_queries",
                     "authority",
                     "source_object",
                     "object_alignment",
                 )
             }
-            for item in candidates
+            for item in discovered_candidates
         ],
     )
 
-    if not candidates:
+    if not candidates and not reused_records:
         errors = [
             str(error)
             for result in provider_results
@@ -1946,6 +2290,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                 "provider": "web.generic",
                 "retrieval_role": "discovery",
                 "query": query,
+                "retrieval_query_plan": retrieval_query_plan_view,
                 "count": 0,
                 "results": [],
                 "sources": [],
@@ -1963,18 +2308,29 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             indent=2,
         )
 
-    if reused_records:
+    if reused_records and not novel_candidates:
+        cache_evidence_focus = _task_record_evidence_focus(
+            constraint_query,
+            effective_task_plan,
+            task_record_id,
+        )
         bound_records = [
             dict(item)
             for item in reused_records
-            if not task_point_id
-            or str(item.get("locator_claim_id") or "").strip() == task_point_id
+            if _cached_extraction_matches_scope(
+                item,
+                task_record_id=task_record_id,
+                evidence_focus=cache_evidence_focus,
+            )
         ]
         foreign_records = [
             dict(item)
             for item in reused_records
-            if task_point_id
-            and str(item.get("locator_claim_id") or "").strip() != task_point_id
+            if not _cached_extraction_matches_scope(
+                item,
+                task_record_id=task_record_id,
+                evidence_focus=cache_evidence_focus,
+            )
         ]
         page_evidence: list[dict[str, Any]] = []
         if foreign_records:
@@ -1987,13 +2343,13 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                     {"task_plan": effective_task_plan},
                 )
                 return _compact_page(
-                    query,
+                    constraint_query,
                     candidate,
                     _cached_page_result(record),
                     llm,
                     task_id,
                     task_plan=effective_task_plan,
-                    task_point_id=task_point_id,
+                    task_record_id=task_record_id,
                 )
 
             workers = min(
@@ -2053,8 +2409,9 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             "provider": "evidence_store",
             "retrieval_role": "discovery",
             "query": query,
+            "retrieval_query_plan": retrieval_query_plan_view,
             "count": len(bound_records),
-            "candidate_count": len(candidates),
+            "candidate_count": len(discovered_candidates),
             "fetched_count": 0,
             "results": bound_records,
             "sources": [item.get("url", "") for item in bound_records],
@@ -2068,9 +2425,9 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             "source_resolution": source_resolution_payload(),
             "freshness_policy": freshness_policy,
             "evidence_policy": (
-                "claim-scoped chunk re-extraction from the shared page cache; no duplicate network fetch"
+                "task_record-scoped chunk re-extraction from the shared page cache; no duplicate network fetch"
                 if foreign_records
-                else "existing claim-scoped evidence projection; no duplicate network fetch"
+                else "existing task_record-scoped evidence projection; no duplicate network fetch"
             ),
         }
         append_task_event(
@@ -2081,9 +2438,36 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             stage="cache_reextract" if foreign_records else "reuse",
             query=query,
             count=len(bound_records),
-            task_point_id=task_point_id,
+            task_record_id=task_record_id,
         )
         return json.dumps(result, ensure_ascii=False, indent=2)
+
+    mixed_bound_records: list[dict[str, Any]] = []
+    mixed_foreign_records: list[dict[str, Any]] = []
+    if reused_records:
+        cache_evidence_focus = _task_record_evidence_focus(
+            constraint_query,
+            effective_task_plan,
+            task_record_id,
+        )
+        mixed_bound_records = [
+            dict(item)
+            for item in reused_records
+            if _cached_extraction_matches_scope(
+                item,
+                task_record_id=task_record_id,
+                evidence_focus=cache_evidence_focus,
+            )
+        ]
+        mixed_foreign_records = [
+            dict(item)
+            for item in reused_records
+            if not _cached_extraction_matches_scope(
+                item,
+                task_record_id=task_record_id,
+                evidence_focus=cache_evidence_focus,
+            )
+        ]
 
     llm = LLMClient()
     selected = candidates[:max_pages]
@@ -2112,6 +2496,18 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
     finally:
         shutdown_pool(pool, list(future_map), cancelled=cancelled)
 
+    network_fetched_count = len(fetched)
+    fetched.extend(
+        (
+            annotate_source(
+                dict(record),
+                original_goal,
+                {"task_plan": effective_task_plan},
+            ),
+            _cached_page_result(record),
+        )
+        for record in mixed_foreign_records
+    )
     fetched.sort(key=lambda item: int(item[0].get("candidate_rank") or 10**6))
     fetched = _resolve_failed_page_fetches(
         constraint_query,
@@ -2128,7 +2524,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
 
     def process_page(pair: tuple[dict[str, Any], dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         candidate, fetched_result = pair
-        # When Planner omits the optional task_point_id, extraction must retain
+        # When Planner omits the optional task_record_id, extraction must retain
         # the complete user request rather than inherit a narrow search query.
         # Otherwise a query for P1 makes RWKV's chunk locator blind to P2 even
         # when the same fetched paper/page contains both requested facts.
@@ -2139,7 +2535,7 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
             llm,
             task_id,
             task_plan=effective_task_plan,
-            task_point_id=task_point_id,
+            task_record_id=task_record_id,
         )
 
     processed: list[tuple[int, dict[str, Any] | None, dict[str, Any]]] = []
@@ -2171,7 +2567,10 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         shutdown_pool(pool, list(future_map), cancelled=cancelled)
 
     evidence_pages: list[dict[str, Any]] = []
-    records: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = [
+        annotate_freshness(item, freshness_policy)
+        for item in mixed_bound_records
+    ]
     for _, record, page_evidence in sorted(processed, key=lambda item: item[0]):
         evidence_pages.append(page_evidence)
         append_task_event(
@@ -2212,9 +2611,10 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         "provider": "web.generic",
         "retrieval_role": "discovery",
         "query": query,
+        "retrieval_query_plan": retrieval_query_plan_view,
         "count": len(records),
-        "candidate_count": len(candidates),
-        "fetched_count": len(fetched),
+        "candidate_count": len(discovered_candidates),
+        "fetched_count": network_fetched_count,
         "results": records,
         "sources": [item.get("url", "") for item in records],
         "citation_refs": refs,
@@ -2235,11 +2635,12 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
                     "source",
                     "candidate_score",
                     "discovery_providers",
+                    "discovery_queries",
                     "source_object",
                     "object_alignment",
                 )
             }
-            for item in candidates
+            for item in discovered_candidates
         ],
         "candidate_pool_shadow": {
             "enabled": rrf_shadow_enabled,
@@ -2256,13 +2657,26 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         },
         "page_evidence": evidence_pages,
         "evidence_ready": bool(usable_records),
+        "reused_sources": bool(reused_records),
+        "reextracted_cached_sources": bool(mixed_foreign_records),
+        "novel_source_count": len(
+            [
+                item
+                for item in records
+                if retrieval_url_identity(str(item.get("url") or "")) not in seen_urls
+            ]
+        ),
         "usable_evidence_count": len(usable_records),
         "evidence_missing_count": missing_page_count + (len(records) - len(usable_records)),
         "model_extraction": extraction_diagnostics,
         "retrieved_at": datetime.now().isoformat(timespec="seconds"),
         "freshness_policy": freshness_policy,
         "source_resolution": source_resolution_payload(),
-        "evidence_policy": "candidate URLs and Markdown chunk facts are untrusted evidence; the model decides whether to search again or summarize",
+        "evidence_policy": (
+            "mixed cached-scope re-extraction and novel page retrieval; candidate URLs and Markdown chunks remain untrusted evidence"
+            if reused_records
+            else "candidate URLs and Markdown chunk facts are untrusted evidence; the model decides whether to search again or summarize"
+        ),
     }
     append_task_event(
         task_id,
@@ -2272,8 +2686,8 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         stage="complete",
         query=query,
         status=result["status"],
-        candidate_count=len(candidates),
-        fetched_count=len(fetched),
+        candidate_count=len(discovered_candidates),
+        fetched_count=network_fetched_count,
         evidence_count=len(records),
         page_evidence=evidence_pages,
     )

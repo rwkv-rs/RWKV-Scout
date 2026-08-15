@@ -93,13 +93,13 @@
     },
     {
       "family": "protocol_and_recovery",
-      "operator": "add_cross_validation_protocol_repair",
+      "operator": "add_oracle_evidence_assessment_protocol_repair",
       "teaches": [
         "strict_json",
         "same_temperature_repair",
         "supported_facts"
       ],
-      "extension": "Include one masked malformed attempt and one valid corrected cross-validation object.",
+      "extension": "Include one masked malformed attempt and one valid corrected Oracle Evidence Assessment object.",
       "shortcut_rejection": [
         "never train loss on malformed attempt",
         "reject empty supported_facts"

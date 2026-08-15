@@ -92,7 +92,7 @@ def test_runtime_metadata_strips_reference_and_external_plan_fields():
         "acceptance_case_id": "Q01",
         "acceptance_criteria": ["must equal secret"],
         "task_plan": {"goal": "externally supplied"},
-        "claim_ledger": {"claims": [{"answer": "secret"}]},
+        "evidence_ledger": {"task_records": [{"answer": "secret"}]},
     }
     projected = runtime_metadata_only(raw)
     assert projected == {"max_tool_steps": 50}

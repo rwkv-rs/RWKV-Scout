@@ -4,22 +4,40 @@
     {
       "type": "task_plan",
       "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
         "goal": "Answer every requested field from frozen evidence without inventing facts.",
-        "atomic_points": [
+        "records": [
           {
-            "id": "P1",
-            "objective": "Find first public reveal date."
+            "record_id": "P1",
+            "question": "Find first public reveal date.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
           },
           {
-            "id": "P2",
-            "objective": "Find first anniversary event date."
+            "record_id": "P2",
+            "question": "Find first anniversary event date.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
           },
           {
-            "id": "P3",
-            "objective": "Find current live version and theme."
+            "record_id": "P3",
+            "question": "Find current live version and theme.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
           }
-        ],
-        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote."
+        ]
       }
     },
     {
@@ -98,7 +116,7 @@
       }
     },
     {
-      "type": "cross_validation",
+      "type": "oracle_evidence_assessment",
       "content": {
         "decision": "finish",
         "missing_points": [],
@@ -167,7 +185,7 @@
   ],
   "rejected_attempts": [
     {
-      "stage": "cross_validation",
+      "stage": "oracle_evidence_assessment",
       "failure_class": "supported_without_answer_ready_facts",
       "prompt": {
         "task_points": [

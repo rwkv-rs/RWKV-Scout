@@ -1,6 +1,6 @@
 """Mechanical validation metadata for retrieved evidence.
 
-This module never decides that a claim is true.  It produces inspectable
+This module never decides that a task_record is true.  It produces inspectable
 signals for source ordering, task-point coverage, and cross-source agreement so
 the final RWKV can state uncertainty instead of silently filling gaps.
 """
@@ -14,7 +14,7 @@ from typing import Any, Iterable
 
 from utils.evidence_quality import date_mentions, evidence_kind, evidence_text
 from utils.source_authority import authority_for_url, resolve_source_policy
-from agent.task_plan_contract import point_question, task_points
+from agent.task_plan_contract import record_fields, record_question, record_id, task_records
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u3400-\u9fff]{2,}")
@@ -189,7 +189,7 @@ def _latin_topic_terms(value: Any) -> set[str]:
     official page is English.  Comparing every translated planning word makes
     a genuine page look uncovered.  This helper intentionally keeps only
     product/entity/topic tokens that can be compared across that language
-    boundary; it is a routing signal, not a claim verifier.
+    boundary; it is a routing signal, not a task_record verifier.
     """
 
     terms: set[str] = set()
@@ -256,19 +256,19 @@ def source_quality(item: dict[str, Any]) -> dict[str, Any]:
 
 def _point_rows(constraints: dict[str, Any] | None, query: str) -> list[dict[str, Any]]:
     plan = (constraints or {}).get("task_plan") or {}
-    points = task_points(plan, fallback_query=query)
+    points = task_records(plan, fallback_query=query)
     if points:
         return [
             {
-                "id": str(point.get("id") or f"P{index}"),
+                "record_id": record_id(point),
                 "text": " ".join(
-                    [point_question(point), *[str(value) for value in point.get("fields") or []]]
+                    [record_question(point), *record_fields(point)]
                 ).strip(),
                 "acceptance": [],
             }
             for index, point in enumerate(points, start=1)
         ]
-    return [{"id": "P1", "text": str(query or ""), "acceptance": []}]
+    return [{"record_id": "P1", "text": str(query or ""), "acceptance": []}]
 
 
 def _coverage(point_text: str, body: str, query: str = "") -> dict[str, Any]:
@@ -430,7 +430,7 @@ def build_evidence_validation(
         if date_conflict:
             conflicts.append(
                 {
-                    "point_id": point["id"],
+                    "task_record_id": point["record_id"],
                     "type": "date_variants_observed",
                     "dates": observed_dates,
                     "sources": sorted(date_by_host),
@@ -446,7 +446,7 @@ def build_evidence_validation(
         )
         coverage_rows.append(
             {
-                "point_id": point["id"],
+                "task_record_id": point["record_id"],
                 "task": point["text"],
                 "status": (
                     "covered"
@@ -485,18 +485,18 @@ def build_evidence_validation(
         "validation_version": "evidence-validation.v1",
         "is_truth_judgement": False,
         "source_ranking": profiles,
-        "subquestion_coverage": coverage_rows,
+        "task_record_coverage": coverage_rows,
         "cross_source": {
-            "multi_source_points": sum(row["agreement"] == "multi_source_overlap" for row in coverage_rows),
-            "single_source_points": sum(row["agreement"] == "single_source" for row in coverage_rows),
-            "missing_points": sum(not row.get("answerable") for row in coverage_rows),
-            "authority_missing_points": sum(row["status"] == "authority_missing" for row in coverage_rows),
+            "multi_source_task_records": sum(row["agreement"] == "multi_source_overlap" for row in coverage_rows),
+            "single_source_task_records": sum(row["agreement"] == "single_source" for row in coverage_rows),
+            "missing_task_records": sum(not row.get("answerable") for row in coverage_rows),
+            "authority_missing_task_records": sum(row["status"] == "authority_missing" for row in coverage_rows),
             "repeated_fact_signatures": repeated_facts[:32],
             "candidate_conflicts": conflicts,
         },
         "policy": (
             "Signals are routing metadata only. They cannot promote snippets, titles, URLs, "
-            "model facts, source agreement, or third-party pages into an official claim without "
+            "model facts, source agreement, or third-party pages into an official task_record without "
             "direct EVIDENCE BODY text and a satisfied source policy."
         ),
     }

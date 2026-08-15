@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping, Sequence
 
+from agent.runtime_contracts import MODEL_EXTRACTION_DIAGNOSTICS_CONTRACT
 from agent.retrieval_object_contract import (
     merge_candidate_observations,
     merge_mapping_rows,
@@ -155,17 +156,17 @@ def merge_retrieval_results(
                 current = merged[key]
                 current["candidate_queries"] = list(dict.fromkeys([*current.get("candidate_queries", []), candidate_query]))
                 current["candidate_ranks"] = [*current.get("candidate_ranks", []), rank]
-                current["claim_ids"] = list(
+                current["task_record_ids"] = list(
                     dict.fromkeys(
                         [
                             *[
                                 str(value)
-                                for value in current.get("claim_ids") or []
+                                for value in current.get("task_record_ids") or []
                                 if str(value).strip()
                             ],
                             *[
                                 str(value)
-                                for value in item.get("claim_ids") or []
+                                for value in item.get("task_record_ids") or []
                                 if str(value).strip()
                             ],
                         ]
@@ -197,7 +198,7 @@ def merge_retrieval_results(
                 if item_chunk_chars > current_chunk_chars:
                     current["source_chunks"] = list(item_chunks)
                 # A focused follow-up on the same page can nominate different
-                # original chunks for a newly missing task point. Keep the
+                # original chunks for a newly missing Task Record. Keep the
                 # newest attention selection first while retaining prior
                 # selections and the complete source_chunks provenance.
                 selected_chunks: list[dict[str, Any]] = []
@@ -314,7 +315,7 @@ def merge_retrieval_results(
         "citation_refs": citation_refs,
         "evidence_missing_count": evidence_missing_count,
         "model_extraction": {
-            "schema_version": "model-extraction-diagnostics.v1",
+            "contract": MODEL_EXTRACTION_DIAGNOSTICS_CONTRACT,
             "complete": not extraction_events,
             "event_count": len(extraction_events),
             "degraded_page_count": sum(int(item["degraded_page_count"]) for item in extraction_events),

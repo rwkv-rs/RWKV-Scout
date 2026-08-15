@@ -68,9 +68,9 @@ OPERATOR_CARDS: list[dict[str, Any]] = [
     },
     {
         "family": "protocol_and_recovery",
-        "operator": "add_cross_validation_protocol_repair",
+        "operator": "add_oracle_evidence_assessment_protocol_repair",
         "teaches": ["strict_json", "same_temperature_repair", "supported_facts"],
-        "extension": "Include one masked malformed attempt and one valid corrected cross-validation object.",
+        "extension": "Include one masked malformed attempt and one valid corrected evidence-review object.",
         "shortcut_rejection": ["never train loss on malformed attempt", "reject empty supported_facts"],
     },
     {
@@ -178,14 +178,17 @@ def _source(
 
 
 def _plan(points: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    return {
-        "goal": "Answer every requested field from frozen evidence without inventing facts.",
-        "atomic_points": [dict(point) for point in points],
-        "completion_rule": "Every supported field has an exact value, source ref, and grounded quote.",
-    }
+    from agent.task_plan_contract import normalize_task_plan
+
+    return normalize_task_plan(
+        {
+            "goal": "Answer every requested field from frozen evidence without inventing facts.",
+            "records": [dict(point) for point in points],
+        }
+    )
 
 
-def _cross_validation(
+def _oracle_evidence_assessment(
     point_facts: Mapping[str, Sequence[Mapping[str, Any]]],
     *,
     missing_fields: Mapping[str, Sequence[str]] | None = None,
@@ -330,7 +333,7 @@ def build_current_version_seed(root: Path) -> Path:
         {"type": "task_plan", "content": _plan(points)},
         {"type": "tool_call", "tool": "web_search", "args": {"query": "Project Lumen current official update"}},
         {"type": "tool_result", "tool": "web_search", "content": {"results": sources}},
-        {"type": "cross_validation", "content": _cross_validation({"P1": facts})},
+        {"type": "oracle_evidence_assessment", "content": _oracle_evidence_assessment({"P1": facts})},
         {"type": "final", "content": answer},
     ]
     contract = {
@@ -426,17 +429,17 @@ def build_temporal_child(root: Path) -> Path:
         {"type": "tool_result", "tool": "web_search", "content": {"results": sources[:4]}},
         {"type": "tool_call", "tool": "web_search", "args": {"query": "site:updates.project-lumen.invalid current live update"}},
         {"type": "tool_result", "tool": "web_search", "content": {"results": [sources[4]]}},
-        {"type": "cross_validation", "content": _cross_validation({"P1": [reveal], "P2": [anniversary], "P3": [current_version, current_theme]})},
+        {"type": "oracle_evidence_assessment", "content": _oracle_evidence_assessment({"P1": [reveal], "P2": [anniversary], "P3": [current_version, current_theme]})},
         {"type": "final", "content": answer},
     ]
-    chosen_cv = _cross_validation({"P1": [reveal], "P2": [anniversary], "P3": [current_version, current_theme]})
+    chosen_assessment = _oracle_evidence_assessment({"P1": [reveal], "P2": [anniversary], "P3": [current_version, current_theme]})
     rejected_attempts = [
         {
-            "stage": "cross_validation",
+            "stage": "oracle_evidence_assessment",
             "failure_class": "supported_without_answer_ready_facts",
-            "prompt": {"task_points": ["P1", "P2", "P3"], "evidence_refs": ["S1", "S3", "S5"]},
+            "prompt": {"task_records": ["P1", "P2", "P3"], "evidence_refs": ["S1", "S3", "S5"]},
             "rejected": {"decision": "finish", "task_point_status": {"P1": {"status": "supported", "evidence_refs": ["S1"]}}},
-            "chosen": chosen_cv,
+            "chosen": chosen_assessment,
         },
         {
             "stage": "final",
@@ -499,7 +502,7 @@ def build_derived_date_seed(root: Path) -> Path:
         {"type": "tool_result", "tool": "direct_page", "content": sources[0]},
         {"type": "tool_call", "tool": "date_diff", "args": {"operation": "add_years", "date": "2030-11-07", "years": 1}},
         {"type": "tool_result", "tool": "date_diff", "content": {"result": "2031-11-07"}},
-        {"type": "cross_validation", "content": _cross_validation({"P1": [derived]})},
+        {"type": "oracle_evidence_assessment", "content": _oracle_evidence_assessment({"P1": [derived]})},
         {"type": "final", "content": answer},
     ]
     contract = {
@@ -592,7 +595,7 @@ def build_howto_authority_seed(root: Path) -> Path:
         {"type": "task_plan", "content": _plan([{"id": "P1", "objective": "Find official launcher requirements."}, {"id": "P2", "objective": "Find PortableBundle-specific community procedure and label its role."}])},
         {"type": "tool_call", "tool": "web_search", "args": {"query": "Nova Desktop PortableBundle menu launcher specification"}},
         {"type": "tool_result", "tool": "web_search", "content": {"results": sources}},
-        {"type": "cross_validation", "content": _cross_validation({"P1": [path_fact, fields_fact], "P2": [procedure_fact]})},
+        {"type": "oracle_evidence_assessment", "content": _oracle_evidence_assessment({"P1": [path_fact, fields_fact], "P2": [procedure_fact]})},
         {"type": "final", "content": answer},
     ]
     rejected_attempts = [
@@ -673,7 +676,7 @@ def build_direct_page_seed(root: Path) -> Path:
         {"type": "task_plan", "content": _plan([{"id": "P1", "objective": "Read the explicit page and bind the two requested fields."}])},
         {"type": "tool_call", "tool": "direct_page", "args": {"url": url}},
         {"type": "tool_result", "tool": "direct_page", "content": sources[0]},
-        {"type": "cross_validation", "content": _cross_validation({"P1": [selector, directions]})},
+        {"type": "oracle_evidence_assessment", "content": _oracle_evidence_assessment({"P1": [selector, directions]})},
         {"type": "final", "content": answer},
     ]
     contract = {

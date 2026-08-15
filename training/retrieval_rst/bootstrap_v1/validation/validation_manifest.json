@@ -17,7 +17,7 @@
         "claim_count": 3,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 30,
         "contamination": {
@@ -74,7 +74,7 @@
         "claim_count": 3,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 30,
         "contamination": {
@@ -131,7 +131,7 @@
         "claim_count": 3,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 30,
         "contamination": {
@@ -188,7 +188,7 @@
         "claim_count": 3,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 31,
         "contamination": {
@@ -245,7 +245,7 @@
         "claim_count": 1,
         "oracle_event_count": 7,
         "oracle_tool_call_count": 2,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 33,
         "contamination": {
@@ -302,7 +302,7 @@
         "claim_count": 1,
         "oracle_event_count": 7,
         "oracle_tool_call_count": 2,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 33,
         "contamination": {
@@ -359,7 +359,7 @@
         "claim_count": 1,
         "oracle_event_count": 7,
         "oracle_tool_call_count": 2,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 33,
         "contamination": {
@@ -416,7 +416,7 @@
         "claim_count": 1,
         "oracle_event_count": 7,
         "oracle_tool_call_count": 2,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 33,
         "contamination": {
@@ -473,7 +473,7 @@
         "claim_count": 2,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 21,
         "contamination": {
@@ -530,7 +530,7 @@
         "claim_count": 2,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 24,
         "answer_tokens": 22,
         "contamination": {
@@ -587,7 +587,7 @@
         "claim_count": 2,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 25,
         "answer_tokens": 24,
         "contamination": {
@@ -644,7 +644,7 @@
         "claim_count": 2,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 25,
         "answer_tokens": 24,
         "contamination": {
@@ -701,7 +701,7 @@
         "claim_count": 3,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 61,
         "contamination": {
@@ -758,7 +758,7 @@
         "claim_count": 3,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 61,
         "contamination": {
@@ -815,7 +815,7 @@
         "claim_count": 3,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 61,
         "contamination": {
@@ -872,7 +872,7 @@
         "claim_count": 3,
         "oracle_event_count": 5,
         "oracle_tool_call_count": 1,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 26,
         "answer_tokens": 61,
         "contamination": {
@@ -929,7 +929,7 @@
         "claim_count": 5,
         "oracle_event_count": 7,
         "oracle_tool_call_count": 2,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 27,
         "answer_tokens": 31,
         "contamination": {
@@ -986,7 +986,7 @@
         "claim_count": 5,
         "oracle_event_count": 7,
         "oracle_tool_call_count": 2,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 27,
         "answer_tokens": 33,
         "contamination": {
@@ -1043,7 +1043,7 @@
         "claim_count": 5,
         "oracle_event_count": 7,
         "oracle_tool_call_count": 2,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 27,
         "answer_tokens": 33,
         "contamination": {
@@ -1100,7 +1100,7 @@
         "claim_count": 5,
         "oracle_event_count": 7,
         "oracle_tool_call_count": 2,
-        "oracle_cross_validation_count": 1,
+        "oracle_evidence_assessment_count": 1,
         "instruction_tokens": 27,
         "answer_tokens": 33,
         "contamination": {

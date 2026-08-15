@@ -32,7 +32,7 @@ def test_pilot_pool_is_oracle_and_contract_valid(tmp_path: Path) -> None:
     for task in manifest["tasks"]:
         assert task["provenance"]["bundle_sha256"]
         assert task["metrics"]["claim_count"] >= 1
-        assert task["metrics"]["oracle_cross_validation_count"] >= 1
+        assert task["metrics"]["oracle_evidence_assessment_count"] >= 1
 
 
 def test_exports_keep_tool_outputs_unmasked_and_failures_out_of_sft(
@@ -169,3 +169,24 @@ def test_fictional_bootstrap_pool_validates_without_benchmark_answers(
     source_files = sorted((root / "tasks").glob("*/environment/sources.jsonl"))
     assert len(source_files) == 20
     assert all(".invalid" in path.read_text(encoding="utf-8") for path in source_files)
+
+
+def test_validator_accepts_migrated_task_record_status_key(tmp_path: Path) -> None:
+    root = _build(tmp_path)
+    bundle = root / "tasks/rrst_seed_lumen_current_001"
+    trajectory_path = bundle / "private/oracle_trajectory.json"
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    for event in trajectory.get("events") or []:
+        if event.get("type") != "oracle_evidence_assessment":
+            continue
+        content = event.get("content") or {}
+        if "task_point_status" in content:
+            content["task_record_status"] = content.pop("task_point_status")
+    trajectory_path.write_text(
+        json.dumps(trajectory, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    report = validate_bundle(bundle)
+
+    assert report.accepted is True

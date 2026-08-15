@@ -458,11 +458,13 @@ def get_model_replan_temperature(generation: int, reason: str = "") -> float:
     Replanning is exploratory, but a protocol repair, a source conflict and a
     repeated frozen path are not the same kind of request.  The old policy
     raised temperature only by generation count, even when the prompt was
-    asking for strict JSON, and reached 0.9 without changing the missing tool
-    contract.  This policy uses the model-visible failure reason first and only
-    permits a small extra increase for a repeated strategy stall.  The base
-    profile mirrors the empirically stable Math-500 NoCoT anti-repetition
-    sampler, which preserved JSON while escaping recurrent query trajectories.
+    asking for strict JSON. This policy uses the model-visible failure reason
+    first and caps every replan at 0.4; only a repeated strategy stall reaches
+    that cap. The base
+    profile is a retrieval-specific experimental policy.  Some starting values
+    came from the Math-500 NoCoT sampler, but they are not treated as validated
+    here: promotion requires retrieval Trace ablation showing a new executable
+    route without answer-quality regression.
     """
 
     sampling = MODEL_RUNTIME_CONFIG.get("sampling", {})
@@ -484,7 +486,10 @@ def get_model_replan_temperature(generation: int, reason: str = "") -> float:
     if "protocol" in reason_text or "json" in reason_text:
         return configured_float("planner_replan_protocol", 0.1)
     if "conflict" in reason_text or "contradict" in reason_text:
-        return configured_float("planner_replan_conflict", 0.5)
+        return min(
+            configured_float("planner_replan_max", 0.4),
+            configured_float("planner_replan_conflict", 0.4),
+        )
     if any(
         marker in reason_text
         for marker in (
@@ -496,11 +501,11 @@ def get_model_replan_temperature(generation: int, reason: str = "") -> float:
             "repeated",
         )
     ):
-        value = configured_float("planner_replan_stall", 0.8)
+        value = configured_float("planner_replan_stall", 0.3)
         if int(generation or 1) > 1:
-            value = configured_float("planner_replan_stall_escalated", 0.9)
-        return min(configured_float("planner_replan_max", 0.9), value)
-    return min(configured_float("planner_replan_max", 0.9), base)
+            value = configured_float("planner_replan_stall_escalated", 0.4)
+        return min(configured_float("planner_replan_max", 0.4), value)
+    return min(configured_float("planner_replan_max", 0.4), base)
 
 
 def get_llm_seed() -> int | None:

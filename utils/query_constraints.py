@@ -312,7 +312,7 @@ def candidate_relevance(
     A result is rejected only when a non-trivial query has no adequate lexical
     overlap, or when its title/URL advertises a different explicit version than
     the one requested.  Semantic support is still decided later by RWKV against
-    the fetched body and ClaimLedger.
+    the fetched body and EvidenceLedger.
     """
 
     if isinstance(row, Mapping):

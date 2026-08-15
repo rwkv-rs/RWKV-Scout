@@ -8,9 +8,9 @@ from agent.orchestrator import Orchestrator
 
 def _plan(count: int) -> dict:
     return {
-        "schema_version": "task_plan.v1",
+        "contract": "rwkv.ecra.runtime.task-plan",
         "goal": "goal",
-        "atomic_points": [
+        "records": [
             {"id": f"P{index}", "task": f"task {index}"}
             for index in range(1, count + 1)
         ],
@@ -18,7 +18,7 @@ def _plan(count: int) -> dict:
 
 
 class GlobalSharedLoopTests(unittest.TestCase):
-    def test_all_task_point_counts_use_one_shared_loop(self):
+    def test_all_task_record_counts_use_one_shared_loop(self):
         for count in (1, 2, 3, 8):
             orchestrator = Orchestrator()
             orchestrator.state.task_id = f"SINGLE_LOOP_{count}"
@@ -38,7 +38,7 @@ class GlobalSharedLoopTests(unittest.TestCase):
                 "single_rwkv_loop",
             )
             self.assertEqual(
-                orchestrator.state.run_metadata["retrieval_strategy_decision"]["point_count"],
+                orchestrator.state.run_metadata["retrieval_strategy_decision"]["record_count"],
                 count,
             )
 

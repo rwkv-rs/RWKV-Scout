@@ -410,7 +410,7 @@ def validate_bundle(
         )
         events = []
     event_types = Counter(str(event.get("type") or "") for event in events if isinstance(event, Mapping))
-    for required_type in ("task_plan", "tool_call", "cross_validation", "final"):
+    for required_type in ("task_plan", "tool_call", "oracle_evidence_assessment", "final"):
         if not event_types.get(required_type):
             report.add(
                 "oracle_stage_missing",
@@ -429,12 +429,16 @@ def validate_bundle(
             path="private/oracle_trajectory.json",
         )
     for event in events:
-        if not isinstance(event, Mapping) or event.get("type") != "cross_validation":
+        if not isinstance(event, Mapping) or event.get("type") != "oracle_evidence_assessment":
             continue
         content = event.get("content") or {}
         if not isinstance(content, Mapping):
             continue
-        point_status = content.get("task_point_status") or {}
+        point_status = (
+            content.get("task_record_status")
+            or content.get("task_point_status")
+            or {}
+        )
         if not isinstance(point_status, Mapping):
             continue
         for point_id, row in point_status.items():
@@ -559,7 +563,7 @@ def validate_bundle(
         if not matching_binding:
             report.add(
                 "oracle_fact_binding_missing",
-                f"oracle cross-validation does not bind {claim_id}",
+                f"oracle evidence-review does not bind {claim_id}",
                 path="private/oracle_trajectory.json",
             )
         if not bool(claim.get("may_be_public", False)) and _contains(instruction, expected):
@@ -627,7 +631,7 @@ def validate_bundle(
         "claim_count": len(claims),
         "oracle_event_count": len(events),
         "oracle_tool_call_count": event_types.get("tool_call", 0),
-        "oracle_cross_validation_count": event_types.get("cross_validation", 0),
+        "oracle_evidence_assessment_count": event_types.get("oracle_evidence_assessment", 0),
         "instruction_tokens": len(normalized_tokens(instruction)),
         "answer_tokens": len(normalized_tokens(reference_answer)),
         "contamination": contamination,
@@ -797,7 +801,7 @@ def _trajectory_messages(
                 }
             )
             continue
-        if event_type in {"task_plan", "tool_call", "cross_validation", "final"}:
+        if event_type in {"task_plan", "tool_call", "oracle_evidence_assessment", "final"}:
             content = event.get("content")
             if event_type == "tool_call":
                 content = {
@@ -866,7 +870,7 @@ def export_training_records(
                     }
                 )
                 continue
-            if event_type in {"task_plan", "tool_call", "cross_validation", "final"}:
+            if event_type in {"task_plan", "tool_call", "oracle_evidence_assessment", "final"}:
                 target = event.get("content")
                 if event_type == "tool_call":
                     target = {"tool": event.get("tool"), "args": event.get("args") or {}}

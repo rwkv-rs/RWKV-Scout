@@ -270,8 +270,8 @@ def _numeric_summary(values: list[Any]) -> dict[str, Any]:
 
 _RWKV_SEMANTIC_CONTROL_EVENTS = frozenset(
     {
-        "cross_validation",
-        "task_point_binding",
+        "evidence_review",
+        "task_record_binding",
         "planner_session_rebuilt",
         "task_replan",
     }
@@ -288,9 +288,9 @@ _PROHIBITED_OUTPUT_INTERVENTION_EVENTS = frozenset(
 )
 _RWKV_SEMANTIC_CONTROL_STAGES = frozenset(
     {
-        "cross_validation",
+        "evidence_review",
         "planner_replan",
-        "task_point_binding",
+        "task_record_binding",
     }
 )
 _PROHIBITED_OUTPUT_INTERVENTION_STAGES = frozenset(
@@ -439,6 +439,9 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                         "duration_ms",
                         "prompt_tokens",
                         "completion_tokens",
+                        "request_max_tokens",
+                        "finish_reason",
+                        "stop",
                         "request_stage",
                         "sampling_policy_reason",
                         "temperature",
@@ -466,7 +469,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "step": event.get("step"),
                     "phase": event.get("phase"),
                     "branch_id": event.get("branch_id") or "",
-                    "task_point_id": event.get("task_point_id") or "",
+                    "task_record_id": event.get("task_record_id") or "",
                     "action": event.get("action") or "",
                     "query": event.get("query") or "",
                     "data": event.get("data") or {},
@@ -528,15 +531,19 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             plan = event.get("data") or {}
             plans.append(
                 {
-                    "schema_version": plan.get("schema_version"),
-                "status": plan.get("status", "ok"),
-                "error_class": plan.get("error_class", ""),
-                "message": str(plan.get("message") or "")[:1000],
-                "raw_model_output_chars": len(str(plan.get("raw_model_output") or "")),
-                "point_count": len(plan.get("atomic_points") or []) if isinstance(plan, dict) else 0,
-                    "point_ids": [
-                        str(point.get("id") or "")
-                        for point in (plan.get("atomic_points") or [])
+                    "contract": plan.get("contract"),
+                    "status": plan.get("status", "ok"),
+                    "error_class": plan.get("error_class", ""),
+                    "message": str(plan.get("message") or "")[:1000],
+                    "raw_model_output_chars": len(
+                        str(plan.get("raw_model_output") or "")
+                    ),
+                    "record_count": len(plan.get("records") or [])
+                    if isinstance(plan, dict)
+                    else 0,
+                    "record_ids": [
+                        str(point.get("record_id") or "")
+                        for point in (plan.get("records") or [])
                         if isinstance(point, dict)
                     ],
                 }
@@ -545,12 +552,14 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             plan = event.get("data") or {}
             plans.append(
                 {
-                    "schema_version": plan.get("schema_version") if isinstance(plan, dict) else None,
+                    "contract": plan.get("contract")
+                    if isinstance(plan, dict)
+                    else None,
                     "status": plan.get("status", "ok") if isinstance(plan, dict) else "unknown",
-                    "point_count": len(plan.get("atomic_points") or []) if isinstance(plan, dict) else 0,
-                    "point_ids": [
-                        str(point.get("id") or "")
-                        for point in (plan.get("atomic_points") or [])
+                    "record_count": len(plan.get("records") or []) if isinstance(plan, dict) else 0,
+                    "record_ids": [
+                        str(point.get("record_id") or "")
+                        for point in (plan.get("records") or [])
                         if isinstance(point, dict)
                     ],
                 }
@@ -560,8 +569,8 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                 {
                     "step": event.get("step"),
                     "strategy": event.get("strategy") or "",
-                    "point_count": event.get("point_count") or 0,
-                    "point_ids": event.get("point_ids") or [],
+                    "record_count": event.get("record_count") or event.get("point_count") or 0,
+                    "record_ids": event.get("record_ids") or event.get("point_ids") or [],
                     "source": event.get("source") or "",
                     "reason": event.get("reason") or "",
                     "override": bool(event.get("override")),
@@ -579,7 +588,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "branch_id": event.get("branch_id") or "",
                     "branch_step": event.get("branch_step"),
                     "action": action,
-                    "task_point_id": event.get("task_point_id") or "",
+                    "task_record_id": event.get("task_record_id") or "",
                     "args": event.get("args") or {},
                     "planner_error": event.get("planner_error") or "",
                 }
@@ -679,7 +688,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                 {
                     "step": event.get("step"),
                     "status": data.get("status", ""),
-                    "missing_point_ids": data.get("missing_point_ids") or [],
+                    "missing_task_record_ids": data.get("missing_task_record_ids") or data.get("missing_point_ids") or [],
                     "reason": data.get("reason", ""),
                 }
             )
@@ -740,9 +749,9 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             "phase_counts": dict(phase_counts),
             "tool_result_statuses": dict(tool_result_statuses),
             "error_class_counts": dict(error_classes),
-            "task_point_selection": {
+            "task_record_selection": {
                 "decision_count": len(decisions),
-                "with_task_point_id": sum(bool(item.get("task_point_id")) for item in decisions),
+                "with_task_record_id": sum(bool(item.get("task_record_id")) for item in decisions),
             },
             "page_fetches": len(evidence),
             "web_search_page_evidence": sum(

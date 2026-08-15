@@ -17,11 +17,15 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from agent.task_plan_contract import compact_task_plan
+from agent.runtime_contracts import RETRIEVAL_OBJECT_CONTRACT
+from agent.task_plan_contract import (
+    compact_task_plan,
+    record_fields,
+    record_id,
+    task_records,
+)
 from utils.web_retrieval import normalize_url
 
-
-OBJECT_CONTRACT_VERSION = "retrieval-object.v2"
 
 _STRICT_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.@+-]+$")
 
@@ -285,7 +289,7 @@ def merge_candidate_observations(
     """Merge repeated grounded spans while preserving every route binding.
 
     The identity is the observable source span (chunk ID plus exact quote), not
-    whichever task point happened to retrieve it first.  Scalar labels remain
+    whichever Task Record happened to retrieve it first. Scalar labels remain
     model-authored; only set-like provenance fields are unioned.
     """
 
@@ -325,6 +329,7 @@ def merge_candidate_observations(
                 "task_record_ids",
                 "claim_ids",
                 "task_point_ids",
+                "field_ids",
                 "field_keys",
             ):
                 existing_values = list(current.get(key) or [])
@@ -375,35 +380,35 @@ def task_record_contract(
 ) -> dict[str, Any]:
     """Project one RWKV-authored task record without filling missing semantics."""
 
-    point_id = _text(task_record_id, 120)
+    task_record_id = _text(task_record_id, 120)
     plan = compact_task_plan(task_plan)
-    point = next(
+    task_record = next(
         (
             row
-            for row in plan.get("atomic_points") or []
-            if isinstance(row, Mapping) and _text(row.get("id"), 120) == point_id
+            for row in plan.get("records") or []
+            if isinstance(row, Mapping) and record_id(row) == task_record_id
         ),
         None,
     )
-    if not isinstance(point, Mapping):
-        return {"task_record_id": point_id} if point_id else {}
-    requested_subject = _text(point.get("subject"), 400)
-    point_descriptor = "\n".join(
+    if not isinstance(task_record, Mapping):
+        return {"task_record_id": task_record_id} if task_record_id else {}
+    requested_subject = _text(task_record.get("subject"), 400)
+    record_descriptor = "\n".join(
         value
         for value in (
-            _text(point.get("question"), 1200),
+            _text(task_record.get("question"), 1200),
             requested_subject,
         )
         if value
     )
-    requested_targets = explicit_object_targets(point_descriptor)
+    requested_targets = explicit_object_targets(record_descriptor)
 
     # A multi-object user goal must not be copied wholesale into every atomic
     # task record.  That previously made both ``owner/repo-a`` and
-    # ``owner/repo-b`` look exact for each point.  A single explicit goal-level
-    # identifier is a safe transport fallback when the RWKV point omitted the
+    # ``owner/repo-b`` look exact for each Task Record. A single explicit goal-level
+    # identifier is a safe transport fallback when the RWKV record omitted the
     # literal; multiple identifiers remain unresolved until RWKV names one in
-    # the point itself.
+    # the record itself.
     if not requested_targets:
         goal_targets = explicit_object_targets(_text(plan.get("goal"), 1200))
         if len(goal_targets) == 1:
@@ -412,7 +417,7 @@ def task_record_contract(
     registry_descriptor = "\n".join(
         value
         for value in (
-            point_descriptor,
+            record_descriptor,
             _text(plan.get("goal"), 1200),
         )
         if value
@@ -426,17 +431,18 @@ def task_record_contract(
             target["basis"],
         )
     return {
-        "task_record_id": point_id,
-        "question": _text(point.get("question"), 1200),
+        "task_record_id": task_record_id,
+        "question": _text(task_record.get("question"), 1200),
         "requested_subject": requested_subject,
-        "requested_relation": _text(point.get("relation"), 240),
-        "requested_fields": [
-            _text(value, 160)
-            for value in point.get("fields") or []
-            if _text(value, 160)
+        "requested_relation": _text(task_record.get("relation"), 240),
+        "requested_fields": record_fields(task_record),
+        "requested_field_ids": [
+            _text(field.get("field_id"), 160)
+            for field in task_record.get("fields") or []
+            if isinstance(field, Mapping) and _text(field.get("field_id"), 160)
         ][:16],
-        "time_scope": _text(point.get("time_scope"), 40) or "unspecified",
-        "set_semantics": _text(point.get("set_semantics"), 40) or "single",
+        "time_scope": _text(task_record.get("time_scope"), 40) or "unspecified",
+        "set_semantics": _text(task_record.get("set_semantics"), 40) or "single",
         "requested_object_targets": requested_targets,
     }
 
@@ -453,29 +459,25 @@ def retrieval_request_contract(
     args = deepcopy(dict(arguments or {}))
     task_record = task_record_contract(task_plan, task_record_id)
     if not task_record_id:
-        # ``task_point_id`` is optional model-authored trace metadata and G1i
+        # ``task_record_id`` is optional model-authored trace metadata and G1i
         # often omits it.  Object transport must not disappear as a result.
         # A singleton task plan supplies an unambiguous object scope while
         # explicitly retaining ``evidence_binding=False``; this never assigns
-        # a page span to that task record.  For a multi-point plan, only one
+        # a page span to that task record. For a multi-record plan, only one
         # literal goal-level identifier is safe to carry without choosing a
-        # point on RWKV's behalf.
+        # Task Record on RWKV's behalf.
         compact = compact_task_plan(task_plan)
-        points = [
-            row
-            for row in compact.get("atomic_points") or []
-            if isinstance(row, Mapping)
-        ]
-        if len(points) == 1:
-            point_id = _text(points[0].get("id"), 120)
-            singleton = task_record_contract(task_plan, point_id)
+        records = task_records(compact)
+        if len(records) == 1:
+            scope_task_record_id = record_id(records[0])
+            singleton = task_record_contract(task_plan, scope_task_record_id)
             task_record = {
                 "task_record_id": "",
                 "requested_object_targets": list(
                     singleton.get("requested_object_targets") or []
                 ),
                 "object_scope_basis": "singleton_task_plan",
-                "object_scope_task_record_id": point_id,
+                "object_scope_task_record_id": scope_task_record_id,
                 "evidence_binding": False,
             }
         else:
@@ -505,7 +507,7 @@ def retrieval_request_contract(
         ).encode("utf-8")
     ).hexdigest()[:20]
     return {
-        "schema_version": OBJECT_CONTRACT_VERSION,
+        "contract": RETRIEVAL_OBJECT_CONTRACT,
         "request_id": f"R-{digest}",
         "tool": _text(action, 120),
         "arguments": args,
@@ -616,7 +618,7 @@ def source_object_contract(
         "",
     )
     return {
-        "schema_version": OBJECT_CONTRACT_VERSION,
+        "contract": RETRIEVAL_OBJECT_CONTRACT,
         "source_object_id": object_id,
         "source_object_type": source_type or "web_page",
         "source_record_id": source_record_id,
@@ -667,19 +669,19 @@ def attach_result_object_contract(
         ):
             # A provider pipeline such as web_search may already have compared
             # the candidate against the literal user/task object set.  An
-            # omitted optional task-point ID must not erase that observation.
+            # omitted optional Task Record ID must not erase that observation.
             row["object_alignment"] = deepcopy(dict(existing_alignment))
         else:
             row["object_alignment"] = request_alignment
         rows.append(row)
     output["results"] = rows
     output["retrieval_request"] = request
-    output["object_contract_version"] = OBJECT_CONTRACT_VERSION
+    output["retrieval_object_contract"] = RETRIEVAL_OBJECT_CONTRACT
     return output
 
 
 __all__ = [
-    "OBJECT_CONTRACT_VERSION",
+    "RETRIEVAL_OBJECT_CONTRACT",
     "attach_result_object_contract",
     "explicit_object_targets",
     "github_repository_target",

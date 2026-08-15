@@ -1,20 +1,24 @@
 """Minimal task-scoped evidence index for RWKV.
 
-The ledger records which planned task points have retrieved source material.
+The ledger records which planned Task Records have retrieved source material.
 It never decides whether RWKV may answer, whether an answer is correct, or
-whether a source proves a semantic claim.
+whether a source proves a semantic task_record.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import threading
 from copy import deepcopy
 from typing import Any, Mapping
 
+from agent.evidence_records import assemble_grounded_candidates
+from agent.runtime_contracts import EVIDENCE_LEDGER_CONTRACT
+
 from agent.retrieval_object_contract import merge_mapping_rows
-from agent.task_plan_contract import task_points
+from agent.task_plan_contract import record_field_records, record_id, task_records
 
 
 def _status_entity_terms(value: Any) -> set[str]:
@@ -29,18 +33,240 @@ def _status_entity_terms(value: Any) -> set[str]:
 def _normalized_with_positions(value: str) -> tuple[str, list[int]]:
     output: list[str] = []
     positions: list[int] = []
-    pending_space = False
+    pending_space: int | None = None
     for index, char in enumerate(str(value or "")):
         if char.isspace():
-            pending_space = bool(output)
+            if output and pending_space is None:
+                pending_space = index
             continue
-        if pending_space:
+        if pending_space is not None:
             output.append(" ")
+            positions.append(pending_space)
+            pending_space = None
+        for folded in char.casefold():
+            output.append(folded)
             positions.append(index)
-            pending_space = False
-        output.append(char.casefold())
-        positions.append(index)
     return "".join(output).strip(), positions
+
+
+def _casefold_with_positions(value: str) -> tuple[str, list[int]]:
+    """Case-fold text while retaining one raw offset per folded code point."""
+
+    output: list[str] = []
+    positions: list[int] = []
+    for index, char in enumerate(str(value or "")):
+        for folded in char.casefold():
+            output.append(folded)
+            positions.append(index)
+    return "".join(output), positions
+
+
+def source_quote_view_with_positions(source_text: str) -> tuple[str, list[int]]:
+    """Render Markdown as visible text while retaining raw-source positions.
+
+    This is a transport projection for verbatim quote selection.  It removes
+    only common presentation syntax (for example a link destination) and does
+    not summarize, reorder, or semantically compare source text.
+    """
+
+    source = str(source_text or "")
+    single_emphasis_positions: set[int] = set()
+    for pattern in (
+        re.compile(r"(?<!\*)\*(?=\S)(.+?)(?<=\S)\*(?!\*)", re.DOTALL),
+        re.compile(r"(?<![\w_])_(?=\S)(.+?)(?<=\S)_(?![\w_])", re.DOTALL),
+    ):
+        for match in pattern.finditer(source):
+            single_emphasis_positions.update((match.start(), match.end() - 1))
+    visible: list[str] = []
+    positions: list[int] = []
+    index = 0
+    line_start = True
+
+    def append_range(start: int, end: int) -> None:
+        cursor = start
+        while cursor < end:
+            if source.startswith(("**", "__", "~~"), cursor):
+                cursor += 2
+                continue
+            if cursor in single_emphasis_positions:
+                cursor += 1
+                continue
+            char = source[cursor]
+            if char == "`":
+                cursor += 1
+                continue
+            if char == "\\" and cursor + 1 < end:
+                visible.append(source[cursor + 1])
+                positions.append(cursor + 1)
+                cursor += 2
+                continue
+            visible.append(char)
+            positions.append(cursor)
+            cursor += 1
+
+    while index < len(source):
+        char = source[index]
+        if char == "\n":
+            visible.append(char)
+            positions.append(index)
+            index += 1
+            line_start = True
+            continue
+
+        if line_start:
+            prefix = re.match(r"[ \t]{0,3}(?:#{1,6}|>|[-+*])(?:[ \t]+)", source[index:])
+            if prefix:
+                index += prefix.end()
+                line_start = False
+                continue
+            fence = re.match(r"[ \t]{0,3}```[^\n]*", source[index:])
+            if fence:
+                index += fence.end()
+                line_start = False
+                continue
+            if not char.isspace():
+                line_start = False
+
+        link_start = index + 1 if char == "!" and index + 1 < len(source) and source[index + 1] == "[" else index
+        if source[link_start : link_start + 1] == "[":
+            close = source.find("](", link_start + 1)
+            if close >= 0:
+                depth = 1
+                cursor = close + 2
+                while cursor < len(source) and depth:
+                    if source[cursor] == "(":
+                        depth += 1
+                    elif source[cursor] == ")":
+                        depth -= 1
+                    cursor += 1
+                if depth == 0:
+                    append_range(link_start + 1, close)
+                    index = cursor
+                    continue
+
+        if char == "<":
+            close = source.find(">", index + 1)
+            if close >= 0:
+                inner = source[index + 1 : close]
+                # CommonMark autolinks render the URI/address between the
+                # angle brackets.  They are visible text, not HTML tags.
+                if re.fullmatch(
+                    r"[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*", inner
+                ) or re.fullmatch(
+                    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+                    r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?",
+                    inner,
+                ):
+                    append_range(index + 1, close)
+                    index = close + 1
+                    continue
+                if re.fullmatch(r"/?[A-Za-z][^>]*", inner):
+                    index = close + 1
+                    continue
+        if source.startswith(("**", "__", "~~"), index):
+            index += 2
+            continue
+        if index in single_emphasis_positions:
+            index += 1
+            continue
+        if char == "`":
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(source):
+            visible.append(source[index + 1])
+            positions.append(index + 1)
+            index += 2
+            continue
+        if char in {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"}:
+            index += 1
+            continue
+        visible.append(char)
+        positions.append(index)
+        index += 1
+    return "".join(visible), positions
+
+
+def source_quote_view(source_text: str) -> str:
+    """Return an exact visible-text projection used only by the quote locator."""
+
+    return source_quote_view_with_positions(source_text)[0]
+
+
+def _normalized_projection_with_positions(
+    text: str,
+    source_positions: list[int],
+) -> tuple[str, list[int]]:
+    output: list[str] = []
+    positions: list[int] = []
+    pending_space: int | None = None
+    for index, char in enumerate(text):
+        source_index = source_positions[index]
+        if char.isspace():
+            if output and pending_space is None:
+                pending_space = source_index
+            continue
+        if pending_space is not None:
+            output.append(" ")
+            positions.append(pending_space)
+            pending_space = None
+        for folded in char.casefold():
+            output.append(folded)
+            positions.append(source_index)
+    return "".join(output), positions
+
+
+def _without_whitespace_with_positions(text: str) -> tuple[str, list[int]]:
+    """Remove Unicode whitespace only and retain every raw character index."""
+
+    output: list[str] = []
+    positions: list[int] = []
+    for index, char in enumerate(str(text or "")):
+        if char.isspace():
+            continue
+        output.append(char)
+        positions.append(index)
+    return "".join(output), positions
+
+
+def _unique_without_whitespace_span(
+    source: str,
+    quote: str,
+    *,
+    minimum_characters: int = 16,
+    maximum_raw_span: int = 5000,
+) -> tuple[int, int] | None:
+    """Locate one whitespace-only transport variant as a continuous raw span."""
+
+    compact_source, positions = _without_whitespace_with_positions(source)
+    compact_quote, _ = _without_whitespace_with_positions(quote)
+    if len(compact_quote) < max(1, int(minimum_characters)) or not positions:
+        return None
+
+    matches: list[int] = []
+    cursor = 0
+    while True:
+        match = compact_source.find(compact_quote, cursor)
+        if match < 0:
+            break
+        matches.append(match)
+        if len(matches) > 1:
+            return None
+        cursor = match + 1
+    if len(matches) != 1:
+        return None
+
+    compact_start = matches[0]
+    compact_end = compact_start + len(compact_quote) - 1
+    if compact_end >= len(positions):
+        return None
+    start = positions[compact_start]
+    end = positions[compact_end] + 1
+    if end <= start or end - start > max(1, int(maximum_raw_span)):
+        return None
+    raw_span = source[start:end]
+    if "".join(char for char in raw_span if not char.isspace()) != compact_quote:
+        return None
+    return start, end
 
 
 def locate_grounded_quote_span(
@@ -62,8 +288,23 @@ def locate_grounded_quote_span(
     start = source.find(quote)
     basis = "exact"
     if start < 0:
-        start = source.casefold().find(quote.casefold())
-        basis = "casefold"
+        folded_source, folded_positions = _casefold_with_positions(source)
+        folded_quote, _ = _casefold_with_positions(quote)
+        folded_start = folded_source.find(folded_quote)
+        if folded_start >= 0 and folded_positions and folded_quote:
+            folded_end = folded_start + len(folded_quote) - 1
+            if folded_end >= len(folded_positions):
+                return None
+            start = folded_positions[folded_start]
+            end = folded_positions[folded_end] + 1
+            # Expansion folds such as ß -> ss and İ -> i + combining dot
+            # make folded-string offsets incompatible with raw slicing.  The
+            # position map above is accepted only when the mapped raw span is
+            # exactly the same text under Unicode case folding.
+            if source[start:end].casefold() != quote.casefold():
+                start = -1
+            else:
+                basis = "casefold"
     if start < 0:
         normalized_source, positions = _normalized_with_positions(source)
         normalized_quote, _ = _normalized_with_positions(quote)
@@ -76,62 +317,29 @@ def locate_grounded_quote_span(
             end = positions[normalized_end] + 1
             basis = "normalized_whitespace"
         else:
-            # Extractors often preserve page words while normalizing Markdown
-            # headings and blank lines. Locate those verbatim fragments in
-            # order, then expose only the original contiguous source span.
-            fragments = [
-                line.strip()
-                for line in quote.splitlines()
-                if len("".join(line.split())) >= 8
-            ]
-            matches: list[tuple[int, int, str]] = []
-            cursor = 0
-            source_folded = source.casefold()
-            for fragment in fragments:
-                fragment_start = source.find(fragment, cursor)
-                fragment_basis = "exact"
-                if fragment_start < 0:
-                    fragment_start = source_folded.find(fragment.casefold(), cursor)
-                    fragment_basis = "casefold"
-                if fragment_start < 0:
-                    normalized_tail, tail_positions = _normalized_with_positions(source[cursor:])
-                    normalized_fragment, _ = _normalized_with_positions(fragment)
-                    tail_start = normalized_tail.find(normalized_fragment)
-                    if tail_start < 0 or not tail_positions:
-                        continue
-                    tail_end = tail_start + len(normalized_fragment) - 1
-                    if tail_end >= len(tail_positions):
-                        continue
-                    fragment_start = cursor + tail_positions[tail_start]
-                    fragment_end = cursor + tail_positions[tail_end] + 1
-                    fragment_basis = "normalized_whitespace"
-                else:
-                    fragment_end = fragment_start + len(fragment)
-                matches.append((fragment_start, fragment_end, fragment_basis))
-                cursor = fragment_end
-
-            matched_chars = sum(end_value - start_value for start_value, end_value, _ in matches)
-            visible_quote_chars = len("".join(quote.split()))
-            minimum_coverage = max(24, min(120, visible_quote_chars // 8))
-            strongest_match = max(
-                (end_value - start_value for start_value, end_value, _ in matches),
-                default=0,
+            visible_source, visible_positions = source_quote_view_with_positions(source)
+            normalized_visible, projected_positions = _normalized_projection_with_positions(
+                visible_source,
+                visible_positions,
             )
-            if matched_chars < minimum_coverage or (
-                len(matches) < 2 and strongest_match < 60
-            ):
-                return None
-            start = matches[0][0]
-            end = matches[-1][1]
-            if end - start > 5000:
-                return None
-            basis = "ordered_source_segments"
-            grounded_segment_count = len(matches)
-    else:
+            visible_start = normalized_visible.find(normalized_quote)
+            if visible_start >= 0 and projected_positions:
+                visible_end = visible_start + len(normalized_quote) - 1
+                if visible_end >= len(projected_positions):
+                    return None
+                start = projected_positions[visible_start]
+                end = projected_positions[visible_end] + 1
+                basis = "markdown_visible_exact"
+            else:
+                compact_span = _unique_without_whitespace_span(source, quote)
+                if compact_span is None:
+                    return None
+                start, end = compact_span
+                basis = "unique_without_whitespace"
+    elif basis == "exact":
         end = start + len(quote)
 
-    if basis != "ordered_source_segments":
-        grounded_segment_count = 1
+    grounded_segment_count = 1
 
     context_start = max(0, start - 240)
     context_end = min(len(source), end + 240)
@@ -216,6 +424,9 @@ def _source_record(item: Mapping[str, Any]) -> dict[str, Any]:
     record = {
         "title": str(item.get("title") or ""),
         "url": str(item.get("url") or ""),
+        "evidence_origin": str(item.get("evidence_origin") or ""),
+        "source_evidence_kind": str(item.get("evidence_kind") or ""),
+        "content_type": str(item.get("content_type") or ""),
         "retrieval_query": str(item.get("retrieval_query") or ""),
         "text_available": bool(_source_text(item)),
         "chunk_count": len(chunks) or int(item.get("chunk_count") or 0),
@@ -230,6 +441,9 @@ def _source_record(item: Mapping[str, Any]) -> dict[str, Any]:
         "source",
         "provider",
         "source_type",
+        "evidence_origin",
+        "source_evidence_kind",
+        "content_type",
         "published",
         "published_at",
         "updated",
@@ -259,8 +473,6 @@ def _source_record(item: Mapping[str, Any]) -> dict[str, Any]:
 def _candidate_task_record_ids(candidate: Mapping[str, Any]) -> list[str]:
     values = (
         candidate.get("task_record_ids")
-        or candidate.get("claim_ids")
-        or candidate.get("task_point_ids")
         or []
     )
     if isinstance(values, str):
@@ -271,27 +483,9 @@ def _candidate_task_record_ids(candidate: Mapping[str, Any]) -> list[str]:
 
 
 def _grounded_candidates(item: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Return grounded RWKV-selected spans without page-level route bindings."""
+    """Return grounded spans with opaque, non-semantic record identities."""
 
-    rows: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for candidate in [
-        *list(item.get("chunk_candidates") or []),
-        *list(item.get("candidates") or []),
-    ]:
-        if not isinstance(candidate, Mapping):
-            continue
-        if candidate.get("supported") is not True or candidate.get("source_grounded") is not True:
-            continue
-        quote = str(candidate.get("quote") or "").strip()
-        if not quote:
-            continue
-        identity = (str(candidate.get("chunk_id") or ""), quote)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        rows.append(deepcopy(dict(candidate)))
-    return rows
+    return assemble_grounded_candidates(item)
 
 
 def _evidence_record(
@@ -306,18 +500,39 @@ def _evidence_record(
     quote = str(candidate.get("quote") or "").strip()
     url = str(item.get("url") or "")
     chunk_id = str(candidate.get("chunk_id") or "")
-    digest_input = "\n".join((task_record_id, url, chunk_id, quote))
+    record_span_id = str(candidate.get("record_span_id") or "").strip()[:80]
+    if record_span_id:
+        span_identity = record_span_id
+    else:
+        # Compatibility for archived/structured candidates that predate the
+        # assembler's opaque span ID.  Locator coordinates are part of the
+        # atomic identity, so repeated text at two positions remains two
+        # EvidenceRecords.
+        locator = dict(candidate.get("source_locator") or {})
+        span_identity = json.dumps(
+            {
+                "source_id": url or str(item.get("content_sha256") or ""),
+                "chunk_id": str(locator.get("chunk_id") or chunk_id),
+                "char_start": int(locator.get("char_start") or 0),
+                "char_end": int(locator.get("char_end") or 0),
+                "quote_sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    digest_input = "\n".join((task_record_id, span_identity))
     evidence_record_id = "E-" + hashlib.sha256(
         digest_input.encode("utf-8")
     ).hexdigest()[:20]
     record_match = str(
-        candidate.get("record_match") or "candidate_record"
+        candidate.get("record_match") or "evidence_record_candidate"
     ).strip().casefold()
     field_contract_valid = bool(candidate.get("field_contract_valid", True))
     # A chunk-local extractor observes one source record but cannot decide
     # whether it is globally current/latest or the unique requested record.
     # Preserve it as a candidate for the later full-set RWKV comparison.
-    support_state = "rwkv_candidate_record"
+    support_state = "rwkv_evidence_record_candidate"
     primary_alignment = deepcopy(
         dict(
             candidate.get("object_alignment")
@@ -330,14 +545,21 @@ def _evidence_record(
         "task_record_id": task_record_id,
         "subject_key": str(candidate.get("subject_key") or "")[:300],
         "record_key": str(candidate.get("record_key") or "")[:300],
-        "field_keys": [
+        "record_span_id": record_span_id,
+        "parent_candidate_id": str(candidate.get("parent_candidate_id") or "")[:80],
+        "assembly_basis": str(candidate.get("assembly_basis") or "")[:80],
+        "atomic_quote_index": int(candidate.get("atomic_quote_index") or 0),
+        "field_ids": [
             str(value)[:160]
-            for value in candidate.get("field_keys") or []
+            for value in candidate.get("field_ids") or []
             if str(value).strip()
         ][:16],
         "source_id": url or str(item.get("content_sha256") or ""),
         "title": str(item.get("title") or ""),
         "url": url,
+        "evidence_origin": str(item.get("evidence_origin") or ""),
+        "source_evidence_kind": str(item.get("evidence_kind") or ""),
+        "content_type": str(item.get("content_type") or ""),
         "chunk_id": chunk_id,
         "chunk_index": int(candidate.get("chunk_index") or 0),
         "quote": quote[:1200],
@@ -378,6 +600,9 @@ def _evidence_record(
         "source",
         "provider",
         "source_type",
+        "evidence_origin",
+        "source_evidence_kind",
+        "content_type",
         "published",
         "published_at",
         "updated",
@@ -432,7 +657,7 @@ def _merge_evidence_record(
     return changed
 
 
-def _merge_claim_source(
+def _merge_task_record_source(
     current: dict[str, Any],
     incoming: Mapping[str, Any],
 ) -> bool:
@@ -498,7 +723,7 @@ def _merge_claim_source(
 
 
 def _source_from_evidence_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Compatibility source view containing one grounded candidate record."""
+    """Compatibility source view containing one grounded Evidence Record."""
 
     source = {
         "title": str(record.get("title") or ""),
@@ -511,9 +736,12 @@ def _source_from_evidence_record(record: Mapping[str, Any]) -> dict[str, Any]:
                 "chunk_id": str(record.get("chunk_id") or ""),
                 "index": int(record.get("chunk_index") or 0),
                 "text": str(record.get("quote") or ""),
-                "field_keys": list(record.get("field_keys") or []),
+                "field_ids": list(record.get("field_ids") or []),
                 "subject_key": str(record.get("subject_key") or ""),
                 "record_key": str(record.get("record_key") or ""),
+                "record_span_id": str(record.get("record_span_id") or ""),
+                "parent_candidate_id": str(record.get("parent_candidate_id") or ""),
+                "assembly_basis": str(record.get("assembly_basis") or ""),
                 "object_alignment": deepcopy(
                     dict(record.get("object_alignment") or {})
                 ),
@@ -530,6 +758,9 @@ def _source_from_evidence_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "source",
         "provider",
         "source_type",
+        "evidence_origin",
+        "source_evidence_kind",
+        "content_type",
         "published",
         "published_at",
         "updated",
@@ -553,21 +784,19 @@ def _source_from_evidence_record(record: Mapping[str, Any]) -> dict[str, Any]:
     return source
 
 
-class ClaimLedger:
+class EvidenceLedger:
     """Record grounded candidate spans per RWKV-planned factual record.
 
-    The historical class name is retained for API compatibility. Search-route
-    metadata never binds a whole page to a factual record. A web span is bound
-    only when RWKV's chunk extractor names that record and the quote maps back
-    to fetched text. Structured harness output may use the RWKV-selected tool
-    route because it is already an exact typed record rather than a web page.
+    Search-route metadata never binds a whole page to a factual record. A web
+    span is bound only when RWKV's chunk extractor names that record and the
+    quote maps back to fetched text. Structured harness output may use the
+    RWKV-selected tool route because it is already an exact typed record rather
+    than a web page.
     """
-
-    VERSION = "evidence-ledger.v1"
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._claims: dict[str, dict[str, Any]] = {}
+        self._task_records: dict[str, dict[str, Any]] = {}
         self._source_policy = "open_web"
         self._required_domains: list[str] = []
         self._query = ""
@@ -576,7 +805,7 @@ class ClaimLedger:
 
     def reset(self) -> None:
         with self._lock:
-            self._claims.clear()
+            self._task_records.clear()
             self._source_policy = "open_web"
             self._required_domains = []
             self._query = ""
@@ -585,7 +814,7 @@ class ClaimLedger:
 
     def initialize(self, task_plan: Mapping[str, Any] | None, query: str) -> None:
         plan = task_plan if isinstance(task_plan, Mapping) else {}
-        points = task_points(plan, fallback_query=query)
+        records = task_records(plan, fallback_query=query)
         with self._lock:
             self.reset()
             self._query = str(query or "")
@@ -593,31 +822,27 @@ class ClaimLedger:
             # connectors. The factual plan is deliberately not a policy gate.
             self._source_policy = "open_web"
             self._required_domains = []
-            for index, point in enumerate(points, start=1):
-                claim_id = str(point.get("id") or f"P{index}").strip() or f"P{index}"
-                self._claims[claim_id] = {
-                    "claim_id": claim_id,
-                    "question": str(point.get("question") or query or ""),
-                    "subject": str(point.get("subject") or ""),
-                    "relation": str(point.get("relation") or ""),
-                    "fields": [
-                        str(value)
-                        for value in point.get("fields") or []
-                        if str(value).strip()
-                    ],
-                    "time_scope": str(point.get("time_scope") or "unspecified"),
-                    "set_semantics": str(point.get("set_semantics") or "single"),
+            for task_record in records:
+                task_record_id = record_id(task_record)
+                self._task_records[task_record_id] = {
+                    "task_record_id": task_record_id,
+                    "question": str(task_record.get("question") or query or ""),
+                    "subject": str(task_record.get("subject") or ""),
+                    "relation": str(task_record.get("relation") or ""),
+                    "fields": record_field_records(task_record),
+                    "time_scope": str(task_record.get("time_scope") or "unspecified"),
+                    "set_semantics": str(task_record.get("set_semantics") or "single"),
                     "premise_requires_verification": bool(
-                        point.get("premise_requires_verification")
+                        task_record.get("premise_requires_verification")
                     ),
                     "attempts": [],
                     "sources": [],
                     "evidence_records": [],
                 }
 
-    def claim_ids(self) -> list[str]:
+    def task_record_ids(self) -> list[str]:
         with self._lock:
-            return list(self._claims)
+            return list(self._task_records)
 
     def update_required_domains(self, domains: Any) -> None:
         values = [domains] if isinstance(domains, str) else list(domains or [])
@@ -640,13 +865,13 @@ class ClaimLedger:
         query: str,
         result: Mapping[str, Any],
         *,
-        task_point_id: str = "",
+        task_record_id: str = "",
         strategy: str = "",
         step: int = 0,
     ) -> dict[str, Any]:
         items = [item for item in result.get("results") or [] if isinstance(item, Mapping)]
         with self._lock:
-            route_target = task_point_id if task_point_id in self._claims else ""
+            route_target = task_record_id if task_record_id in self._task_records else ""
             added = 0
             added_records = 0
             updated_records = 0
@@ -654,7 +879,7 @@ class ClaimLedger:
             touched: set[str] = set()
 
             if route_target:
-                self._claims[route_target]["attempts"].append(
+                self._task_records[route_target]["attempts"].append(
                     {
                         "query": str(query or ""),
                         "strategy": str(strategy or ""),
@@ -673,11 +898,11 @@ class ClaimLedger:
                     targets = [
                         value
                         for value in _candidate_task_record_ids(candidate)
-                        if value in self._claims
+                        if value in self._task_records
                     ]
-                    for claim_id in targets:
+                    for task_record_id in targets:
                         assigned_records.append(
-                            _evidence_record(item, candidate, claim_id)
+                            _evidence_record(item, candidate, task_record_id)
                         )
 
                 # A typed connector is already one deterministic record. Its
@@ -701,8 +926,8 @@ class ClaimLedger:
                                 "quote": text,
                                 "source_locator": dict(item.get("source_locator") or {}),
                                 "grounding_basis": "structured_record",
-                                "field_keys": [],
-                                "record_match": "candidate_record",
+                                "field_ids": [],
+                                "record_match": "evidence_record_candidate",
                             },
                             route_target,
                             binding_origin="rwkv_structured_tool_route",
@@ -737,61 +962,61 @@ class ClaimLedger:
                     ]
 
                 for evidence_record in assigned_records:
-                    claim_id = str(evidence_record["task_record_id"])
-                    claim = self._claims[claim_id]
+                    task_record_id = str(evidence_record["task_record_id"])
+                    task_record = self._task_records[task_record_id]
                     record_id = str(evidence_record["evidence_record_id"])
                     existing_record = next(
                         (
                             row
-                            for row in claim["evidence_records"]
+                            for row in task_record["evidence_records"]
                             if str(row.get("evidence_record_id") or "") == record_id
                         ),
                         None,
                     )
                     if existing_record is None:
-                        claim["evidence_records"].append(deepcopy(evidence_record))
+                        task_record["evidence_records"].append(deepcopy(evidence_record))
                         canonical_record = evidence_record
                         added_records += 1
                     else:
                         if _merge_evidence_record(existing_record, evidence_record):
                             updated_records += 1
-                            touched.add(claim_id)
+                            touched.add(task_record_id)
                         canonical_record = existing_record
                     source = _source_from_evidence_record(canonical_record)
                     identity = source["url"] or source["title"]
                     existing_source = next(
                         (
                             row
-                            for row in claim["sources"]
+                            for row in task_record["sources"]
                             if identity
                             and (row.get("url") or row.get("title")) == identity
                         ),
                         None,
                     )
                     if existing_source is None:
-                        claim["sources"].append(source)
+                        task_record["sources"].append(source)
                         added += 1
                     else:
-                        if _merge_claim_source(existing_source, source):
-                            touched.add(claim_id)
-                    touched.add(claim_id)
+                        if _merge_task_record_source(existing_source, source):
+                            touched.add(task_record_id)
+                    touched.add(task_record_id)
 
             return {
                 "added_source_bindings": added,
                 "added_evidence_records": added_records,
                 "updated_evidence_records": updated_records,
                 "added_unassigned_sources": added_unassigned,
-                "touched_claim_ids": sorted(touched),
-                "claim_count": len(self._claims),
+                "touched_task_record_ids": sorted(touched),
+                "task_record_count": len(self._task_records),
                 "unassigned_source_count": len(self._unassigned_sources),
             }
 
-    def snapshot(self, *, max_spans_per_claim: int = 4) -> dict[str, Any]:
-        span_limit = max(0, int(max_spans_per_claim or 0))
+    def snapshot(self, *, max_spans_per_record: int = 4) -> dict[str, Any]:
+        span_limit = max(0, int(max_spans_per_record or 0))
         with self._lock:
-            claims = []
-            for claim in self._claims.values():
-                source_records = deepcopy(claim.get("sources") or [])
+            task_record_rows = []
+            for task_record in self._task_records.values():
+                source_records = deepcopy(task_record.get("sources") or [])
                 sources = []
                 for source in source_records[:8]:
                     projected = {
@@ -820,37 +1045,33 @@ class ClaimLedger:
                             distinct_spans.append(deepcopy(dict(span)))
                         projected["spans"] = distinct_spans[:span_limit]
                     sources.append(projected)
-                claims.append(
+                task_record_rows.append(
                     {
-                        "claim_id": claim["claim_id"],
-                        "question": claim["question"],
-                        "subject": claim.get("subject") or "",
-                        "relation": claim.get("relation") or "",
-                        "fields": deepcopy(claim["fields"]),
-                        "time_scope": claim["time_scope"],
-                        "set_semantics": claim.get("set_semantics") or "single",
+                        "task_record_id": task_record["task_record_id"],
+                        "question": task_record["question"],
+                        "subject": task_record.get("subject") or "",
+                        "relation": task_record.get("relation") or "",
+                        "fields": deepcopy(task_record["fields"]),
+                        "time_scope": task_record["time_scope"],
+                        "set_semantics": task_record.get("set_semantics") or "single",
                         "premise_requires_verification": bool(
-                            claim.get("premise_requires_verification")
+                            task_record.get("premise_requires_verification")
                         ),
                         "retrieval_state": (
                             "evidence_recorded"
-                            if claim.get("evidence_records")
+                            if task_record.get("evidence_records")
                             else "not_recorded"
                         ),
-                        "attempt_count": len(claim.get("attempts") or []),
+                        "attempt_count": len(task_record.get("attempts") or []),
                         "source_count": len(sources),
                         "evidence_record_count": len(
-                            claim.get("evidence_records") or []
+                            task_record.get("evidence_records") or []
                         ),
-                        # All page/structured records are candidates until a
-                        # full-set RWKV comparison.  The legacy exact count is
-                        # retained as zero for old audit readers only.
+                        # All page/structured Evidence Records remain candidates
+                        # until a full-set RWKV comparison.
                         "exact_record_count": 0,
-                        "candidate_record_count": len(
-                            claim.get("evidence_records") or []
-                        ),
                         "evidence_records": deepcopy(
-                            claim.get("evidence_records") or []
+                            task_record.get("evidence_records") or []
                         )[:32],
                         "sources": sources[:8],
                         # Compatibility alias for old trace readers. It is an
@@ -859,11 +1080,11 @@ class ClaimLedger:
                     }
                 )
             return {
-                "schema_version": self.VERSION,
+                "contract": EVIDENCE_LEDGER_CONTRACT,
                 "source_policy": self._source_policy,
                 "required_domains": list(self._required_domains),
-                "claim_count": len(claims),
-                "claims": claims,
+                "task_record_count": len(task_record_rows),
+                "task_records": task_record_rows,
                 "unassigned_source_count": len(self._unassigned_sources),
                 "unassigned_attempt_count": len(self._unassigned_attempts),
                 "unassigned_sources": [
@@ -878,4 +1099,9 @@ class ClaimLedger:
             }
 
 
-__all__ = ["ClaimLedger", "locate_grounded_quote_span"]
+__all__ = [
+    "EvidenceLedger",
+    "locate_grounded_quote_span",
+    "source_quote_view",
+    "source_quote_view_with_positions",
+]

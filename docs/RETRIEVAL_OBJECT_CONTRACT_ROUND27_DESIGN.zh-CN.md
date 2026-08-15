@@ -32,7 +32,7 @@ flowchart LR
     S --> E["Evidence Record Candidate"]
     E --> L["Candidate Ledger"]
     L --> V["RWKV 二选一 Cross Validation"]
-    V -->|继续| F["RWKV Gap Focus"]
+    V -->|继续| F["重建 RWKV Planner 会话"]
     F --> C
     V -->|回答| W["RWKV Writer"]
     W --> O["原样最终输出"]
@@ -161,10 +161,12 @@ Source Object 描述来源真实属于什么对象，而不是判断它是否回
 
 - 使用与 Writer 相同的候选证据投影。
 - RWKV 只做二选一：`continue_retrieval` 或 `write_answer`。
-- 每次产生新的证据 revision 后立即执行一次，不等待 Planner 先陷入重复路径。
-- 如果继续，独立的低温 RWKV Gap Focus 先选择一个任务点和未解决字段；随后高温 Replanner 自己生成工具和查询。
+- Planner 请求结束、重复/无进展资源边界、协议资源边界和最大步数边界，全部通过同一个 `finalize_or_replan` 出口。
+- 同一份证据与路由状态只复核一次；证据或完整请求路径发生变化后才允许再次复核。
+- 如果继续，直接重建 RWKV Planner 会话；由 Replanner 自己选择任务点、工具、完整参数和查询，不再插入独立 Gap Focus。
+- 最大步数边界上的 `continue_retrieval` 获得一个有界的三步窗口，使 RWKV 的复核决定能够真正执行，而不是被资源出口立即忽略。
 - 确定性代码不根据关键词、日期或来源等级覆盖 RWKV 的选择。
-- CV 缓存键同时包含 evidence revision 和唯一 frozen route 数量。新增失败路径会触发一次新的 RWKV 判断；同一路径反复命中只累加 `blocked_count`，不会伪造新状态并反复调用 CV。
+- CV 缓存键包含 evidence revision 以及已执行/冻结的完整 `route_id` 集合。新增失败路径会触发一次新的 RWKV 判断；同一路径反复命中只累加 `blocked_count`，不会伪造新状态并反复调用 CV。
 
 ### Writer
 
@@ -204,7 +206,6 @@ Round 27 改为保留最近有界路径：
 
 - Planner：0.1；
 - 二选一 Cross Validation：0.1；
-- Gap Focus：0.2；
 - 普通恢复：0.4；
 - CV 触发的 Replanner：0.8；
 - 重复策略仍未改变时：最高 0.9。
@@ -230,7 +231,7 @@ Round 27 改为保留最近有界路径：
 3. 删除 page-local exact/current 决策，Ledger 改为候选记录语义。
 4. 修复 HTML/code/table 结构保真。
 5. 修复 replan 的具体路径、独立请求边界与权威状态投影。
-6. 恢复同证据投影上的极简 RWKV Cross Validation，并在继续时增加 RWKV Gap Focus。
+6. 使用同证据投影上的极简 RWKV Cross Validation，并把所有合成出口统一到 `finalize_or_replan`；继续时直接重建 RWKV Planner。
 7. 按 Task Record 重组 Writer 上下文，保持最终输出原样。
 8. 完整单元测试、链路测试、真实 RWKV canary、服务器全量 100 题回归。
 
