@@ -5,11 +5,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from agent.orchestrator import Orchestrator, planner_environment_context, runtime_metadata_only
 from agent.planner import Planner
 from agent.state import AgentState
 from agent.task_plan_contract import normalize_task_plan
-from agent.unified_research import run_unified_research_loop
+from agent.unified_research import (
+    EvidenceReviewDecisionError,
+    run_unified_research_loop,
+)
 from tools.registry import ToolRegistry
 from app.services.workspace_files import read_task_report
 from utils.chunker import get_token_count
@@ -455,12 +460,49 @@ class FakeOwner:
 
     def _review_evidence_if_changed(self, *args, **kwargs):
         revision = int(self.state.retrieval.evidence_revision or 0)
-        if self.state.run_metadata.get("last_evidence_review_revision") == revision:
+        if (
+            not kwargs.get("terminal")
+            and self.state.run_metadata.get("last_evidence_review_revision") == revision
+        ):
             return None
         review = self._review_evidence(*args, **kwargs)
+        binding = {
+            "evidence_revision": revision,
+            "validation_state_signature": f"evidence:{revision}",
+            "evidence_lane_digest": f"fake-evidence-{revision}",
+        }
+        review.update(binding)
         if str(review.get("decision") or "") in {"finish", "replan"}:
             self.state.run_metadata["last_evidence_review_revision"] = revision
+            self.state.run_metadata["last_evidence_review"] = {
+                **review,
+                **binding,
+            }
         return review
+
+    def _current_evidence_review_decision(self, *_args, **_kwargs):
+        revision = int(self.state.retrieval.evidence_revision or 0)
+        cached = self.state.run_metadata.get("last_evidence_review")
+        if not isinstance(cached, dict):
+            return None
+        if cached.get("evidence_lane_digest") != f"fake-evidence-{revision}":
+            return None
+        return {**cached, "cached_review": True}
+
+    def _evidence_review_authorizes_writer(
+        self,
+        review,
+        *_args,
+        **_kwargs,
+    ):
+        revision = int(self.state.retrieval.evidence_revision or 0)
+        return bool(
+            isinstance(review, dict)
+            and str(review.get("decision") or "") == "finish"
+            and review.get("evidence_revision") == revision
+            and review.get("validation_state_signature") == f"evidence:{revision}"
+            and review.get("evidence_lane_digest") == f"fake-evidence-{revision}"
+        )
 
     def _complete_model_tool_loop(self, query, action, rounds, step, *, termination_reason):
         self.finished.append(
@@ -938,7 +980,7 @@ def test_exact_retrieval_request_can_be_reextracted_for_another_task_record(monk
     assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
 
 
-def test_evidence_review_protocol_error_cannot_block_writer(monkeypatch):
+def test_evidence_review_protocol_error_cannot_authorize_writer(monkeypatch):
     repeated = {
         "action": "web_search",
         "args": {"query": "same query"},
@@ -962,13 +1004,26 @@ def test_evidence_review_protocol_error_cannot_block_writer(monkeypatch):
         return json.dumps({"status": "ok", "results": []})
 
     monkeypatch.setattr(ToolRegistry, "execute", classmethod(execute))
-    answer = run_unified_research_loop(owner, "question", {}, _plan(), 10)
+    with pytest.raises(EvidenceReviewDecisionError):
+        run_unified_research_loop(owner, "question", {}, _plan(), 10)
 
-    assert answer == "rwkv final"
     assert calls == [("web_search", {"query": "same query"})]
     assert len(owner.review_calls) == 1
     assert len(_duplicate_recovery_turns(owner)) == 1
-    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
+    assert owner.finished == []
+
+
+def test_evidence_review_finish_with_stale_digest_cannot_authorize_writer():
+    owner = FakeOwner(
+        [{"action": "finish_task", "args": {}, "task_record_id": "P1"}],
+        reviews=[{"decision": "finish"}],
+    )
+    owner._evidence_review_authorizes_writer = lambda *_args, **_kwargs: False
+
+    with pytest.raises(EvidenceReviewDecisionError, match="current evidence digest"):
+        run_unified_research_loop(owner, "question", {}, _plan(), 5)
+
+    assert owner.finished == []
 
 
 def test_planner_finish_replans_only_when_rwkv_binary_review_requests_it(monkeypatch):
@@ -1021,7 +1076,7 @@ def test_planner_finish_replans_only_when_rwkv_binary_review_requests_it(monkeyp
     assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
 
 
-def test_evidence_review_replan_has_a_bounded_two_session_resource_limit():
+def test_evidence_review_replan_limit_requires_explicit_terminal_rwkv_finish():
     owner = FakeOwner(
         [
             {"action": "finish_task", "args": {}, "task_record_id": "P1"},
@@ -1030,29 +1085,17 @@ def test_evidence_review_replan_has_a_bounded_two_session_resource_limit():
         ],
         reviews=[
             {"decision": "replan"},
-            {"decision": "replan"},
-            {"decision": "replan"},
+            {"decision": "finish"},
         ],
     )
-
-    review_results = [
-        {"decision": "replan"},
-        {"decision": "replan"},
-        {"decision": "replan"},
-    ]
-
-    def review(*args, **kwargs):
-        owner.review_calls.append({"args": args, "kwargs": kwargs})
-        return review_results.pop(0)
-
-    owner._review_evidence_if_changed = review
 
     answer = run_unified_research_loop(owner, "question", {}, _plan(), 5)
 
     assert answer == "rwkv final"
     assert len(owner.review_calls) == 2
     assert len(owner.planner.rebuilt_sessions) == 2
-    assert owner.finished[0]["termination_reason"] == "rwkv_planner_finish"
+    assert owner.review_calls[-1]["kwargs"]["terminal"] is True
+    assert owner.finished[0]["termination_reason"] == "rwkv_evidence_review_finish"
 
 
 def test_max_step_exit_honors_rwkv_replan_with_bounded_execution_window(monkeypatch):
@@ -1465,6 +1508,50 @@ def test_evidence_review_uses_only_bounded_source_evidence(monkeypatch):
     assert get_token_count(captured["context"]) <= 14000
 
 
+def test_evidence_review_physically_separates_advisory_and_exact_evidence(monkeypatch):
+    orchestrator = Orchestrator()
+    orchestrator.state.task_id = "REVIEW_LANE_SEPARATION"
+    orchestrator.state.user_query = "current release"
+    plan = {"records": [{"id": "P1", "task": "current release"}]}
+    context = {
+        "text": "EXACT_FACT_SENTINEL",
+        "evidence_text": "EXACT_FACT_SENTINEL",
+        "evidence_resolution_view": "ADVISORY_SENTINEL",
+        "selected_evidence": [],
+        "context_stats": {
+            "context_tokens": 3,
+            "evidence_lane_digest": "digest-1",
+        },
+    }
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolved_writer_context",
+        lambda *_args, **_kwargs: context,
+    )
+    captured = {}
+
+    def review(_query, _plan, exact_evidence_text, routing_context="", **kwargs):
+        captured["exact"] = exact_evidence_text
+        captured["routing"] = routing_context
+        captured["advisory"] = kwargs.get("resolution_advisory")
+        return {"decision": "finish"}
+
+    orchestrator.planner.review_evidence = review
+    monkeypatch.setattr("agent.orchestrator.append_task_event", lambda *_args, **_kwargs: None)
+
+    result = orchestrator._review_evidence(
+        orchestrator.state.user_query,
+        plan,
+        step=1,
+    )
+
+    assert result["decision"] == "finish"
+    assert captured["exact"] == "EXACT_FACT_SENTINEL"
+    assert captured["advisory"] == "ADVISORY_SENTINEL"
+    assert "ADVISORY_SENTINEL" not in captured["exact"]
+    assert "EXACT_FACT_SENTINEL" not in captured["advisory"]
+
+
 def test_evidence_review_persists_only_binary_routing_state(monkeypatch):
     orchestrator = Orchestrator()
     orchestrator.state.task_id = "CROSS_VALIDATED_SOURCE_BINDING"
@@ -1519,12 +1606,13 @@ def test_evidence_review_persists_only_binary_routing_state(monkeypatch):
     assert emitted_events[-1][0][1] == "evidence_review"
     assert "task_record_status" not in emitted_events[-1][1]
     assert "validated_source_urls" not in orchestrator.state.run_metadata
-    assert orchestrator.state.run_metadata["last_evidence_review"] == {
-        "contract": "rwkv.ecra.runtime.evidence-review",
-        "decision": "finish",
-        "trigger": "planner_finish",
-        "evidence_revision": 1,
-    }
+    persisted = orchestrator.state.run_metadata["last_evidence_review"]
+    assert persisted["contract"] == "rwkv.ecra.runtime.evidence-review"
+    assert persisted["decision"] == "finish"
+    assert persisted["trigger"] == "planner_finish"
+    assert persisted["evidence_revision"] == 1
+    assert persisted["validation_state_signature"] == "evidence:1"
+    assert persisted["evidence_lane_digest"] == review["evidence_lane_digest"]
 
 
 def test_evidence_revision_changes_only_for_materially_new_evidence():

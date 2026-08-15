@@ -621,8 +621,9 @@ def test_related_repository_objects_stay_distinct_from_tool_result_to_writer_con
     }
     assert source_ids == {"github:oven-sh/bun", "github:oven-sh/setup-bun"}
     assert context["context_stats"]["source_count"] == 2
+    # Strongest (exact) object is rendered last, nearest the continuation point.
     assert (
-        context["selected_evidence"][0]["source_object"]["source_object_id"]
+        context["selected_evidence"][-1]["source_object"]["source_object_id"]
         == "github:oven-sh/bun"
     )
 
@@ -691,8 +692,9 @@ def test_omitted_optional_point_id_keeps_exact_object_first_end_to_end():
         constraints={"task_plan": plan, "context_source_count": 8},
         query=plan["goal"],
     )
+    # Strongest (exact) object is rendered last, nearest the continuation point.
     assert (
-        context["selected_evidence"][0]["source_object"]["source_object_id"]
+        context["selected_evidence"][-1]["source_object"]["source_object_id"]
         == "github:oven-sh/bun"
     )
 
@@ -747,8 +749,9 @@ def test_unkeyed_spans_from_one_source_object_remain_atomic_records():
     assert "record identity unresolved" in context["text"]
     assert "SPAN-1" not in context["text"]
     assert "SPAN-2" not in context["text"]
-    assert context["selected_evidence"][0]["record_metadata"]["record_span_id"] == "SPAN-1"
-    assert context["selected_evidence"][1]["record_metadata"]["record_span_id"] == "SPAN-2"
+    # Final render reverses order; both atomic spans still arrive distinct.
+    assert context["selected_evidence"][0]["record_metadata"]["record_span_id"] == "SPAN-2"
+    assert context["selected_evidence"][1]["record_metadata"]["record_span_id"] == "SPAN-1"
     assert "id-token: write" in context["text"]
     assert "contents: read" in context["text"]
 

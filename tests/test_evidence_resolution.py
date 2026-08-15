@@ -8,7 +8,6 @@ from agent.evidence_resolution import (
     build_evidence_object_groups,
     build_evidence_record_set,
     build_evidence_resolution_prompt,
-    build_record_first_writer_packet,
     evidence_resolution_completion_token_budget,
     parse_evidence_resolution_output,
     evidence_resolution_signature,
@@ -489,7 +488,7 @@ def test_malformed_resolution_degrades_without_mutating_evidence(monkeypatch):
     assert attached["evidence_text"] == "ORIGINAL EVIDENCE"
 
 
-def test_partial_resolution_keeps_exact_candidates_grouped_for_writer(monkeypatch):
+def test_partial_resolution_is_advisory_and_keeps_writer_evidence_immutable(monkeypatch):
     selected = _selected_record()
     evidence_records = build_evidence_record_set([selected])
     object_group_id = evidence_records[0]["object_group_id"]
@@ -534,10 +533,12 @@ def test_partial_resolution_keeps_exact_candidates_grouped_for_writer(monkeypatc
         TASK_PLAN,
     )
 
-    assert output["context_stats"]["record_first_writer_packet_active"] is True
-    assert "UNRESOLVED OBJECT-GROUP CANDIDATES" in output["text"]
-    assert selected["evidence_text"] in output["text"]
-    assert "FLAT FALLBACK" not in output["text"]
+    assert output["text"] == "FLAT FALLBACK"
+    assert output["evidence_text"] == "FLAT FALLBACK"
+    assert output["selected_evidence"] == [selected]
+    assert output["citation_refs"] == [{"ref_id": "S1", "url": selected["url"]}]
+    assert output["context_stats"]["evidence_resolution_advisory_only"] is True
+    assert output["context_stats"]["evidence_lane_preserved"] is True
 
 
 def test_resolution_control_lane_is_separate_from_evidence_lane():
@@ -558,14 +559,54 @@ def test_resolution_control_lane_is_separate_from_evidence_lane():
 
     output = attach_evidence_resolution_to_context(context, resolution)
 
-    assert output["text"] == context["evidence_text"]
+    assert output["text"] == context["text"]
     assert output["evidence_text"] == context["evidence_text"]
     assert output["evidence_resolution_view"].startswith("EVIDENCE RESOLUTION CONTROL MAP")
     assert "E-release-44" in output["evidence_resolution_view"]
     assert output["selected_evidence"] == context["selected_evidence"]
+    assert output["citation_refs"] == context["citation_refs"]
+    assert output["context_stats"]["evidence_resolution_advisory_only"] is True
+    assert output["context_stats"]["evidence_lane_preserved"] is True
+    assert len(output["context_stats"]["evidence_lane_digest"]) == 16
 
 
-def test_record_first_writer_packet_groups_fields_under_rwkv_selected_object():
+def test_resolution_status_cannot_change_the_evidence_lane_digest():
+    context = {
+        "text": "EXACT EVIDENCE LANE",
+        "evidence_text": "EXACT EVIDENCE LANE",
+        "selected_evidence": [_selected_record()],
+        "citation_refs": [{"ref_id": "S1"}],
+        "context_stats": {},
+    }
+    resolved = attach_evidence_resolution_to_context(
+        context,
+        {
+            "contract": "rwkv.ecra.runtime.evidence-resolution",
+            "status": "ok",
+            "evidence_record_count": 1,
+            "decisions": _valid_decisions(),
+        },
+    )
+    missing = attach_evidence_resolution_to_context(
+        context,
+        {
+            "contract": "rwkv.ecra.runtime.evidence-resolution",
+            "status": "partial",
+            "evidence_record_count": 1,
+            "decisions": [],
+        },
+    )
+
+    for key in ("text", "evidence_text", "selected_evidence", "citation_refs"):
+        assert resolved[key] == context[key]
+        assert missing[key] == context[key]
+    assert (
+        resolved["context_stats"]["evidence_lane_digest"]
+        == missing["context_stats"]["evidence_lane_digest"]
+    )
+
+
+def test_valid_resolution_cannot_replace_or_filter_writer_evidence():
     selected = _selected_record()
     evidence_records = build_evidence_record_set([selected])
     resolution = parse_evidence_resolution_output(
@@ -590,26 +631,17 @@ def test_record_first_writer_packet_groups_fields_under_rwkv_selected_object():
 
     output = attach_evidence_resolution_to_context(context, resolution, TASK_PLAN)
 
-    assert output["text"].startswith("RECORD-FIRST EXACT EVIDENCE PACKET")
-    assert "TASK RECORD P1" in output["text"]
-    assert "RWKV-selected object identity" in output["text"]
-    assert '"field_id":"P1:F1"' in output["text"]
-    assert '"field_id":"P1:F2"' in output["text"]
-    assert output["text"].count("Version 4.4 was released on 2026-08-01.") == 1
-    assert "<E-release-44:release-4.4>" in output["text"]
-    assert "LEGACY SOURCE ORDER" not in output["text"]
+    assert output["text"] == context["text"]
+    assert output["evidence_text"] == context["evidence_text"]
     assert output["selected_evidence"] == [selected]
     assert output["citation_refs"] == [{"ref_id": "S1", "url": selected["url"]}]
-    assert output["context_stats"]["record_first_writer_packet_active"] is True
-    assert output["context_stats"]["record_first_writer_packet_included_spans"] == 1
-    assert output["context_stats"]["source_count"] == 1
-    assert output["context_stats"]["chunk_count"] == 1
-    assert output["usable_evidence_count"] == 1
-    assert output["chunk_count"] == 1
-    assert output["context_tokens"] <= 6000
+    assert output["context_stats"]["evidence_lane_preserved"] is True
+    assert output.get("usable_evidence_count") == context.get("usable_evidence_count")
+    assert output.get("chunk_count") == context.get("chunk_count")
+    assert output["context_tokens"] > 0
 
 
-def test_record_first_writer_packet_keeps_competing_object_spans_separate():
+def test_conflict_resolution_cannot_reorder_or_delete_competing_sources():
     first = _selected_record()
     second = _selected_record(
         ref_id="S2",
@@ -655,44 +687,12 @@ def test_record_first_writer_packet_keeps_competing_object_spans_separate():
 
     output = attach_evidence_resolution_to_context(context, resolution, TASK_PLAN)
 
-    assert "SELECTED OBJECT EXACT SPANS" in output["text"]
-    assert "COMPETING OBJECT EXACT SPANS (kept separate)" in output["text"]
-    assert output["text"].count("Version 4.4 was released on 2026-08-01.") == 1
-    assert output["text"].count("Version 4.5 was released on 2026-08-08.") == 1
-    assert first_group in output["text"]
-    assert second_group in output["text"]
-
-
-def test_record_first_packet_falls_back_if_a_required_literal_span_cannot_fit():
-    selected = _selected_record(text="literal evidence " * 1000)
-    evidence_records = build_evidence_record_set(
-        [selected], max_chars_per_record=24000
-    )
-    resolution = parse_evidence_resolution_output(
-        json.dumps(
-            {
-                "contract": "rwkv.ecra.runtime.evidence-resolution",
-                "decisions": _valid_decisions(),
-            }
-        ),
-        query=TASK_PLAN["goal"],
-        task_plan=TASK_PLAN,
-        evidence_records=evidence_records,
-    )
-    context = {
-        "selected_evidence": [selected],
-        "citation_refs": [{"ref_id": "S1"}],
-        "calculation_results": [],
-    }
-
-    packet = build_record_first_writer_packet(
-        context,
-        resolution,
-        TASK_PLAN,
-        max_tokens=512,
-    )
-
-    assert packet is None
+    assert output["text"] == context["text"]
+    assert output["selected_evidence"] == [first, second]
+    assert output["citation_refs"] == [{"ref_id": "S1"}, {"ref_id": "S2"}]
+    assert output["context_stats"]["evidence_lane_preserved"] is True
+    assert first_group in output["evidence_resolution_view"]
+    assert second_group in output["evidence_resolution_view"]
 
 
 def test_no_evidence_records_skip_model_and_signature_tracks_exact_span():

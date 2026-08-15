@@ -30,7 +30,10 @@ from agent.retrieval_synthesis import (
 )
 from agent.slm_scheduler import GLOBAL_SLM_INPUT_SCHEDULER
 from agent.state import AgentState
-from agent.unified_research import run_unified_research_loop
+from agent.unified_research import (
+    EvidenceReviewDecisionError,
+    run_unified_research_loop,
+)
 from config import (
     DATA_PIPELINE,
     TRACKING,
@@ -132,6 +135,48 @@ class Orchestrator:
 
         return f"evidence:{int(self.state.retrieval.evidence_revision or 0)}"
 
+    def _evidence_review_binding(
+        self,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind a model decision to the exact immutable evidence packet."""
+
+        context_stats = dict(context.get("context_stats") or {})
+        evidence_lane_digest = str(
+            context_stats.get("evidence_lane_digest") or ""
+        ).strip()
+        if not evidence_lane_digest:
+            raise RuntimeError("immutable evidence lane has no digest")
+        return {
+            "evidence_revision": int(self.state.retrieval.evidence_revision or 0),
+            "validation_state_signature": self._evidence_review_state_signature(),
+            "evidence_lane_digest": evidence_lane_digest,
+        }
+
+    def _evidence_review_authorizes_writer(
+        self,
+        review: dict[str, Any] | None,
+        user_query: str,
+        task_plan: dict[str, Any],
+        *,
+        step: int,
+        trigger: str,
+    ) -> bool:
+        """Return true only for a finish bound to the current evidence digest."""
+
+        if not isinstance(review, dict):
+            return False
+        if str(review.get("decision") or "").casefold() != "finish":
+            return False
+        context = self._resolved_writer_context(
+            user_query,
+            task_plan,
+            step=step,
+            trigger=trigger,
+        )
+        binding = self._evidence_review_binding(context)
+        return all(review.get(key) == value for key, value in binding.items())
+
     def _current_retrieval_data(
         self,
         user_query: str,
@@ -180,6 +225,7 @@ class Orchestrator:
         *,
         step: int,
         trigger: str = "planner_finish",
+        terminal: bool = False,
     ) -> dict[str, Any]:
         """Let RWKV make the binary continue-or-write Evidence Review decision."""
 
@@ -193,12 +239,13 @@ class Orchestrator:
             step=step,
             trigger=trigger,
         )
-        evidence_resolution_view = str(context.get("evidence_resolution_view") or "").strip()
-        review_context = (
-            (f"EVIDENCE RESOLUTION CONTROL LANE:\n{evidence_resolution_view}\n\n" if evidence_resolution_view else "")
-            + "EXACT EVIDENCE LANE:\n"
-            + str(context.get("evidence_text") or context.get("text") or "")
+        evidence_resolution_view = str(
+            context.get("evidence_resolution_view") or ""
+        ).strip()
+        exact_evidence_text = str(
+            context.get("evidence_text") or context.get("text") or ""
         )
+        review_binding = self._evidence_review_binding(context)
         routing_snapshot = self.state.retrieval.planner_routing_snapshot(
             max_sources=0,
             max_queries=12,
@@ -228,22 +275,25 @@ class Orchestrator:
         )
         validation_context_stats = {
             **context["context_stats"],
-            "review_context_tokens": get_token_count(review_context),
+            "exact_evidence_tokens": get_token_count(exact_evidence_text),
+            "resolution_advisory_tokens": get_token_count(
+                evidence_resolution_view
+            ),
             "routing_context_tokens": get_token_count(routing_context),
         }
         review = self.planner.review_evidence(
             user_query,
             task_plan,
-            review_context,
+            exact_evidence_text,
             routing_context,
+            resolution_advisory=evidence_resolution_view,
             allowed_evidence_record_ids=allowed_evidence_record_ids,
             allowed_route_ids=allowed_route_ids,
+            terminal=terminal,
         )
-        evidence_revision = int(self.state.retrieval.evidence_revision or 0)
-        validation_state_signature = self._evidence_review_state_signature()
-        review["evidence_revision"] = evidence_revision
-        review["validation_state_signature"] = validation_state_signature
+        review.update(review_binding)
         review["trigger"] = str(trigger or "planner_finish")[:120]
+        review["review_mode"] = "terminal" if terminal else "binary"
 
         # The review is audit/routing state only.  It never supplies facts,
         # validates sources, reorders evidence, or enters the final Writer
@@ -255,7 +305,7 @@ class Orchestrator:
             ),
             "decision": str(review.get("decision") or "")[:120],
             "trigger": str(trigger or "planner_finish")[:120],
-            "evidence_revision": evidence_revision,
+            **review_binding,
         }
         append_task_event(
             self.state.task_id,
@@ -269,13 +319,14 @@ class Orchestrator:
             sampling_temperature=review.get("sampling_temperature"),
             sampling_seed=review.get("sampling_seed"),
             review_attempts=review.get("review_attempts"),
+            review_mode=review.get("review_mode", "binary"),
             raw_model_output=review.get("raw_model_output", ""),
             prompt=review.get("prompt", ""),
-            context_text=review_context,
+            exact_evidence_text=exact_evidence_text,
+            resolution_advisory=evidence_resolution_view,
             routing_context=routing_context,
             context_stats=validation_context_stats,
-            evidence_revision=evidence_revision,
-            validation_state_signature=validation_state_signature,
+            **review_binding,
             allowed_evidence_record_ids=allowed_evidence_record_ids,
             allowed_route_ids=allowed_route_ids,
             evidence_ledger=evidence_ledger_snapshot,
@@ -415,21 +466,29 @@ class Orchestrator:
         *,
         step: int,
         trigger: str = "planner_finish",
+        terminal: bool = False,
     ) -> dict[str, Any] | None:
-        """Review one immutable evidence revision at most once."""
+        """Review one revision once, plus an explicit terminal handoff if needed."""
 
-        current_revision = int(self.state.retrieval.evidence_revision or 0)
-        current_signature = self._evidence_review_state_signature()
+        context = self._resolved_writer_context(
+            user_query,
+            task_plan,
+            step=step,
+            trigger=trigger,
+        )
+        current_binding = self._evidence_review_binding(context)
+        current_revision = int(current_binding["evidence_revision"])
+        current_signature = str(current_binding["validation_state_signature"])
         reviewed_signature = str(
             self.state.run_metadata.get("last_evidence_review_state_signature")
             or ""
         )
-        if current_signature == reviewed_signature:
+        if not terminal and current_signature == reviewed_signature:
             return None
         reviewed_revision_value = self.state.run_metadata.get(
             "last_evidence_review_revision"
         )
-        if reviewed_revision_value is not None and current_revision <= int(
+        if not terminal and reviewed_revision_value is not None and current_revision <= int(
             reviewed_revision_value
         ):
             return None
@@ -438,7 +497,11 @@ class Orchestrator:
             task_plan,
             step=step,
             trigger=trigger,
+            terminal=terminal,
         )
+        # Binding is controller transport metadata, never model-authored
+        # semantics.  Overwrite rather than trust any similarly named field.
+        review.update(current_binding)
         # Only a valid RWKV decision closes this immutable evidence revision.
         # A protocol error remains fully auditable in ``last_evidence_review``
         # but must not suppress the next terminal review attempt for the same
@@ -448,7 +511,44 @@ class Orchestrator:
         if str(review.get("decision") or "").casefold() in {"finish", "replan"}:
             self.state.run_metadata["last_evidence_review_revision"] = current_revision
             self.state.run_metadata["last_evidence_review_state_signature"] = current_signature
+            self.state.run_metadata["last_evidence_review"] = {
+                "contract": str(review.get("contract") or EVIDENCE_REVIEW_CONTRACT),
+                "decision": str(review.get("decision") or "")[:120],
+                "selected_action": str(review.get("selected_action") or "")[:120],
+                "review_mode": "terminal" if terminal else "binary",
+                "trigger": str(trigger or "planner_finish")[:120],
+                **current_binding,
+            }
         return review
+
+    def _current_evidence_review_decision(
+        self,
+        user_query: str,
+        task_plan: dict[str, Any],
+        *,
+        step: int,
+        trigger: str,
+    ) -> dict[str, Any] | None:
+        """Return a cached valid decision only when its exact binding is current."""
+
+        context = self._resolved_writer_context(
+            user_query,
+            task_plan,
+            step=step,
+            trigger=trigger,
+        )
+        current_binding = self._evidence_review_binding(context)
+        cached = self.state.run_metadata.get("last_evidence_review")
+        if not isinstance(cached, dict):
+            return None
+        if str(cached.get("decision") or "").casefold() not in {
+            "finish",
+            "replan",
+        }:
+            return None
+        if not all(cached.get(key) == value for key, value in current_binding.items()):
+            return None
+        return {**cached, "cached_review": True}
 
     def _retrieval_context(self) -> dict[str, Any]:
         return {
@@ -732,12 +832,10 @@ class Orchestrator:
                 error=task_plan.get("message", ""),
                 raw_model_output=task_plan.get("raw_model_output", ""),
             )
-            return self._complete_model_tool_loop(
-                user_query,
-                "task_plan",
-                self.state.retrieval.rounds,
-                0,
-                termination_reason="planner_protocol_error",
+            raise EvidenceReviewDecisionError(
+                "Writer cannot run because Task Plan failed and Evidence Review "
+                "was not executed: "
+                + str(task_plan.get("message") or "task plan protocol error")[:1000]
             )
 
         append_task_event(

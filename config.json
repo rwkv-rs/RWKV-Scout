@@ -120,7 +120,6 @@
     "evidence_resolution_completion_token_cap": 4096,
     "evidence_resolution_view_max_tokens": 768,
     "evidence_resolution_protocol_retries": 1,
-    "record_first_writer_packet_token_cap": 6000,
     "final_answer_max_tokens": 5120,
     "overlap_ratio": 0.05
   },

@@ -21,7 +21,7 @@
 | `rwkv.ecra.runtime.evidence-ledger` | 按 Task Record 保存已落地的候选证据记录 | Evidence Ledger | Routing、Evidence Review、Writer context builder |
 | `rwkv.ecra.runtime.evidence-record-set` | 对一次模型调用可见的有界证据记录投影 | Controller | Planner、Evidence Resolution |
 | `rwkv.ecra.runtime.evidence-resolution` | 保存字段闭包、缺失和冲突控制状态，不保存改写后的事实 | Evidence Resolver | Evidence Review、Writer |
-| `rwkv.ecra.runtime.evidence-review` | 保存 `finish` 或结构化 `gap` | Evidence Reviewer | Plan Revision、Orchestrator |
+| `rwkv.ecra.runtime.evidence-review` | 保存 RWKV 选择的 `finish` 或 `replan` 二元动作 | Evidence Reviewer | Plan Revision、Orchestrator |
 | `rwkv.ecra.runtime.planner-evidence` | 保存 Planner 可见的有界证据摘要 | Retrieval State | Planner |
 | `rwkv.ecra.runtime.retrieval-routing-state` | 保存查询、冻结路线和证据 revision | Retrieval State | Planner、Plan Revision |
 | `rwkv.ecra.runtime.retrieval-infrastructure` | 保存抓取/抽取基础设施故障 | Retrieval State | Planner、审计 |
@@ -40,8 +40,8 @@ R-ST 数据中的 `oracle_evidence_assessment` 是离线监督标注，包含 `s
 | Retrieval Query Planner | 用户目标、Task Plan 目标记录、主查询、查询历史、可信当前时间 | Retrieval Query Plan 的新增查询行 | 事实、URL/域名猜测、输入外硬锚点 |
 | Page Evidence Extractor | 单一来源的原文 chunk、Task Record/Field ID | 可回定位原文 offset 的 quote | fallback 改写、跨来源拼接 |
 | Evidence Resolver | 完整 Task Plan、Writer 将看到的同一批 exact spans | Evidence Resolution | 自由文本事实、摘要、替换 quote |
-| Evidence Reviewer | 原问题、完整 Task Plan、同一 Evidence Record Set、Evidence Resolution、Routing State | `finish` 或闭合 Review Gap | 新事实、新查询、答案正文 |
-| Plan Revision | 原问题、Task Plan、完整 Review Gap、冻结路线、Routing State | 下一次工具调用或完成动作 | 重新猜测丢失的 gap 原因 |
+| Evidence Reviewer | 原问题、完整 Task Plan、同一不可变 Evidence Lane、Evidence Resolution advisory、Routing State | `finish` 或 `replan` | 新事实、新查询、答案正文 |
+| Plan Revision | 原问题、Task Plan、Evidence Review 二元动作、冻结路线、Routing State | 下一次工具调用或完成动作 | 由 Controller 生成查询或替模型裁定缺失事实 |
 | Answer Writer | 原问题、完整 Task Plan、已落地证据文本、独立的 Evidence Resolution 控制通道 | 最终答案 | 未绑定页面正文、Evidence Review 输出作为事实 |
 
 ## 演进策略
@@ -55,6 +55,9 @@ R-ST 数据中的 `oracle_evidence_assessment` 是离线监督标注，包含 `s
 
 1. 每个运行态对象只允许一个 `contract`，不得同时出现 `schema_version`。
 2. Task Record ID、Field ID、Evidence Record ID 由 Controller 分配，模型不得发明或改名。
-3. 语义状态只能由拥有该决策的 RWKV 阶段产生；确定性代码只验证、拒绝、投影和传输。
-4. Evidence Review 与 Evidence Resolution 是控制通道，不能被拼接进证据事实通道。
-5. 任何历史兼容逻辑不得出现在正常生产者里。
+3. 语义状态只能由拥有该决策的 RWKV 阶段产生；确定性代码只允许做无损格式归一化、协议验证、可观察的机械预算和传输。
+4. `build_evidence_context()` 生成 evidence lane 后，Evidence Resolution 前后的 `text`、`evidence_text`、`selected_evidence`、`citation_refs` 及其顺序必须保持不变。
+5. Evidence Review、Evidence Resolution advisory、Routing State 与 exact evidence 必须通过独立参数和独立 Trace 字段传输；`RETAINED SOURCE SPANS` 下只允许不可变事实材料。
+6. Writer 只能由绑定当前 `evidence_lane_digest`、Evidence Revision 和 State Signature 的有效 RWKV `finish` 决定授权；Review 缺失、`protocol_error` 或旧 `replan` 都不能成为隐式 `finish`。达到 replan 资源上限时必须重新发起独立的终端 Review；其工具目录只包含 `write_answer`，仍由 RWKV 显式完成证据到 Writer 的交接。
+7. 工具调用格式归一化必须保留模型原始 action 和 arguments，并公开记录已消费和未消费的 envelope 字段；别名冲突或额外语义字段只能形成 `protocol_error`，不得选择别名、删除内容或重新采样一个决定冒充格式修复。
+8. 任何历史兼容逻辑不得出现在正常生产者里。

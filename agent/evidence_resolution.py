@@ -1521,362 +1521,31 @@ def render_evidence_resolution_view(
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
-def build_record_first_writer_packet(
-    context: Mapping[str, Any],
-    resolution: Mapping[str, Any],
-    task_plan: Mapping[str, Any] | None,
-    *,
-    max_tokens: int = 6000,
-) -> dict[str, Any] | None:
-    """Pack RWKV-selected object groups without rewriting any evidence span."""
-
-    if str(resolution.get("status") or "") not in {"ok", "partial"}:
-        return None
-    records = task_records(task_plan)
-    decisions = {
-        str(row.get("task_record_id") or ""): row
-        for row in resolution.get("decisions") or []
-        if isinstance(row, Mapping) and str(row.get("task_record_id") or "")
-    }
-    if not records or set(decisions) != {record_id(record) for record in records}:
-        return None
-    selected_evidence = [
-        dict(row)
-        for row in context.get("selected_evidence") or []
-        if isinstance(row, Mapping)
-    ]
-    evidence_by_id = {
-        str(row.get("evidence_record_id") or ""): row
-        for row in selected_evidence
-        if str(row.get("evidence_record_id") or "")
-    }
-    if not evidence_by_id:
-        return None
-    group_by_id = {
-        str(group.get("object_group_id") or ""): dict(group)
-        for group in resolution.get("object_groups") or []
-        if isinstance(group, Mapping) and str(group.get("object_group_id") or "")
-    }
-    evidence_group = {
-        str(evidence_id): group_id
-        for group_id, group in group_by_id.items()
-        for evidence_id in group.get("evidence_record_ids") or []
-        if str(evidence_id)
-    }
-
-    candidates: dict[str, dict[str, Any]] = {}
-    field_candidates: dict[tuple[str, str], list[str]] = {}
-    record_candidates: dict[str, list[str]] = {}
-
-    def source_span_candidates(
-        evidence_ids: list[str], *, limit: int = 2
-    ) -> list[str]:
-        per_evidence: list[list[str]] = []
-        for evidence_id in evidence_ids:
-            source = evidence_by_id.get(str(evidence_id))
-            if source is None:
-                continue
-            rows: list[str] = []
-            for index, chunk in enumerate(source.get("packed_chunks") or [], start=1):
-                if not isinstance(chunk, Mapping):
-                    continue
-                literal = str(chunk.get("text") or "").replace("\x00", "")
-                if not literal.strip():
-                    continue
-                chunk_id = _text(chunk.get("chunk_id") or f"span-{index}", 160)
-                candidate_key = f"{evidence_id}\x1f{chunk_id}\x1f{hashlib.sha256(literal.encode('utf-8')).hexdigest()[:12]}"
-                if candidate_key not in candidates:
-                    candidates[candidate_key] = {
-                        "span_ref": f"{evidence_id}:{chunk_id}",
-                        "evidence_record_id": str(evidence_id),
-                        "object_group_id": evidence_group.get(str(evidence_id), ""),
-                        "ref_id": str(source.get("ref_id") or ""),
-                        "title": str(source.get("title") or "")[:300],
-                        "url": str(source.get("url") or "")[:800],
-                        "chunk_id": chunk_id,
-                        "text": literal,
-                    }
-                rows.append(candidate_key)
-            if rows:
-                per_evidence.append(rows)
-        ordered: list[str] = []
-        depth = 0
-        bounded_limit = max(1, int(limit))
-        while len(ordered) < bounded_limit:
-            added = False
-            for rows in per_evidence:
-                if depth < len(rows):
-                    ordered.append(rows[depth])
-                    added = True
-                    if len(ordered) >= bounded_limit:
-                        break
-            if not added:
-                break
-            depth += 1
-        return ordered
-
-    for record in records:
-        task_record_id = record_id(record)
-        decision = decisions[task_record_id]
-        resolver_fallback = str(decision.get("resolver_fallback") or "")
-        if resolver_fallback:
-            fallback_evidence_ids = [
-                str(value)
-                for value in decision.get("selected_evidence_record_ids") or []
-                if str(value) in evidence_by_id
-            ]
-            if not fallback_evidence_ids:
-                fallback_evidence_ids = list(evidence_by_id)
-            per_group: dict[str, list[str]] = {}
-            for evidence_id in fallback_evidence_ids:
-                per_group.setdefault(evidence_group.get(evidence_id, ""), []).append(
-                    evidence_id
-                )
-            grouped_candidates: list[str] = []
-            for evidence_ids in per_group.values():
-                grouped_candidates.extend(
-                    source_span_candidates(evidence_ids, limit=1)
-                )
-            record_candidates[task_record_id] = list(
-                dict.fromkeys(grouped_candidates)
-            )[:8]
-            continue
-        bindings = decision.get("field_evidence_record_ids") or {}
-        for field in record_field_records(record):
-            field_id = field["field_id"]
-            evidence_ids = [
-                str(value)
-                for value in bindings.get(field_id) or []
-                if str(value) in evidence_by_id
-            ]
-            if field_id in set(decision.get("conflict_field_ids") or []):
-                conflict_ids = [
-                    str(value)
-                    for value in decision.get("conflicting_evidence_record_ids") or []
-                    if str(value) in evidence_by_id
-                ]
-                by_group: dict[str, str] = {}
-                for evidence_id in conflict_ids:
-                    group_id = evidence_group.get(evidence_id, "")
-                    if group_id and group_id not in by_group:
-                        by_group[group_id] = evidence_id
-                evidence_ids = list(by_group.values())[:2]
-            field_candidates[(task_record_id, field_id)] = source_span_candidates(
-                evidence_ids
-            )
-        if not record_field_records(record):
-            record_candidates[task_record_id] = source_span_candidates(
-                [
-                    str(value)
-                    for value in decision.get("selected_evidence_record_ids") or []
-                    if str(value) in evidence_by_id
-                ]
-            )
-
-    field_names = {
-        (record_id(record), field["field_id"]): field["name"]
-        for record in records
-        for field in record_field_records(record)
-    }
-
-    def render(admitted: set[str]) -> str:
-        sections = [
-            "RECORD-FIRST EXACT EVIDENCE PACKET",
-            "Only literal text inside <span-ref> blocks and TOOL RESULTS is factual material; all IDs, field maps, object identities, labels and URLs are routing metadata.",
-        ]
-        calculations = [
-            dict(row)
-            for row in context.get("calculation_results") or []
-            if isinstance(row, Mapping)
-        ]
-        if calculations:
-            sections.append(
-                "TOOL RESULTS:\n"
-                + json.dumps(calculations, ensure_ascii=False, separators=(",", ":"))
-            )
-        for record in records:
-            task_record_id = record_id(record)
-            decision = decisions[task_record_id]
-            resolver_fallback = str(decision.get("resolver_fallback") or "")
-            lines = [
-                f"TASK RECORD {task_record_id}",
-                "Question: " + str(record.get("question") or "")[:500],
-                (
-                    "RWKV resolution was unavailable; exact candidates remain grouped "
-                    "without a controller-selected answer: "
-                    if resolver_fallback
-                    else "RWKV-selected object identity (control metadata, not proof): "
-                )
-                + json.dumps(
-                    {
-                        "object_group_id": decision.get("selected_object_group_id") or "",
-                        "identity": (
-                            group_by_id.get(
-                                str(decision.get("selected_object_group_id") or ""), {}
-                            ).get("identity")
-                            or {}
-                        ),
-                        "status": decision.get("status") or "",
-                        **(
-                            {"fallback": resolver_fallback}
-                            if resolver_fallback
-                            else {}
-                        ),
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            ]
-            field_map: list[dict[str, Any]] = []
-            span_keys: list[str] = []
-            for field in record_field_records(record):
-                field_id = field["field_id"]
-                keys = [
-                    key
-                    for key in field_candidates.get((task_record_id, field_id), [])
-                    if key in admitted
-                ][:2]
-                span_keys.extend(keys)
-                state = "unresolved" if resolver_fallback else (
-                    "conflict"
-                    if field_id in set(decision.get("conflict_field_ids") or [])
-                    else "missing"
-                    if field_id in set(decision.get("missing_field_ids") or [])
-                    else "bound"
-                )
-                field_map.append(
-                    {
-                        "field_id": field_id,
-                        "name": field_names.get((task_record_id, field_id), ""),
-                        "state": state,
-                        "span_refs": [candidates[key]["span_ref"] for key in keys],
-                    }
-                )
-            if field_map:
-                lines.append(
-                    "FIELD TO EXACT-SPAN MAP (RWKV attention metadata): "
-                    + json.dumps(field_map, ensure_ascii=False, separators=(",", ":"))
-                )
-            if resolver_fallback or not field_map:
-                span_keys.extend(
-                    key
-                    for key in record_candidates.get(task_record_id, [])
-                    if key in admitted
-                )
-            unique_span_keys = list(dict.fromkeys(span_keys))
-            selected_group_id = str(decision.get("selected_object_group_id") or "")
-            selected_keys = [
-                key
-                for key in unique_span_keys
-                if candidates[key]["object_group_id"] == selected_group_id
-            ]
-            conflict_keys = [key for key in unique_span_keys if key not in selected_keys]
-
-            def append_spans(label: str, keys: list[str]) -> None:
-                if not keys:
-                    return
-                lines.append(label)
-                current_group = ""
-                for key in keys:
-                    span = candidates[key]
-                    if span["object_group_id"] != current_group:
-                        current_group = span["object_group_id"]
-                        identity = group_by_id.get(current_group, {}).get("identity") or {}
-                        lines.append(
-                            "Object group: "
-                            + json.dumps(
-                                {
-                                    "object_group_id": current_group,
-                                    "identity": identity,
-                                },
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            )
-                        )
-                    lines.extend(
-                        [
-                            f"[{span['ref_id']}] evidence_record_id={span['evidence_record_id']}",
-                            f"Source label: {span['title']}",
-                            f"URL: {span['url']}",
-                            f"<{span['span_ref']}>\n{span['text']}",
-                        ]
-                    )
-
-            if resolver_fallback:
-                append_spans(
-                    "UNRESOLVED OBJECT-GROUP CANDIDATES (kept separate):",
-                    unique_span_keys,
-                )
-            else:
-                append_spans("SELECTED OBJECT EXACT SPANS:", selected_keys)
-                append_spans(
-                    "COMPETING OBJECT EXACT SPANS (kept separate):", conflict_keys
-                )
-            sections.append("\n".join(lines))
-        return "\n\n".join(sections)
-
-    ordered_candidates: list[str] = []
-    field_keys = list(field_candidates)
-    record_keys = list(record_candidates)
-    candidate_depth = max(
-        [
-            len(rows)
-            for rows in [*field_candidates.values(), *record_candidates.values()]
-        ]
-        or [0]
-    )
-    for ordinal in range(candidate_depth):
-        for key in field_keys:
-            rows = field_candidates[key]
-            if ordinal < len(rows) and rows[ordinal] not in ordered_candidates:
-                ordered_candidates.append(rows[ordinal])
-        for key in record_keys:
-            rows = record_candidates[key]
-            if ordinal < len(rows) and rows[ordinal] not in ordered_candidates:
-                ordered_candidates.append(rows[ordinal])
-
-    admitted: set[str] = set()
-    budget = max(512, min(int(max_tokens or 6000), 6000))
-    for candidate_key in ordered_candidates:
-        trial = {*admitted, candidate_key}
-        if get_token_count(render(trial)) <= budget:
-            admitted = trial
-    required_candidate_sets = [
-        rows
-        for rows in [*field_candidates.values(), *record_candidates.values()]
-        if rows
-    ]
-    if any(not admitted.intersection(rows) for rows in required_candidate_sets):
-        # The pre-resolution evidence packet already obeys the same global
-        # budget. Falling back preserves literal evidence instead of emitting
-        # a structurally tidy packet whose central field has no factual span.
-        return None
-    text = render(admitted)
-    used_evidence_ids = list(
-        dict.fromkeys(candidates[key]["evidence_record_id"] for key in ordered_candidates if key in admitted)
-    )
-    used_ref_ids = list(
-        dict.fromkeys(candidates[key]["ref_id"] for key in ordered_candidates if key in admitted and candidates[key]["ref_id"])
-    )
-    return {
-        "text": text,
-        "context_tokens": get_token_count(text),
-        "used_evidence_record_ids": used_evidence_ids,
-        "used_ref_ids": used_ref_ids,
-        "candidate_span_count": len(ordered_candidates),
-        "included_span_count": len(admitted),
-        "omitted_span_count": len(ordered_candidates) - len(admitted),
-        "token_budget": budget,
-    }
-
-
 def attach_evidence_resolution_to_context(
     context: Mapping[str, Any],
     resolution: Mapping[str, Any],
     task_plan: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Attach control state and mechanically pack its selected literal spans."""
+    """Attach RWKV advisory state without mutating the factual evidence lane.
 
+    Evidence Resolution is not a fact gate.  Its model-authored output may help
+    the final RWKV Writer focus, but it must never delete, replace, filter, or
+    reorder the exact spans already admitted by ``build_evidence_context``.
+    ``task_plan`` remains in the signature for call-site compatibility only.
+    """
+
+    del task_plan
+
+    immutable_lane = {
+        key: deepcopy(context[key])
+        for key in (
+            "text",
+            "evidence_text",
+            "selected_evidence",
+            "citation_refs",
+        )
+        if key in context
+    }
     output = deepcopy(dict(context))
     resolution_copy = deepcopy(dict(resolution))
     view = render_evidence_resolution_view(
@@ -1888,49 +1557,33 @@ def attach_evidence_resolution_to_context(
     )
     output["evidence_resolution"] = resolution_copy
     output["evidence_resolution_view"] = view
-    packet = build_record_first_writer_packet(
-        output,
-        resolution_copy,
-        task_plan,
-        max_tokens=int(
-            DATA_PIPELINE.get("record_first_writer_packet_token_cap", 6000)
-            or 6000
-        ),
-    )
-    if packet is not None:
-        used_evidence_ids = set(packet["used_evidence_record_ids"])
-        used_ref_ids = set(packet["used_ref_ids"])
-        output["selected_evidence"] = [
-            row
-            for row in output.get("selected_evidence") or []
-            if isinstance(row, Mapping)
-            and str(row.get("evidence_record_id") or "") in used_evidence_ids
-        ]
-        output["citation_refs"] = [
-            row
-            for row in output.get("citation_refs") or []
-            if isinstance(row, Mapping)
-            and str(row.get("ref_id") or "") in used_ref_ids
-        ]
-        output["record_first_writer_packet"] = {
-            key: value for key, value in packet.items() if key != "text"
-        }
-        output["usable_evidence_count"] = len(output["selected_evidence"])
-        output["chunk_count"] = int(packet.get("included_span_count") or 0)
-        output["evidence_text"] = packet["text"]
-    else:
-        output["evidence_text"] = str(
-            output.get("evidence_text") or output.get("text") or ""
+    if "evidence_text" not in output:
+        output["evidence_text"] = str(output.get("text") or "")
+    if "text" not in output:
+        output["text"] = str(output.get("evidence_text") or "")
+    if "context_tokens" not in output:
+        output["context_tokens"] = get_token_count(str(output.get("text") or ""))
+    changed_lane_keys = [
+        key for key, value in immutable_lane.items() if output.get(key) != value
+    ]
+    if changed_lane_keys:
+        raise RuntimeError(
+            "Evidence Resolution mutated the immutable evidence lane: "
+            + ", ".join(changed_lane_keys)
         )
-    output["text"] = output["evidence_text"]
-    output["context_tokens"] = get_token_count(output["text"])
+    evidence_lane_digest = hashlib.sha256(
+        json.dumps(
+            immutable_lane,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
     stats = dict(output.get("context_stats") or {})
-    if packet is not None:
-        stats["source_count"] = len(output.get("selected_evidence") or [])
-        stats["chunk_count"] = int(packet.get("included_span_count") or 0)
     stats.update(
         {
-            "context_tokens": output["context_tokens"],
+            "context_tokens": int(output.get("context_tokens") or 0),
             "evidence_resolution_status": str(resolution_copy.get("status") or ""),
             "evidence_resolution_evidence_record_count": int(
                 resolution_copy.get("evidence_record_count") or 0
@@ -1939,16 +1592,9 @@ def attach_evidence_resolution_to_context(
             "evidence_resolution_coverage_complete": bool(
                 resolution_copy.get("coverage_complete")
             ),
-            "record_first_writer_packet_active": packet is not None,
-            "record_first_writer_packet_tokens": (
-                int(packet.get("context_tokens") or 0) if packet else 0
-            ),
-            "record_first_writer_packet_included_spans": (
-                int(packet.get("included_span_count") or 0) if packet else 0
-            ),
-            "record_first_writer_packet_omitted_spans": (
-                int(packet.get("omitted_span_count") or 0) if packet else 0
-            ),
+            "evidence_resolution_advisory_only": True,
+            "evidence_lane_preserved": True,
+            "evidence_lane_digest": evidence_lane_digest,
         }
     )
     output["context_stats"] = stats
@@ -1961,7 +1607,6 @@ __all__ = [
     "build_evidence_object_groups",
     "build_evidence_record_set",
     "build_evidence_resolution_prompt",
-    "build_record_first_writer_packet",
     "parse_evidence_resolution_output",
     "render_evidence_resolution_view",
     "evidence_resolution_signature",

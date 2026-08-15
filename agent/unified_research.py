@@ -21,6 +21,10 @@ from utils.task_manager import is_task_stopped
 from utils.time_budget import check_time_budget
 
 
+class EvidenceReviewDecisionError(RuntimeError):
+    """The current evidence revision has no valid RWKV finish/replan decision."""
+
+
 def _as_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
@@ -160,7 +164,7 @@ def run_unified_research_loop(
         shared_state=True,
         decision_owner="rwkv",
         model=model_profile,
-        completion_policy="rwkv_finish_or_resource_boundary",
+        completion_policy="current_evidence_digest_requires_rwkv_finish",
     )
 
     last_action = "rwkv_research"
@@ -170,6 +174,7 @@ def run_unified_research_loop(
         *,
         step: int,
         action: str,
+        trigger: str,
     ) -> tuple[str, str]:
         """Apply an existing review without reviewing the revision again."""
 
@@ -201,6 +206,19 @@ def run_unified_research_loop(
             step_limit = max(step_limit, step + 3)
             return "continue", ""
         if decision == "finish":
+            authorize_writer = getattr(
+                owner,
+                "_evidence_review_authorizes_writer",
+                None,
+            )
+            if not callable(authorize_writer) or not authorize_writer(
+                review,
+                user_query,
+                task_plan,
+                step=step,
+                trigger=trigger,
+            ):
+                return "invalid", ""
             return "finished", owner._complete_model_tool_loop(
                 user_query,
                 action,
@@ -219,25 +237,90 @@ def run_unified_research_loop(
     ) -> tuple[bool, str]:
         """Route every synthesis attempt through the revision review."""
 
-        review = None
-        if evidence_review_replan_count < max_evidence_review_replans:
+        terminal_review = evidence_review_replan_count >= max_evidence_review_replans
+        if terminal_review:
+            # Retrieval is resource-bounded, but entering the Writer is still
+            # an explicit RWKV action.  A fresh one-action terminal review is
+            # intentionally distinct from reusing the cached ``replan`` for
+            # the same evidence digest.
+            review = owner._review_evidence_if_changed(
+                user_query,
+                task_plan,
+                step=step,
+                trigger=f"{trigger}:terminal_resource_boundary",
+                terminal=True,
+            )
+            if (
+                not isinstance(review, dict)
+                or str(review.get("decision") or "").casefold() != "finish"
+            ):
+                disposition = "terminal_review_invalid"
+                answer = ""
+            else:
+                disposition, answer = apply_review(
+                    review,
+                    step=step,
+                    action=action,
+                    trigger=trigger,
+                )
+        else:
             review = owner._review_evidence_if_changed(
                 user_query,
                 task_plan,
                 step=step,
                 trigger=trigger,
             )
-        disposition, answer = apply_review(review, step=step, action=action)
+            if review is None:
+                current_decision = getattr(
+                    owner,
+                    "_current_evidence_review_decision",
+                    None,
+                )
+                if callable(current_decision):
+                    review = current_decision(
+                        user_query,
+                        task_plan,
+                        step=step,
+                        trigger=trigger,
+                    )
+            disposition, answer = apply_review(
+                review,
+                step=step,
+                action=action,
+                trigger=trigger,
+            )
         if disposition == "continue":
             return True, ""
         if disposition == "finished":
             return False, answer
-        return False, owner._complete_model_tool_loop(
-            user_query,
-            action,
-            rounds,
-            step,
-            termination_reason=termination_reason,
+        decision = (
+            str(review.get("decision") or "").casefold()
+            if isinstance(review, dict)
+            else ""
+        )
+        error_class = (
+            str(review.get("error_class") or "")
+            if isinstance(review, dict)
+            else ""
+        )
+        append_task_event(
+            state.task_id,
+            "evidence_review_gate_failed",
+            step=step,
+            phase="VALIDATION",
+            trigger=trigger,
+            requested_termination_reason=termination_reason,
+            disposition=disposition,
+            decision=decision,
+            error_class=error_class or "evidence_review_decision",
+            evidence_review_replan_count=evidence_review_replan_count,
+            max_evidence_review_replans=max_evidence_review_replans,
+            decision_owner="rwkv",
+        )
+        raise EvidenceReviewDecisionError(
+            "Writer requires a valid RWKV finish decision bound to the current "
+            f"evidence digest (trigger={trigger}, disposition={disposition}, "
+            f"decision={decision or 'missing'}, error_class={error_class or 'none'})"
         )
 
     step = 0
@@ -568,6 +651,7 @@ def run_unified_research_loop(
                     revision_review,
                     step=step,
                     action=action,
+                    trigger="evidence_revision",
                 )
                 if disposition == "continue":
                     continue

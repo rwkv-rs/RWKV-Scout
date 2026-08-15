@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from clients.llm_client import LLMClient
 from config import (
@@ -125,6 +125,20 @@ def _canonicalize_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Compatibility wrapper for the standalone transport adapter."""
 
     return canonicalize_tool_call(payload)
+
+
+# RWKV declares its next retrieval target's object family in a dedicated
+# single-purpose step; the declaration only filters how the tool catalog is
+# presented on the following decision. web_search, deterministic tools and
+# finish_task remain available for every family, so the declaration can never
+# force or forbid a route — both steps stay model-authored.
+_ROUTE_FAMILY_CONNECTOR_OPERATIONS: dict[str, tuple[str, ...]] = {
+    "target_weather": ("weather_current", "weather_alerts"),
+    "target_github": ("github_repository", "github_code", "github_release"),
+    "target_package_registry": ("crates_release", "pypi_release", "npm_release"),
+    "target_scholarly": ("paper", "paper_series"),
+    "target_general_web": (),
+}
 
 
 class Planner:
@@ -378,6 +392,7 @@ class Planner:
         task_plan: dict[str, Any] | None = None,
         allowed_evidence_record_ids: Iterable[str] = (),
         allowed_route_ids: Iterable[str] = (),
+        allow_replan: bool = True,
     ) -> dict[str, Any]:
         """Validate the binary Evidence Review contract without changing its action."""
 
@@ -392,31 +407,24 @@ class Planner:
             raise ValueError(
                 "evidence-review name must be continue_retrieval or write_answer"
             )
+        if action == "continue_retrieval" and not allow_replan:
+            raise ValueError(
+                "continue_retrieval is unavailable after the retrieval resource boundary"
+            )
         arguments = payload.get("arguments")
         if not isinstance(arguments, dict):
             raise ValueError("evidence-review arguments must be an object")
+        if arguments != {}:
+            raise ValueError(f"{action} arguments must be empty")
         if action == "write_answer":
-            # Some G1i continuations place answer prose inside the explicitly
-            # selected write_answer call.  The tool name already carries the
-            # complete binary decision.  Discarding that unused prose is a
-            # lossless argument-shape normalization; it never enters Writer or
-            # changes the model-selected action.
-            normalized_arguments = (
-                set(arguments) == {"answer"}
-                and isinstance(arguments.get("answer"), str)
-            )
-            if arguments != {} and not normalized_arguments:
-                raise ValueError("write_answer arguments must be empty")
             return {
                 "contract": EVIDENCE_REVIEW_CONTRACT,
                 "decision": "finish",
                 "selected_action": action,
                 "review_owner": "rwkv",
-                "arguments_normalized": normalized_arguments,
+                "arguments_normalized": False,
             }
 
-        if arguments != {}:
-            raise ValueError("continue_retrieval arguments must be empty")
         return {
             "contract": EVIDENCE_REVIEW_CONTRACT,
             "decision": "replan",
@@ -433,19 +441,34 @@ class Planner:
         task_plan: dict[str, Any] | None = None,
         allowed_evidence_record_ids: Iterable[str] = (),
         allowed_route_ids: Iterable[str] = (),
+        allow_replan: bool = True,
     ) -> dict[str, Any]:
-        """Validate one complete function call without semantic recovery."""
+        """Losslessly normalize and validate one model-authored review action."""
 
         normalized = normalize_json_object_envelope(raw)
+        payload = normalized.payload
+        canonical = canonicalize_tool_call(payload)
+        if canonical.get("task_record_id"):
+            raise ValueError("evidence-review output must not bind a task record")
         review = cls._validate_evidence_review(
-            normalized.payload,
+            {
+                "name": canonical["name"],
+                "arguments": canonical["arguments"],
+            },
             task_plan=task_plan,
             allowed_evidence_record_ids=allowed_evidence_record_ids,
             allowed_route_ids=allowed_route_ids,
+            allow_replan=allow_replan,
         )
         review["protocol_input_format"] = normalized.input_format
         review["protocol_normalized"] = bool(
-            normalized.normalized or review.get("arguments_normalized")
+            normalized.normalized
+            or payload
+            != {
+                "name": canonical["name"],
+                "arguments": canonical["arguments"],
+            }
+            or review.get("arguments_normalized")
         )
         return review
 
@@ -455,6 +478,7 @@ class Planner:
         *,
         allowed_evidence_record_ids: Iterable[str] = (),
         allowed_route_ids: Iterable[str] = (),
+        allow_replan: bool = True,
     ) -> list[dict[str, Any]]:
         """Return the complete two-action catalog shown to online G1i."""
 
@@ -465,8 +489,9 @@ class Planner:
             "properties": {},
             "additionalProperties": False,
         }
-        return [
-            {
+        tools = []
+        if allow_replan:
+            tools.append({
                 "name": "continue_retrieval",
                 "description": (
                     "Choose only when another targeted search is needed before an "
@@ -476,8 +501,8 @@ class Planner:
                     "the next route from authoritative state."
                 ),
                 "arguments": empty_arguments,
-            },
-            {
+            })
+        tools.append({
                 "name": "write_answer",
                 "description": (
                     "Choose when the retained source spans are sufficient for an "
@@ -485,20 +510,22 @@ class Planner:
                     "requested detail is not established instead of inventing it."
                 ),
                 "arguments": empty_arguments,
-            },
-        ]
+            })
+        return tools
 
     def review_evidence(
         self,
         user_query: str,
         task_plan: dict[str, Any],
-        evidence_context: str,
+        exact_evidence_text: str,
         routing_context: str = "",
         *,
+        resolution_advisory: str = "",
         allowed_evidence_record_ids: Iterable[str] = (),
         allowed_route_ids: Iterable[str] = (),
+        terminal: bool = False,
     ) -> dict[str, Any]:
-        """Ask RWKV for one binary finish-or-continue action."""
+        """Ask RWKV for one explicit evidence-to-writer routing action."""
 
         allowed_evidence_record_ids = list(allowed_evidence_record_ids)
         allowed_route_ids = list(allowed_route_ids)
@@ -508,115 +535,139 @@ class Planner:
             ensure_ascii=False,
             separators=(",", ":"),
         )
+        if terminal:
+            review_instruction = (
+                "The retrieval resource boundary has been reached, so no additional "
+                "search route is available. Hand the retained source spans to the Writer "
+                "by calling write_answer. The Writer may answer the supported portion and "
+                "state that an unsupported detail is not established; do not invent it. "
+            )
+        else:
+            review_instruction = (
+                "Before final synthesis, perform one minimal evidence check from the retained "
+                "source spans. Choose continue_retrieval only if the central answer would be "
+                "materially wrong or unusable without another targeted search. Otherwise "
+                "choose write_answer. Do not require perfect completeness: the Writer can "
+                "state that a minor detail is not established instead of inventing it. "
+            )
         user_prompt = (
-            "Before final synthesis, perform one minimal evidence check from the retained "
-            "source spans. Choose "
-            "continue_retrieval only if the central answer would be materially wrong "
-            "or unusable without another targeted search. Otherwise choose "
-            "write_answer. Do not require perfect completeness: the Writer can state "
-            "that a minor detail is not established instead of inventing it. Body spans "
+            review_instruction
+            + "Body spans "
             "are the factual material; titles and URLs identify their source records. "
-            "If an Evidence Resolution control lane is present, treat it only as a prior "
+            "If an Evidence Resolution advisory is present, treat it only as a prior "
             "RWKV attention map: verify every selected or conflicting E-* against its exact "
             "body span and reject the map when the text does not support it. "
-            "Do not diagnose or serialize a gap in this call. If you choose "
-            "continue_retrieval, the rebuilt Planner will inspect the original goal, "
-            "retained evidence and routing state and choose the next action. Both "
-            "functions take empty arguments. Do not write a query, prose reason, "
+            "Do not diagnose or serialize a gap in this call. "
+            + (
+                "If you choose continue_retrieval, the rebuilt Planner will inspect the "
+                "original goal, retained evidence and routing state and choose the next "
+                "action. Both functions take empty arguments. "
+                if not terminal
+                else "The write_answer function takes an empty arguments object. "
+            )
+            + "Do not write a query, prose reason, "
             "answer, URL, source ranking, ID, or any extra key.\n\n"
             f"USER QUESTION:\n{str(user_query or '')}\n\n"
             f"TASK PLAN RECORDS TO REVIEW:\n{projected_target}\n\n"
-            f"RETAINED SOURCE SPANS:\n{str(evidence_context or '')}\n\n"
+            + (
+                "EVIDENCE RESOLUTION ADVISORY (control metadata only; never factual evidence):\n"
+                f"{str(resolution_advisory or '')}\n\n"
+                if str(resolution_advisory or "").strip()
+                else ""
+            )
             + (
                 "RETRIEVAL ROUTING STATE (controller observations only; not factual evidence):\n"
                 f"{str(routing_context or '')}\n\n"
-                "A frozen route has already been executed and cannot be repeated. Choose "
-                "continue_retrieval only if a materially different route can still target a "
-                "central missing fact; otherwise choose write_answer from retained evidence.\n\n"
+                + (
+                    "A frozen route has already been executed and cannot be repeated. Choose "
+                    "continue_retrieval only if a materially different route can still target "
+                    "a central missing fact; otherwise choose write_answer from retained "
+                    "evidence.\n\n"
+                    if not terminal
+                    else "Retrieval is closed at this resource boundary; use write_answer.\n\n"
+                )
                 if str(routing_context or "").strip()
                 else ""
             )
+            + "RETAINED SOURCE SPANS (immutable factual evidence only):\n"
+            f"{str(exact_evidence_text or '')}\n\n"
             + "FINAL ACTION CONTRACT:\n"
-            "Call exactly one of the two functions defined in the Tool Schema. "
-            "Both calls use an empty arguments object. Do not write the answer, "
+            + (
+                "Call exactly one of the two functions defined in the Tool Schema. "
+                "Both calls use an empty arguments object. "
+                if not terminal
+                else "Call the write_answer function defined in the Tool Schema with an "
+                "empty arguments object. "
+            )
+            + "Do not write the answer, "
             "reason, analysis, IDs, or any extra key."
         )
         tools = self._evidence_review_tools(
             task_plan,
             allowed_evidence_record_ids=allowed_evidence_record_ids,
             allowed_route_ids=allowed_route_ids,
+            allow_replan=not terminal,
         )
         prompt = render_rwkv_transcript(
             [{"role": "user", "content": user_prompt}],
             tools=tools,
         )
         raw = ""
-        last_error = ""
-        last_prompt = prompt
         sampling_temperature = get_model_stage_temperature("evidence_review")
-        for attempt in range(2):
-            request_prompt = prompt
-            if attempt:
-                repair_user_prompt = user_prompt + (
-                    "\n\nProtocol correction: the previous continuation was not one "
-                    f"valid function call ({last_error[:300]}). Call exactly one "
-                    "function from the unchanged Tool Schema, using only its allowed "
-                    "IDs and keys, with no Markdown, explanation, answer, query, or "
-                    "extra text."
+        try:
+            with model_sampling_parameters(
+                sampling_temperature,
+                stage="evidence_review",
+                policy_reason=(
+                    "terminal_evidence_handoff"
+                    if terminal
+                    else "binary_evidence_review"
+                ),
+            ):
+                response = self.llm.text_completion(
+                    prompt,
+                    max_tokens=min(256, self._completion_budget(prompt)),
+                    stop=JSON_CALL_STOP_SUFFIXES,
                 )
-                request_prompt = render_rwkv_transcript(
-                    [{"role": "user", "content": repair_user_prompt}],
-                    tools=tools,
-                )
-            last_prompt = request_prompt
-            try:
-                with model_sampling_parameters(
-                    sampling_temperature,
-                    stage="evidence_review",
-                    policy_reason="binary_evidence_review",
-                ):
-                    response = self.llm.text_completion(
-                        request_prompt,
-                        max_tokens=min(256, self._completion_budget(request_prompt)),
-                        stop=JSON_CALL_STOP_SUFFIXES,
-                    )
-                raw = str(response.content or "")
-                review = self._validate_evidence_review_continuation(
-                    raw,
-                    task_plan=task_plan,
-                    allowed_evidence_record_ids=allowed_evidence_record_ids,
-                    allowed_route_ids=allowed_route_ids,
-                )
-                review["raw_model_output"] = raw
-                review["prompt"] = request_prompt
-                review["sampling_temperature"] = sampling_temperature
-                review["sampling_seed"] = None
-                review["review_attempts"] = attempt + 1
-                return review
-            except Exception as exc:
-                error_class = classify_error(exc)
-                if error_class in {
-                    "timeout",
-                    "network",
-                    "auth",
-                    "quota",
-                    "rate_limit",
-                    "provider",
-                }:
-                    raise
-                last_error = f"{type(exc).__name__}: {exc}"
-        return {
-            "contract": EVIDENCE_REVIEW_CONTRACT,
-            "decision": "protocol_error",
-            "error_class": "evidence_review_protocol",
-            "message": last_error[:1000],
-            "raw_model_output": raw,
-            "prompt": last_prompt,
-            "review_attempts": 2,
-            "sampling_temperature": sampling_temperature,
-            "sampling_seed": None,
-            "review_owner": "rwkv",
-        }
+            raw = str(response.content or "")
+            review = self._validate_evidence_review_continuation(
+                raw,
+                task_plan=task_plan,
+                allowed_evidence_record_ids=allowed_evidence_record_ids,
+                allowed_route_ids=allowed_route_ids,
+                allow_replan=not terminal,
+            )
+            review["raw_model_output"] = raw
+            review["prompt"] = prompt
+            review["sampling_temperature"] = sampling_temperature
+            review["sampling_seed"] = None
+            review["review_attempts"] = 1
+            review["review_mode"] = "terminal" if terminal else "binary"
+            return review
+        except Exception as exc:
+            error_class = classify_error(exc)
+            if error_class in {
+                "timeout",
+                "network",
+                "auth",
+                "quota",
+                "rate_limit",
+                "provider",
+            }:
+                raise
+            return {
+                "contract": EVIDENCE_REVIEW_CONTRACT,
+                "decision": "protocol_error",
+                "error_class": "evidence_review_protocol",
+                "message": f"{type(exc).__name__}: {exc}"[:1000],
+                "raw_model_output": raw,
+                "prompt": prompt,
+                "review_attempts": 1,
+                "sampling_temperature": sampling_temperature,
+                "sampling_seed": None,
+                "review_owner": "rwkv",
+                "review_mode": "terminal" if terminal else "binary",
+            }
 
     def rebuild_session_after_review(
         self,
@@ -748,6 +799,7 @@ class Planner:
     def _system_prompt(
         phase: str,
         task_mode: str = "",
+        connector_operations: tuple[str, ...] | None = None,
     ) -> str:
         # Keep the verified prompt shape, but make the public catalog stable
         # across internal workflow phases. The model should re-enter the same
@@ -759,19 +811,40 @@ class Planner:
         # Keep the public descriptions and argument contracts, but remove
         # backend/plugin metadata.  Provider selection, fetching, cleaning,
         # chunking and evidence extraction are separate controller stages.
-        catalog = json.dumps(
-            [
+        #
+        # connector_operations narrows only the presentation of the catalog to
+        # the object family RWKV itself declared one step earlier. web_search,
+        # deterministic tools and finish_task are always present, so no route
+        # is ever forced; None keeps the full catalog (single-step fallback).
+        projected_rows = []
+        for row in catalog_rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name", ""))
+            arguments = row.get("arguments") or {"type": "object"}
+            if name == "connector_lookup" and connector_operations is not None:
+                if not connector_operations:
+                    continue
+                arguments = json.loads(json.dumps(arguments))
+                operation_schema = (
+                    arguments.get("properties", {}).get("operation")
+                    if isinstance(arguments.get("properties"), dict)
+                    else None
+                )
+                if isinstance(operation_schema, dict) and operation_schema.get("enum"):
+                    operation_schema["enum"] = [
+                        value
+                        for value in operation_schema["enum"]
+                        if value in connector_operations
+                    ]
+            projected_rows.append(
                 {
-                    "name": row.get("name", ""),
+                    "name": name,
                     "description": str(row.get("description") or "").splitlines()[0],
-                    "arguments": row.get("arguments") or {"type": "object"},
+                    "arguments": arguments,
                 }
-                for row in catalog_rows
-                if isinstance(row, dict)
-            ],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+            )
+        catalog = json.dumps(projected_rows, ensure_ascii=False, separators=(",", ":"))
         return f"Tools: {catalog}\nReturn only a JSON function call."
 
     @staticmethod
@@ -1908,6 +1981,7 @@ class Planner:
         user_query: str,
         env_context: str,
         phase: str,
+        connector_operations: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         """Build one independent G1i request without replaying history.
 
@@ -1918,7 +1992,9 @@ class Planner:
 
         system_message = {
             "role": "system",
-            "content": self._system_prompt(phase),
+            "content": self._system_prompt(
+                phase, connector_operations=connector_operations
+            ),
         }
         decision_body = self._build_isolated_decision_body(
             user_query,
@@ -2285,6 +2361,171 @@ class Planner:
         remaining = context_length - prompt_tokens - 1024
         return max(256, min(10000, remaining))
 
+    @staticmethod
+    def _route_family_tools() -> list[dict[str, Any]]:
+        """Zero-argument object-family declarations shown to online G1i."""
+
+        empty_arguments = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        return [
+            {
+                "name": "target_weather",
+                "description": (
+                    "Choose when the question asks for current weather or weather alerts "
+                    "for a location."
+                ),
+                "arguments": empty_arguments,
+            },
+            {
+                "name": "target_github",
+                "description": (
+                    "Choose when the question names a GitHub repository (owner/repo, a project "
+                    "hosted on github.com) or asks for a repository's latest release, tag, "
+                    "release notes, or code. The structured GitHub connector reads the official "
+                    "release record directly."
+                ),
+                "arguments": empty_arguments,
+            },
+            {
+                "name": "target_package_registry",
+                "description": (
+                    "Choose when the question asks about one exact crates.io, PyPI, or npm "
+                    "package (its current version or release)."
+                ),
+                "arguments": empty_arguments,
+            },
+            {
+                "name": "target_scholarly",
+                "description": (
+                    "Choose when the question asks about a scholarly paper, an arXiv ID, a DOI, "
+                    "an author's publications, or a research topic. The structured paper "
+                    "connector reads official paper metadata directly."
+                ),
+                "arguments": empty_arguments,
+            },
+            {
+                "name": "target_general_web",
+                "description": (
+                    "Choose when none of the structured families above matches: an explicit URL, "
+                    "documentation, a product or service status page, game or vendor announcements, "
+                    "security advisories, news."
+                ),
+                "arguments": empty_arguments,
+            },
+        ]
+
+    def _select_route_family(
+        self,
+        user_query: str,
+        phase: str,
+        *,
+        sampling_temperature: float,
+        sampling_stage: str,
+    ) -> dict[str, Any]:
+        """Ask RWKV to declare the object family of its next retrieval target.
+
+        The reply filters only the catalog presentation of the following tool
+        decision. Any protocol failure falls back to the full catalog, so this
+        step can degrade but never block or redirect a route.
+        """
+
+        tools_json = json.dumps(
+            self._route_family_tools(), ensure_ascii=False, separators=(",", ":")
+        )
+        system_content = f"Tools: {tools_json}\nReturn only a JSON function call."
+        observation = str(self._latest_routing_observation or "").strip()[:1200]
+        body = (
+            f"Question: {str(user_query or '').strip()[:1500]}\n"
+            "Research brief: "
+            + json.dumps(
+                self._compact_task_plan(self._task_plan),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )[:1200]
+            + "\n"
+            + (f"Latest routing observation: {observation}\n" if observation else "")
+            + "\nDeclare the object family of your NEXT retrieval target by calling exactly one function. "
+            "This declaration only filters the tool catalog for your next decision; you still choose the "
+            "tool and query yourself afterwards. Match the question's target object:\n"
+            "- a named GitHub repository or its latest release/tag/code -> target_github\n"
+            "- a paper, arXiv ID, DOI, author, or research topic -> target_scholarly\n"
+            "- one exact crates.io/PyPI/npm package version -> target_package_registry\n"
+            "- current weather or weather alerts -> target_weather\n"
+            "- anything else (explicit URLs, documentation, status pages, game or vendor "
+            "announcements, security advisories) -> target_general_web.\n"
+            "web_search stays available in every family, so a structured family declaration "
+            "never removes the general-web fallback."
+        )
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": body},
+        ]
+        raw = ""
+        error = ""
+        for attempt in range(2):
+            request_messages = messages
+            if attempt:
+                request_messages = [
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            "Correction: return exactly one complete JSON function call choosing one of the "
+                            f"listed functions. Protocol error: {error[:300]}"
+                        ),
+                    },
+                ]
+            request_prompt = render_tool_transcript(request_messages)
+            try:
+                with model_sampling_parameters(
+                    sampling_temperature,
+                    seed=None,
+                    stage=sampling_stage,
+                    policy_reason="model_declared_route_object_family",
+                ):
+                    if is_local_provider(self.llm.provider):
+                        response = self.llm.text_completion(
+                            request_prompt,
+                            max_tokens=220,
+                            stop=JSON_CALL_STOP_SUFFIXES,
+                        )
+                    else:
+                        response = self.llm.chat_completion(
+                            [{"role": "user", "content": request_prompt}],
+                            max_tokens=220,
+                        )
+                raw = str(response.content or "")
+                payload = _canonicalize_tool_payload(
+                    normalize_json_object_envelope(raw).payload
+                )
+                function_value = payload.get("function")
+                if isinstance(function_value, dict):
+                    function_value = function_value.get("name")
+                family = str(payload.get("name") or function_value or "").strip()
+                if family not in _ROUTE_FAMILY_CONNECTOR_OPERATIONS:
+                    raise ValueError(f"unknown object family: {family!r}")
+                return {
+                    "family": family,
+                    "connector_operations": _ROUTE_FAMILY_CONNECTOR_OPERATIONS[family],
+                    "source": "model",
+                    "raw_model_output": visible_model_text(raw),
+                    "error": "",
+                }
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                if classify_error(exc) == "timeout":
+                    break
+        return {
+            "family": "",
+            "connector_operations": None,
+            "source": "fallback_full_catalog",
+            "raw_model_output": visible_model_text(raw),
+            "error": error,
+        }
+
     def plan_next_action(
         self,
         user_query: str,
@@ -2297,15 +2538,8 @@ class Planner:
         # Every decision is a fresh online-G1i request. The audit transcript is
         # deliberately not replayed into the model.
         planned_task_record_ids = [record_id(record) for record in task_records(self._task_plan)]
-        history = self._isolated_decision_messages(
-            user_query,
-            env_context,
-            phase,
-        )
-        prompt = render_tool_transcript(history)
         raw = ""
         planner_error = ""
-        successful_prompt = prompt
         payload: dict[str, Any] = {}
         name = ""
         arguments: dict[str, Any] = {}
@@ -2326,6 +2560,25 @@ class Planner:
             else get_model_stage_temperature(sampling_stage)
         )
         sampling_seed = self._next_decision_seed
+        # Two-step model routing: RWKV first declares the object family of its
+        # next retrieval target, then chooses the tool/query from a catalog
+        # whose connector operations are narrowed to that declaration. Both
+        # steps are model-authored; a protocol failure in step one falls back
+        # to the full catalog.
+        route_family_selection = self._select_route_family(
+            user_query,
+            phase,
+            sampling_temperature=sampling_temperature,
+            sampling_stage=sampling_stage,
+        )
+        history = self._isolated_decision_messages(
+            user_query,
+            env_context,
+            phase,
+            connector_operations=route_family_selection.get("connector_operations"),
+        )
+        prompt = render_tool_transcript(history)
+        successful_prompt = prompt
         # A malformed tool decision gets one same-temperature protocol repair.
         # The repair changes no tool/query choice and never authors an action;
         # it only asks RWKV to serialize its own decision as valid JSON.
@@ -2398,8 +2651,19 @@ class Planner:
                     raise ValueError("tool call name is empty")
                 ToolRegistry.validate_model_call(name, parsed_arguments)
                 if self._retrieval_action_requires_task_record(name):
+                    # A literal is "invented" only when it appears in neither
+                    # the user question, the trusted runtime state, nor the
+                    # exact observation transcript RWKV just read (retrieved
+                    # evidence, route history, tool feedback). Lines echoing a
+                    # prior guard rejection are excluded so a rejected literal
+                    # cannot launder itself into the trusted set.
+                    observed_input_text = "\n".join(
+                        line
+                        for line in request_prompt.splitlines()
+                        if "untrusted hard literal" not in line
+                    )
                     trusted_keys = hard_literal_keys(
-                        [user_query, self._trusted_runtime_context]
+                        [user_query, self._trusted_runtime_context, observed_input_text]
                     )
                     route_text = json.dumps(
                         parsed_arguments,
@@ -2443,6 +2707,8 @@ class Planner:
                         "protocol_normalized": protocol_normalized,
                         "sampling_temperature": sampling_temperature,
                         "sampling_seed": sampling_seed,
+                        "route_family": route_family_selection.get("family", ""),
+                        "route_family_source": route_family_selection.get("source", ""),
                     }
 
         if planner_error:
@@ -2457,6 +2723,8 @@ class Planner:
                 "protocol_normalized": protocol_normalized,
                 "sampling_temperature": sampling_temperature,
                 "sampling_seed": sampling_seed,
+                "route_family": route_family_selection.get("family", ""),
+                "route_family_source": route_family_selection.get("source", ""),
             }
 
         if task_record_id and task_record_id in planned_task_record_ids:
@@ -2507,4 +2775,6 @@ class Planner:
             "sampling_stage": sampling_stage,
             "sampling_temperature": sampling_temperature,
             "sampling_seed": sampling_seed,
+            "route_family": route_family_selection.get("family", ""),
+            "route_family_source": route_family_selection.get("source", ""),
         }

@@ -34,13 +34,16 @@ flowchart TD
     S --> CL["Evidence Ledger"]
     RL --> P
     CL --> P
-    P -->|finish_task| ERS["Evidence Record Set"]
-    ERS --> ER["RWKV Evidence Resolution"]
-    ER --> V["RWKV Evidence Review"]
+    P -->|finish_task| EC["Immutable Bounded Exact Evidence Lane"]
+    EC --> ERS["Evidence Record Set"]
+    ERS --> ER["RWKV Evidence Resolution Advisory"]
+    EC --> V["RWKV Evidence Review"]
+    ER -.->|optional attention metadata| V
     V -->|missing evidence| RP["Rebuild Planner Session"]
     RP --> P
-    V -->|finish| EC["Bounded Evidence Context"]
-    EC --> W["RWKV Final Writer"]
+    V -->|finish| W["RWKV Final Writer"]
+    EC --> W
+    ER -.->|optional attention metadata| W
     W --> A["Unmodified Final Answer"]
 
     T["Request-level Temp Scope"] -.-> TP
@@ -77,9 +80,9 @@ flowchart TD
 2. RWKV 生成任务计划；工程层不通过 Intake 规则改写计划。
 3. RWKV 在单一循环中逐步选择工具、查询、URL 和参数。
 4. 搜索结果被抓取、清洗和分块；页面证据抽取结果写入本任务的共享状态。
-5. RWKV 请求 `finish_task` 时，Evidence Resolution 先生成字段控制映射，独立的 RWKV Evidence Review 再判断是写答案还是重新规划。
+5. RWKV 请求 `finish_task` 时，系统先构造一次不可变的有界 exact evidence lane；Evidence Resolution 只能通过独立参数附加可选注意力映射，不能删除、替换、筛选、重排或混入其中的材料。独立的 RWKV Evidence Review 再判断是写答案还是重新规划。
 6. 若需要补证据，系统保留账本、重建 planner 会话，再由 RWKV 选择新路径。
-7. 若可以结束，系统只投影必要证据到最终上下文，RWKV 生成回答，代码不删句、不改写、不做摘录替代。
+7. 只有绑定当前 evidence digest 的有效 RWKV `finish` 才能启动 Writer；Review 缺失、协议错误或旧的 `replan` 不会被解释成隐式完成。检索资源耗尽时会发起一次独立的终端 Review，该请求只允许 RWKV 显式选择 `write_answer`，让 Writer 基于已保留证据回答可支持部分并说明缺失信息。Writer 接收同一份不可变 evidence lane 和独立 advisory metadata 后生成回答；代码不根据 Resolution 改变证据，也不删句、不改写、不做摘录替代。
 
 ## Temp 机制
 

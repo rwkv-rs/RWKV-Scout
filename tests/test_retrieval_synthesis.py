@@ -136,9 +136,12 @@ def test_context_packer_prioritizes_direct_user_url_without_dropping_sources():
         max_sources=2,
     )
 
+    # Selection/packing still ranks the direct URL strongest, but the final
+    # render reverses order so the strongest record lands nearest the
+    # continuation point (rendered last, highest S alias).
     selected = context["selected_evidence"]
-    assert [row["url"] for row in selected] == [direct["url"], earlier["url"]]
-    assert selected[0]["context_selection"]["direct_user_url"] is True
+    assert [row["url"] for row in selected] == [earlier["url"], direct["url"]]
+    assert selected[-1]["context_selection"]["direct_user_url"] is True
     assert len(selected) == 2
 
 
@@ -172,15 +175,18 @@ def test_context_packer_routes_structured_and_recent_records_first_for_latest_qu
         max_sources=3,
     )
 
+    # Packing priority still routes the latest structured release first, but
+    # the render then reverses order so the strongest record ends up nearest
+    # the continuation point (rendered last, highest S alias).
     selected = context["selected_evidence"]
     assert [row["title"] for row in selected] == [
-        "Release v3",
-        "Release v2",
         "Old web page",
+        "Release v2",
+        "Release v3",
     ]
-    assert selected[0]["context_selection"]["structured_record"] is True
-    assert selected[0]["context_selection"]["date_priority_active"] is True
-    assert selected[0]["context_selection"]["source_date"] == "2026-08-10"
+    assert selected[-1]["context_selection"]["structured_record"] is True
+    assert selected[-1]["context_selection"]["date_priority_active"] is True
+    assert selected[-1]["context_selection"]["source_date"] == "2026-08-10"
 
 
 def test_rwkv_output_is_returned_without_semantic_rewrite():
@@ -680,9 +686,12 @@ def test_evidence_records_on_same_url_keep_version_identity_separate():
 
     assert context["context_stats"]["bound_evidence_record_count"] == 0
     assert context["context_stats"]["candidate_evidence_record_count"] == 2
+    # E-current still wins packing priority, but the final render reverses
+    # order so the strongest record lands last (nearest the continuation
+    # point, highest S alias).
     assert [row["evidence_record_id"] for row in context["selected_evidence"]] == [
-        "E-current",
         "E-old",
+        "E-current",
     ]
     assert context["text"].count("RWKV-CANDIDATE SOURCE RECORD") == 2
     assert '"record_key":"Version 4.4"' in context["text"]
@@ -690,7 +699,7 @@ def test_evidence_records_on_same_url_keep_version_identity_separate():
     assert context["text"].count("RWKV candidate field bindings for this span") == 2
     assert '["P1:F1","P1:F2"]' in context["text"]
     assert '["P1:F3"]' in context["text"]
-    assert context["selected_evidence"][0]["packed_chunks"][0]["field_ids"] == [
+    assert context["selected_evidence"][-1]["packed_chunks"][0]["field_ids"] == [
         "P1:F1",
         "P1:F2",
     ]
@@ -858,11 +867,14 @@ def test_unsatisfied_weak_authority_does_not_override_final_retrieval_rank():
         constraints={"context_source_count": 2},
     )
 
+    # ranked_page still wins final retrieval rank priority, but the final
+    # render reverses order so it lands last (nearest the continuation
+    # point, highest S alias); weak_institutional_page renders first.
     assert [row["url"] for row in context["selected_evidence"]] == [
-        ranked_page["url"],
         weak_institutional_page["url"],
+        ranked_page["url"],
     ]
-    assert context["selected_evidence"][1]["context_selection"][
+    assert context["selected_evidence"][0]["context_selection"][
         "authority_priority_active"
     ] is False
 
@@ -920,17 +932,20 @@ def test_current_record_context_does_not_treat_first_quote_date_as_source_freshn
         query="What is the latest version and date?",
     )
 
+    # Packing priority is unchanged (E-old still packs ahead of E-new), but
+    # the final render reverses order so the packing-priority record renders
+    # nearest the continuation point (rendered last, highest S alias).
     assert [row["evidence_record_id"] for row in context["selected_evidence"]] == [
-        "E-old",
         "E-new",
+        "E-old",
     ]
     assert all(
         row["context_selection"]["source_date"] is None
         and row["context_selection"]["source_date_origin"] is None
         for row in context["selected_evidence"]
     )
-    assert "4.0\n2026-07-01" in context["citation_refs"][0]["quote"]
-    assert "5.0\n2026-08-10" in context["citation_refs"][1]["quote"]
+    assert "5.0\n2026-08-10" in context["citation_refs"][0]["quote"]
+    assert "4.0\n2026-07-01" in context["citation_refs"][1]["quote"]
 
 
 def test_grounded_source_slots_are_round_robin_across_claims():
@@ -967,11 +982,14 @@ def test_grounded_source_slots_are_round_robin_across_claims():
         constraints={"context_source_count": 2},
     )
 
+    # Round-robin packing still slots p1-a ahead of p2-a, but the final
+    # render reverses order so p1-a (packing priority) renders last, nearest
+    # the continuation point, with the highest S alias.
     assert "https://example.com/p1-a" in context["text"]
     assert "https://example.com/p2-a" in context["text"]
     assert [row["url"] for row in context["citation_refs"]] == [
-        "https://example.com/p1-a",
         "https://example.com/p2-a",
+        "https://example.com/p1-a",
     ]
 
 
@@ -1068,15 +1086,19 @@ def test_context_keeps_reference_ids_contiguous_when_a_source_does_not_fit():
         token_budget=256,
     )
 
-    assert "[S1] Source label (routing metadata only): Source 1" in context["text"]
-    assert "[S2] Source label (routing metadata only): Source 3" in context["text"]
+    # Source 1 still wins budget-packing priority over Source 3 (the
+    # oversized Source 2 is skipped either way), but the final render
+    # reverses order so Source 1 renders last, nearest the continuation
+    # point, with the highest S alias.
+    assert "[S1] Source label (routing metadata only): Source 3" in context["text"]
+    assert "[S2] Source label (routing metadata only): Source 1" in context["text"]
     assert "[S3]" not in context["text"]
     assert [
         (row["ref_id"], row["title"], row["url"])
         for row in context["citation_refs"]
     ] == [
-        ("S1", "Source 1", "https://example.com/1"),
-        ("S2", "Source 3", "https://example.com/3"),
+        ("S1", "Source 3", "https://example.com/3"),
+        ("S2", "Source 1", "https://example.com/1"),
     ]
     assert context["context_tokens"] <= 256
 
@@ -1312,14 +1334,52 @@ def test_writer_includes_the_verbatim_user_question_once():
     assert prompt.endswith("Write the final answer now.")
 
 
+def test_writer_keeps_advisory_before_one_unchanged_exact_evidence_lane():
+    advisory = "P1 status=resolved; selected=E-2"
+    evidence = '<span-ref id="E-1:chunk-1">Version 3.14.1</span-ref>'
+
+    prompt = _writer_prompt(
+        "Which version?",
+        {
+            "text": evidence,
+            "evidence_text": evidence,
+            "evidence_resolution_view": advisory,
+        },
+    )
+
+    assert prompt.count(advisory) == 1
+    assert prompt.count(evidence) == 1
+    assert prompt.index(advisory) < prompt.index(evidence)
+    assert prompt.index(evidence) < prompt.index("Write the final answer now.")
+
+
 def test_writer_recognizes_record_first_span_refs_as_literal_facts():
     prompt = _writer_prompt(
         "Which version?",
         {"text": '<span-ref id="E-1:chunk-1">Version 3.14.1</span-ref>'},
     )
 
-    assert "<span-ref> or compatibility <chunk-id>" in prompt
+    assert "<span-ref>, <locator-...>, or compatibility <chunk-id>" in prompt
     assert "This packet contains no literal factual span" not in prompt
+
+
+def test_writer_recognizes_locator_chunk_blocks_as_literal_facts():
+    # Regression guard: evidence rendered with the current <locator-chunk-N>
+    # tags must never trigger the no-facts refusal banner (R52/R53 shipped a
+    # stale tag check that ordered the Writer to refuse evidence-bearing
+    # packets).
+    prompt = _writer_prompt(
+        "Which version?",
+        {"text": "<locator-chunk-3>\nVersion 3.14.1 released 2026-08-01."},
+    )
+
+    assert "This packet contains no literal factual span" not in prompt
+
+    structured = _writer_prompt(
+        "Which version?",
+        {"text": "<locator-structured-record>\ntag v1.2.3 published 2026-08-02"},
+    )
+    assert "This packet contains no literal factual span" not in structured
 
 
 def test_writer_empty_literal_lane_requests_an_evidence_insufficient_answer():

@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 import config
 from agent.tool_protocol import (
     canonicalize_tool_call,
+    inspect_tool_call_format,
     normalize_tool_call_format,
 )
 from agent.planner import Planner
@@ -212,17 +213,12 @@ class AgentProductToolTests(unittest.TestCase):
                 task_plan=task_plan,
             )
 
-    def test_evidence_review_preserves_write_intent_but_discards_embedded_answer(self):
-        review = Planner._validate_evidence_review_continuation(
-            '{"name":"write_answer","arguments":{"answer":'
-            '"Model-authored prose is not the final Writer output."}}'
-        )
-
-        self.assertEqual(review["decision"], "finish")
-        self.assertEqual(review["selected_action"], "write_answer")
-        self.assertTrue(review["arguments_normalized"])
-        self.assertTrue(review["protocol_normalized"])
-        self.assertNotIn("answer", review)
+    def test_evidence_review_rejects_embedded_answer_without_deleting_it(self):
+        with self.assertRaisesRegex(ValueError, "arguments must be empty"):
+            Planner._validate_evidence_review_continuation(
+                '{"name":"write_answer","arguments":{"answer":'
+                '"Model-authored prose is not the final Writer output."}}'
+            )
 
     def test_rebuilt_planner_uses_request_level_replan_profile(self):
         planner = Planner()
@@ -276,8 +272,10 @@ class AgentProductToolTests(unittest.TestCase):
         class SamplingAwareRWKV:
             provider = "local_13b"
 
-            def text_completion(self, _prompt, max_tokens=0, stop=None):
+            def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
                 seen.append(
                     {
                         "temperature": config.get_llm_temperature(),
@@ -322,6 +320,8 @@ class AgentProductToolTests(unittest.TestCase):
 
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
                 seen.append(
                     {
                         "prompt": prompt,
@@ -355,6 +355,8 @@ class AgentProductToolTests(unittest.TestCase):
 
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_github","arguments":{}}')
                 seen.append((prompt, config.get_llm_temperature()))
                 if len(seen) == 1:
                     return Mock(
@@ -393,6 +395,8 @@ class AgentProductToolTests(unittest.TestCase):
 
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
                 prompts.append(prompt)
                 return Mock(content=outputs.pop(0))
 
@@ -449,6 +453,8 @@ class AgentProductToolTests(unittest.TestCase):
 
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
                 prompts.append(prompt)
                 if len(prompts) == 1:
                     return Mock(content='{"name":"web_search","arguments":{"query":"same route"}}')
@@ -518,6 +524,8 @@ class AgentProductToolTests(unittest.TestCase):
 
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
                 seen.append(prompt)
                 return Mock(content='{"name":"web_search","arguments":{"query":"launch date"}}')
 
@@ -561,6 +569,8 @@ class AgentProductToolTests(unittest.TestCase):
 
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
                 seen.append(prompt)
                 return Mock(
                     content=(
@@ -606,6 +616,8 @@ class AgentProductToolTests(unittest.TestCase):
 
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
                 seen.append(prompt)
                 return Mock(
                     content='{"name":"web_search","arguments":{"query":"current release"}}'
@@ -620,7 +632,183 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertEqual(decision["task_record_binding_method"], "sole_task_record")
         self.assertEqual(len(seen), 1)
 
-    def test_cross_validator_repairs_invalid_json_once_at_the_same_temperature(self):
+    def test_planner_two_step_family_declaration_filters_connector_catalog(self):
+        planner = Planner()
+        planner.begin_task(
+            "latest release of owner/repo",
+            "state",
+            {"goal": "find release", "records": [{"id": "P1", "task": "release"}]},
+        )
+        main_prompts = []
+
+        class TwoStepRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_github","arguments":{}}')
+                main_prompts.append(prompt)
+                return Mock(
+                    content=(
+                        '{"name":"connector_lookup","arguments":'
+                        '{"operation":"github_release","query":"owner/repo"}}'
+                    )
+                )
+
+        planner.llm = TwoStepRWKV()
+        decision = planner.plan_next_action(
+            "latest release of owner/repo", {}, "state", "DISCOVERY"
+        )
+
+        self.assertEqual(decision["action"], "connector_lookup")
+        self.assertEqual(decision["route_family"], "target_github")
+        self.assertEqual(decision["route_family_source"], "model")
+        self.assertEqual(len(main_prompts), 1)
+        catalog_line = main_prompts[0].split("\n", 1)[0]
+        # The declared family narrows only the connector operation enum...
+        self.assertIn("github_release", catalog_line)
+        self.assertNotIn("weather_current", catalog_line)
+        self.assertNotIn("pypi_release", catalog_line)
+        # ...while the general lanes always stay available.
+        self.assertIn("web_search", catalog_line)
+        self.assertIn("finish_task", catalog_line)
+
+    def test_planner_general_web_family_drops_connector_but_keeps_web_search(self):
+        planner = Planner()
+        planner.begin_task(
+            "read this page",
+            "state",
+            {"goal": "read page", "records": [{"id": "P1", "task": "page"}]},
+        )
+        main_prompts = []
+
+        class GeneralWebRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
+                main_prompts.append(prompt)
+                return Mock(
+                    content='{"name":"web_search","arguments":{"query":"the page"}}'
+                )
+
+        planner.llm = GeneralWebRWKV()
+        decision = planner.plan_next_action("read this page", {}, "state", "DISCOVERY")
+
+        self.assertEqual(decision["action"], "web_search")
+        catalog_line = main_prompts[0].split("\n", 1)[0]
+        self.assertNotIn("connector_lookup", catalog_line)
+        self.assertIn("web_search", catalog_line)
+        self.assertIn("finish_task", catalog_line)
+
+    def test_planner_family_protocol_failure_falls_back_to_full_catalog(self):
+        planner = Planner()
+        planner.begin_task(
+            "question",
+            "state",
+            {"goal": "answer", "records": [{"id": "P1", "task": "fact"}]},
+        )
+        main_prompts = []
+
+        class BrokenFamilyRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content="not a function call")
+                main_prompts.append(prompt)
+                return Mock(
+                    content='{"name":"web_search","arguments":{"query":"fact"}}'
+                )
+
+        planner.llm = BrokenFamilyRWKV()
+        decision = planner.plan_next_action("question", {}, "state", "DISCOVERY")
+
+        self.assertEqual(decision["action"], "web_search")
+        self.assertEqual(decision["route_family"], "")
+        self.assertEqual(decision["route_family_source"], "fallback_full_catalog")
+        catalog_line = main_prompts[0].split("\n", 1)[0]
+        # Fallback keeps the complete catalog: every connector family visible.
+        self.assertIn("connector_lookup", catalog_line)
+        self.assertIn("weather_current", catalog_line)
+        self.assertIn("github_release", catalog_line)
+
+    def test_route_literal_observed_in_tool_output_is_trusted_for_replan(self):
+        planner = Planner()
+        planner.begin_task(
+            "what changed in the latest release?",
+            "state",
+            {"goal": "find changes", "records": [{"id": "P1", "task": "changes"}]},
+        )
+        planner.observe_tool_result(
+            {
+                "status": "ok",
+                "results": [
+                    {"url": "https://example.test/notes", "title": "Release 3.15.0 notes"}
+                ],
+            }
+        )
+
+        class ObservedLiteralRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
+                return Mock(
+                    content=(
+                        '{"name":"web_search","arguments":'
+                        '{"query":"release 3.15.0 changelog"}}'
+                    )
+                )
+
+        planner.llm = ObservedLiteralRWKV()
+        decision = planner.plan_next_action(
+            "what changed in the latest release?", {}, "state", "DISCOVERY"
+        )
+
+        # 3.15.0 appeared verbatim in the tool observation RWKV just read, so
+        # it is provenance-tracked, not invented; the guard must not block it.
+        self.assertEqual(decision["action"], "web_search")
+        self.assertEqual(decision["args"]["query"], "release 3.15.0 changelog")
+        self.assertNotIn("planner_error", decision)
+
+    def test_route_literal_absent_from_all_inputs_is_still_rejected(self):
+        planner = Planner()
+        planner.begin_task(
+            "what changed in the latest release?",
+            "state",
+            {"goal": "find changes", "records": [{"id": "P1", "task": "changes"}]},
+        )
+
+        class InventedLiteralRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
+                return Mock(
+                    content=(
+                        '{"name":"web_search","arguments":'
+                        '{"query":"release 9.99.9 changelog"}}'
+                    )
+                )
+
+        planner.llm = InventedLiteralRWKV()
+        decision = planner.plan_next_action(
+            "what changed in the latest release?", {}, "state", "DISCOVERY"
+        )
+
+        self.assertEqual(decision["action"], "")
+        self.assertIn("untrusted hard literal", decision["planner_error"])
+
+    def test_cross_validator_does_not_resample_an_invalid_action(self):
         planner = Planner()
         seen = []
 
@@ -630,29 +818,19 @@ class AgentProductToolTests(unittest.TestCase):
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
                 seen.append((prompt, config.get_llm_temperature()))
-                if len(seen) == 1:
-                    return Mock(content="not valid JSON")
-                return Mock(
-                    content='{"name":"write_answer","arguments":{}}'
-                )
+                return Mock(content="not valid JSON")
 
         planner.llm = RepairingRWKV()
         review = planner.review_evidence("question", {"records": []}, "evidence")
 
-        self.assertEqual(review["decision"], "finish")
-        self.assertEqual(review["review_attempts"], 2)
-        self.assertEqual([temperature for _, temperature in seen], [0.1, 0.1])
-        self.assertIn("Protocol correction:", seen[1][0])
+        self.assertEqual(review["decision"], "protocol_error")
+        self.assertEqual(review["review_attempts"], 1)
+        self.assertEqual([temperature for _, temperature in seen], [0.1])
+        self.assertEqual(len(seen), 1)
         self.assertNotIn('"task_record_id":"P1"', seen[0][0])
         self.assertNotIn('"field_ids":["P1:F1"]', seen[0][0])
-        self.assertNotIn('"task_record_id":"P1"', seen[1][0])
-        self.assertNotIn('"field_ids":["P1:F1"]', seen[1][0])
-        self.assertLess(
-            seen[1][0].rfind("Protocol correction:"),
-            seen[1][0].rfind("Assistant: ```json"),
-        )
 
-    def test_cross_validator_repairs_extra_keys_at_the_same_temperature(self):
+    def test_cross_validator_does_not_resample_extra_semantic_keys(self):
         planner = Planner()
         seen = []
 
@@ -662,15 +840,11 @@ class AgentProductToolTests(unittest.TestCase):
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
                 seen.append((prompt, config.get_llm_temperature()))
-                if len(seen) == 1:
-                    return Mock(
-                        content=(
-                            '{"name":"write_answer","arguments":{},'
-                            '"reason":"P2 is not retrieved"}'
-                        )
-                    )
                 return Mock(
-                    content='{"name":"write_answer","arguments":{}}'
+                    content=(
+                        '{"name":"write_answer","arguments":{},'
+                        '"reason":"P2 is not retrieved"}'
+                    )
                 )
 
         planner.llm = ContradictoryThenConsistentRWKV()
@@ -680,10 +854,139 @@ class AgentProductToolTests(unittest.TestCase):
             "P1 evidence only",
         )
 
+        self.assertEqual(review["decision"], "protocol_error")
+        self.assertEqual(review["review_attempts"], 1)
+        self.assertEqual([temperature for _, temperature in seen], [0.1])
+        self.assertEqual(len(seen), 1)
+
+    def test_cross_validator_losslessly_normalizes_function_alias_once(self):
+        planner = Planner()
+        seen = []
+
+        class FunctionAliasRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                seen.append(prompt)
+                return Mock(
+                    content='{"function":"write_answer","arguments":{}}'
+                )
+
+        planner.llm = FunctionAliasRWKV()
+        review = planner.review_evidence("question", {"records": []}, "evidence")
+
         self.assertEqual(review["decision"], "finish")
-        self.assertEqual(review["review_attempts"], 2)
-        self.assertEqual([temperature for _, temperature in seen], [0.1, 0.1])
-        self.assertEqual(len(seen), 2)
+        self.assertEqual(review["selected_action"], "write_answer")
+        self.assertEqual(review["review_attempts"], 1)
+        self.assertTrue(review["protocol_normalized"])
+        self.assertEqual(len(seen), 1)
+
+    def test_cross_validator_rejects_unconsumed_nested_function_fields(self):
+        planner = Planner()
+        planner.llm = Mock()
+        planner.llm.text_completion.return_value = Mock(
+            content=(
+                '{"tool_calls":[{"type":"function","function":'
+                '{"name":"write_answer","arguments":{},'
+                '"reason":"must not vanish"}}]}'
+            )
+        )
+
+        review = planner.review_evidence(
+            "question",
+            {"records": []},
+            "exact evidence",
+        )
+
+        self.assertEqual(review["decision"], "protocol_error")
+        self.assertIn("tool_calls[0].function.reason", review["message"])
+        self.assertEqual(review["review_attempts"], 1)
+
+    def test_cross_validator_accepts_top_level_typed_function_wrapper(self):
+        planner = Planner()
+        planner.llm = Mock()
+        planner.llm.text_completion.return_value = Mock(
+            content=(
+                '{"type":"function","function":'
+                '{"name":"write_answer","arguments":{}}}'
+            )
+        )
+
+        review = planner.review_evidence(
+            "question",
+            {"records": []},
+            "exact evidence",
+        )
+
+        self.assertEqual(review["decision"], "finish")
+        self.assertTrue(review["protocol_normalized"])
+
+    def test_terminal_evidence_review_exposes_only_explicit_writer_handoff(self):
+        planner = Planner()
+        prompts = []
+
+        class TerminalReviewRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                prompts.append(prompt)
+                return Mock(content='{"name":"write_answer","arguments":{}}')
+
+        planner.llm = TerminalReviewRWKV()
+        review = planner.review_evidence(
+            "question",
+            {"records": []},
+            "exact evidence",
+            terminal=True,
+        )
+
+        self.assertEqual(review["decision"], "finish")
+        self.assertEqual(review["review_mode"], "terminal")
+        self.assertIn("retrieval resource boundary has been reached", prompts[0])
+        self.assertNotIn("continue_retrieval", prompts[0])
+
+    def test_terminal_evidence_review_rejects_replan_action(self):
+        planner = Planner()
+        planner.llm = Mock()
+        planner.llm.text_completion.return_value = Mock(
+            content='{"name":"continue_retrieval","arguments":{}}'
+        )
+
+        review = planner.review_evidence(
+            "question",
+            {"records": []},
+            "exact evidence",
+            terminal=True,
+        )
+
+        self.assertEqual(review["decision"], "protocol_error")
+        self.assertIn("unavailable after the retrieval resource boundary", review["message"])
+
+    def test_cross_validator_rejects_conflicting_aliases_without_resampling(self):
+        planner = Planner()
+        calls = []
+
+        class ConflictingAliasRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                calls.append(prompt)
+                return Mock(
+                    content=(
+                        '{"name":"write_answer","arguments":{},'
+                        '"function":{"name":"continue_retrieval","arguments":{}}}'
+                    )
+                )
+
+        planner.llm = ConflictingAliasRWKV()
+        review = planner.review_evidence("question", {"records": []}, "evidence")
+
+        self.assertEqual(review["decision"], "protocol_error")
+        self.assertEqual(review["review_attempts"], 1)
+        self.assertEqual(len(calls), 1)
 
     def test_cross_validator_accepts_rwkv_owned_finish_without_hidden_gate(self):
         planner = Planner()
@@ -758,6 +1061,44 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertEqual(prompts[0].count('"records_to_check"'), 1)
         self.assertTrue(prompts[0].endswith("Assistant: ```json\n"))
 
+    def test_cross_validator_prompt_keeps_exact_evidence_in_its_own_lane(self):
+        planner = Planner()
+        prompts = []
+
+        class CapturingRWKV:
+            provider = "local_13b"
+
+            def text_completion(self, prompt, max_tokens=0, stop=None):
+                del max_tokens, stop
+                prompts.append(prompt)
+                return Mock(content='{"name":"write_answer","arguments":{}}')
+
+        planner.llm = CapturingRWKV()
+        review = planner.review_evidence(
+            "question",
+            {"records": [{"id": "P1"}]},
+            "EXACT_FACT_SENTINEL",
+            "ROUTING_SENTINEL",
+            resolution_advisory="ADVISORY_SENTINEL",
+        )
+
+        self.assertEqual(review["decision"], "finish")
+        prompt = prompts[0]
+        advisory_at = prompt.index("ADVISORY_SENTINEL")
+        routing_at = prompt.index("ROUTING_SENTINEL")
+        retained_at = prompt.index(
+            "RETAINED SOURCE SPANS (immutable factual evidence only)"
+        )
+        exact_at = prompt.index("EXACT_FACT_SENTINEL")
+        final_contract_at = prompt.index("FINAL ACTION CONTRACT")
+        self.assertLess(advisory_at, routing_at)
+        self.assertLess(routing_at, retained_at)
+        self.assertLess(retained_at, exact_at)
+        self.assertLess(exact_at, final_contract_at)
+        retained_lane = prompt[retained_at:final_contract_at]
+        self.assertNotIn("ADVISORY_SENTINEL", retained_lane)
+        self.assertNotIn("ROUTING_SENTINEL", retained_lane)
+
     def test_rebuilt_planner_requests_one_rwkv_function_call_with_replan_state(self):
         planner = Planner()
         prompts = []
@@ -775,6 +1116,8 @@ class AgentProductToolTests(unittest.TestCase):
 
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
                 prompts.append(prompt)
                 sampling_profiles.append(
                     {
@@ -855,6 +1198,8 @@ class AgentProductToolTests(unittest.TestCase):
 
             def text_completion(self, prompt, max_tokens=0, stop=None):
                 del max_tokens, stop
+                if "Declare the object family" in prompt:
+                    return Mock(content='{"name":"target_general_web","arguments":{}}')
                 prompts.append(prompt)
                 return Mock(content=outputs.pop(0))
 
@@ -1235,9 +1580,8 @@ class AgentProductToolTests(unittest.TestCase):
         )
 
         self.assertEqual(review["decision"], "protocol_error")
-        self.assertEqual(review["review_attempts"], 2)
-        self.assertEqual(len(calls), 2)
-        self.assertIn("exactly name and arguments", calls[1])
+        self.assertEqual(review["review_attempts"], 1)
+        self.assertEqual(len(calls), 1)
 
     def test_cross_validator_accepts_minimal_binary_replan(self):
         planner = Planner()
@@ -1379,6 +1723,44 @@ class AgentProductToolTests(unittest.TestCase):
         self.assertEqual(call["name"], "calculator")
         self.assertEqual(call["arguments"], {"expression": "2+3"})
         self.assertEqual(call["call_id"], "call-7")
+
+    def test_protocol_adapter_reports_nested_unconsumed_fields(self):
+        payload = {
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "write_answer",
+                        "arguments": {},
+                        "reason": "must not vanish",
+                    },
+                }
+            ]
+        }
+        inspection = inspect_tool_call_format(payload)
+        self.assertEqual(inspection.canonical["name"], "write_answer")
+        self.assertEqual(
+            inspection.unconsumed_fields,
+            ("tool_calls[0].function.reason",),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"tool_calls\[0\]\.function\.reason",
+        ):
+            canonicalize_tool_call(payload)
+
+    def test_protocol_adapter_accepts_top_level_typed_function_wrapper(self):
+        call = canonicalize_tool_call(
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_answer",
+                    "arguments": {},
+                },
+            }
+        )
+        self.assertEqual(call["name"], "write_answer")
+        self.assertEqual(call["arguments"], {})
 
     def test_protocol_adapter_accepts_common_function_call_wrapper_losslessly(self):
         call = canonicalize_tool_call(

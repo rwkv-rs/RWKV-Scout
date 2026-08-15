@@ -46,6 +46,7 @@ from utils.token_tracker import current_task_id
 from utils.trace_validation import validate_replay_trace
 from config import LLM_ENDPOINTS, get_experiment_model_config, validate_experiment_model_contract
 from agent.orchestrator import Orchestrator
+from agent.unified_research import EvidenceReviewDecisionError
 from tools.registry import ToolRegistry
 
 
@@ -933,21 +934,13 @@ class ExperimentPipelineTests(unittest.TestCase):
                     "missing_point_id": "P1",
                     "evidence_needed": "station list",
                 }
-                result = orchestrator._run_model_tool_loop("find stations", {})
+                with self.assertRaises(EvidenceReviewDecisionError):
+                    orchestrator._run_model_tool_loop("find stations", {})
 
-            self.assertIn("bounded summary", result)
             # The controller reports exact duplicates to RWKV and never
             # creates a replacement query of its own.
             self.assertEqual([item[0] for item in executed], ["web_search"])
-            self.assertEqual(len(synthesis_calls), 1)
-            # A duplicate boundary gives the RWKV cross-validator one bounded
-            # opportunity to request a new Planner session. The rebuilt RWKV
-            # Planner may then finish from unchanged retained evidence; the
-            # controller does not override that second model decision.
-            self.assertEqual(
-                synthesis_calls[0]["termination_reason"],
-                "resource_duplicate_limit",
-            )
+            self.assertEqual(synthesis_calls, [])
 
     def test_runtime_gate_is_persisted_and_released(self):
         with tempfile.TemporaryDirectory() as directory:

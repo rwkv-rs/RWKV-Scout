@@ -7,6 +7,8 @@ def classify_error(error: BaseException | str) -> str:
     text = str(error).casefold()
     name = type(error).__name__.casefold() if isinstance(error, BaseException) else ""
     combined = f"{name} {text}"
+    if "evidencereviewdecisionerror" in combined or "evidence review decision" in combined:
+        return "evidence_review_protocol"
     if "timeout" in combined or "timed out" in combined:
         return "timeout"
     if any(

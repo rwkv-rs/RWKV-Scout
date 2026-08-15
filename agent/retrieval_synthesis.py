@@ -1706,6 +1706,14 @@ def build_evidence_context(
             break
         cursor += 1
 
+    # Budget packing above runs in strength order so the strongest records win
+    # marginal chunks. The final render is then reversed so the strongest
+    # record sits LAST in the packet, nearest the continuation point: RWKV is
+    # a fixed-state RNN and the most recently read span dominates its state
+    # when writing begins. Attention routing only — identical records and
+    # chunk selections reach the Writer either way.
+    selected = list(reversed(selected))
+    packed = list(reversed(packed))
     text, projected_sources = _render_evidence_packet(
         factual_task_records=factual_task_records,
         calculations=calculations,
@@ -1793,9 +1801,15 @@ def _writer_prompt(
         else ""
     )
     evidence_text = str(context.get("evidence_text") or context.get("text") or "")
+    # Evidence spans are rendered as <span-ref>, legacy <chunk-N>, or the
+    # current <locator-chunk-N>/<locator-structured-record> blocks. The
+    # availability banner must only appear when none of these exist; keying it
+    # off a stale tag subset silently ordered the Writer to refuse packets
+    # that did contain literal spans.
     has_literal_facts = (
         "<span-ref" in evidence_text
         or "<chunk-" in evidence_text
+        or "<locator-" in evidence_text
         or "TOOL RESULTS:" in evidence_text
     )
     availability_section = (
@@ -1810,8 +1824,8 @@ def _writer_prompt(
         "You are the final RWKV answer writer. Answer the user's question yourself using the retrieved "
         "material and tool results below. The material can be incomplete or conflicting; judge it directly. "
         "If some information is missing, answer the supported parts and clearly state what remains uncertain. "
-        "Only tool results and literal text inside <span-ref> or compatibility <chunk-id> blocks are factual "
-        "material. Source labels, "
+        "Only tool results and literal text inside <span-ref>, <locator-...>, or compatibility <chunk-id> blocks "
+        "are factual material. Source labels, "
         "titles, URLs, provider labels, routing metadata, and the Evidence Resolution control lane "
         "only locate or prioritize candidates; verify every P#/E-* binding against the chunk text. Treat each "
         "S# as an independent record: compare its literal object, version, and date, and do not move a field "

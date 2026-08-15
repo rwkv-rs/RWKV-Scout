@@ -10,9 +10,25 @@ values.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from agent.runtime_contracts import TOOL_CALL_CONTRACT
+
+
+@dataclass(frozen=True)
+class ToolCallFormatInspection:
+    """Observable accounting for one representation-only conversion.
+
+    ``consumed_fields`` names every envelope field understood by the adapter.
+    ``unconsumed_fields`` names authored envelope fields that normalization
+    would otherwise discard.  Argument-object members are values of the call,
+    not envelope syntax, so they are consumed as a unit.
+    """
+
+    canonical: dict[str, Any]
+    consumed_fields: tuple[str, ...]
+    unconsumed_fields: tuple[str, ...]
 
 
 def _arguments(value: Any) -> dict[str, Any]:
@@ -64,6 +80,7 @@ def _call_parts(payload: Mapping[str, Any]) -> dict[str, Any]:
         "id",
         "contract",
         "schema_version",
+        "type",
     }
     if len(value) == 1:
         wrapper_name, wrapper_value = next(iter(value.items()))
@@ -165,9 +182,15 @@ def _call_parts(payload: Mapping[str, Any]) -> dict[str, Any]:
         value.get("call_id"),
         value.get("tool_call_id"),
         value.get("id"),
+        top_function.get("call_id") if top_function else None,
+        top_function.get("tool_call_id") if top_function else None,
+        top_function.get("id") if top_function else None,
         first.get("call_id") if first else None,
         first.get("tool_call_id") if first else None,
         first.get("id") if first else None,
+        native_function.get("call_id") if native_function else None,
+        native_function.get("tool_call_id") if native_function else None,
+        native_function.get("id") if native_function else None,
         function_call.get("call_id") if function_call else None,
         function_call.get("tool_call_id") if function_call else None,
         function_call.get("id") if function_call else None,
@@ -183,26 +206,132 @@ def _call_parts(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_convertible_tool_call_format(payload: Mapping[str, Any]) -> None:
-    """Reject shapes that cannot be converted to one call without data loss.
+_TOP_LEVEL_ENVELOPE_KEYS = frozenset(
+    {
+        "name",
+        "tool_name",
+        "action",
+        "tool",
+        "arguments",
+        "args",
+        "parameters",
+        "function",
+        "function_call",
+        "tool_calls",
+        "task_record_id",
+        "task_point_id",
+        "point_id",
+        "call_id",
+        "tool_call_id",
+        "id",
+        "contract",
+        "schema_version",
+        "type",
+    }
+)
+_FUNCTION_ENVELOPE_KEYS = frozenset(
+    {
+        "name",
+        "arguments",
+        "args",
+        "parameters",
+        "task_record_id",
+        "task_point_id",
+        "point_id",
+        "call_id",
+        "tool_call_id",
+        "id",
+    }
+)
+_NATIVE_CALL_ENVELOPE_KEYS = frozenset(
+    {
+        "name",
+        "tool_name",
+        "action",
+        "tool",
+        "arguments",
+        "args",
+        "parameters",
+        "function",
+        "task_record_id",
+        "task_point_id",
+        "point_id",
+        "call_id",
+        "tool_call_id",
+        "id",
+        "type",
+    }
+)
 
-    This is protocol validation, not part of format conversion.  In
-    particular, it prevents the converter from silently choosing one of two
-    model-authored calls or two conflicting aliases.
-    """
 
-    _call_parts(payload)
+def _field_accounting(payload: Mapping[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return consumed and unconsumed envelope paths without changing values."""
+
+    value = dict(payload or {})
+    if len(value) == 1:
+        wrapper_name, wrapper_value = next(iter(value.items()))
+        if (
+            wrapper_name not in _TOP_LEVEL_ENVELOPE_KEYS
+            and isinstance(wrapper_value, Mapping)
+        ):
+            return (str(wrapper_name),), ()
+
+    consumed: set[str] = set()
+    unconsumed: set[str] = set()
+    for key in value:
+        path = str(key)
+        if key in _TOP_LEVEL_ENVELOPE_KEYS:
+            consumed.add(path)
+        else:
+            unconsumed.add(path)
+
+    type_value = value.get("type")
+    if type_value is not None and str(type_value).casefold() != "function":
+        consumed.discard("type")
+        unconsumed.add("type")
+
+    for wrapper_key in ("function", "function_call"):
+        wrapper = value.get(wrapper_key)
+        if not isinstance(wrapper, Mapping):
+            continue
+        for key in wrapper:
+            path = f"{wrapper_key}.{key}"
+            if key in _FUNCTION_ENVELOPE_KEYS:
+                consumed.add(path)
+            else:
+                unconsumed.add(path)
+
+    native_calls = value.get("tool_calls")
+    if isinstance(native_calls, list):
+        for index, call in enumerate(native_calls):
+            if not isinstance(call, Mapping):
+                continue
+            prefix = f"tool_calls[{index}]"
+            for key in call:
+                path = f"{prefix}.{key}"
+                if key in _NATIVE_CALL_ENVELOPE_KEYS:
+                    consumed.add(path)
+                else:
+                    unconsumed.add(path)
+            native_type = call.get("type")
+            if (
+                native_type is not None
+                and str(native_type).casefold() != "function"
+            ):
+                consumed.discard(f"{prefix}.type")
+                unconsumed.add(f"{prefix}.type")
+            native_function = call.get("function")
+            if isinstance(native_function, Mapping):
+                for key in native_function:
+                    path = f"{prefix}.function.{key}"
+                    if key in _FUNCTION_ENVELOPE_KEYS:
+                        consumed.add(path)
+                    else:
+                        unconsumed.add(path)
+    return tuple(sorted(consumed)), tuple(sorted(unconsumed))
 
 
-def normalize_tool_call_format(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Map a validated common representation to the sole internal format.
-
-    This function only changes representation.  It does not choose a tool,
-    add or rewrite arguments, judge evidence, trigger retries, or handle final
-    answer text.
-    """
-
-    parts = _call_parts(payload)
+def _normalize_parts(parts: Mapping[str, Any]) -> dict[str, Any]:
     name = str(parts.get("name") or "")
     if not name:
         raise ValueError("tool call name is empty")
@@ -220,6 +349,51 @@ def normalize_tool_call_format(payload: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def inspect_tool_call_format(payload: Mapping[str, Any]) -> ToolCallFormatInspection:
+    """Inspect one common call envelope and expose any would-be data loss."""
+
+    parts = _call_parts(payload)
+    consumed, unconsumed = _field_accounting(payload)
+    return ToolCallFormatInspection(
+        canonical=_normalize_parts(parts),
+        consumed_fields=consumed,
+        unconsumed_fields=unconsumed,
+    )
+
+
+def _validate_convertible_tool_call_format(payload: Mapping[str, Any]) -> None:
+    """Reject shapes that cannot be converted to one call without data loss.
+
+    This is protocol validation, not part of format conversion.  In
+    particular, it prevents the converter from silently choosing one of two
+    model-authored calls or two conflicting aliases.
+    """
+
+    inspection = inspect_tool_call_format(payload)
+    if inspection.unconsumed_fields:
+        raise ValueError(
+            "tool call contains unconsumed fields: "
+            + ", ".join(inspection.unconsumed_fields)
+        )
+
+
+def normalize_tool_call_format(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Map a validated common representation to the sole internal format.
+
+    This function only changes representation.  It does not choose a tool,
+    add or rewrite arguments, judge evidence, trigger retries, or handle final
+    answer text.
+    """
+
+    inspection = inspect_tool_call_format(payload)
+    if inspection.unconsumed_fields:
+        raise ValueError(
+            "tool call contains unconsumed fields: "
+            + ", ".join(inspection.unconsumed_fields)
+        )
+    return inspection.canonical
+
+
 def canonicalize_tool_call(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Protocol entry: validate lossless conversion, then normalize format."""
 
@@ -232,6 +406,8 @@ def canonicalize_tool_call(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "TOOL_CALL_CONTRACT",
+    "ToolCallFormatInspection",
     "canonicalize_tool_call",
+    "inspect_tool_call_format",
     "normalize_tool_call_format",
 ]
