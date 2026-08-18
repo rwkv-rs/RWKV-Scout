@@ -120,6 +120,13 @@
     "evidence_resolution_completion_token_cap": 4096,
     "evidence_resolution_view_max_tokens": 768,
     "evidence_resolution_protocol_retries": 1,
+    "evidence_resolution_order_ensemble_enabled": true,
+    "evidence_resolution_order_ensemble_max_views": 10,
+    "evidence_resolution_order_ensemble_parallelism": 10,
+    "evidence_resolution_hierarchy_enabled": true,
+    "evidence_resolution_hierarchy_group_size": 5,
+    "evidence_resolution_hierarchy_coverage": 2,
+    "evidence_resolution_hierarchy_finalists": 5,
     "final_answer_max_tokens": 5120,
     "overlap_ratio": 0.05
   },

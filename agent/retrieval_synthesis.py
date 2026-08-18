@@ -1351,14 +1351,28 @@ def _source_context_block(
         lines = [f"[S{ref_index}] {role_label}: {title}", f"URL: {url}"]
         compact_metadata = _compact_record_routing_metadata(item)
         if compact_metadata:
-            lines.append(
-                "Compact record identity (routing metadata, not extra facts): "
-                + json.dumps(
-                    compact_metadata,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+            # One compact identity line. The former nested alignment JSON is
+            # planner-lane routing data the Writer is instructed to ignore;
+            # rendering it drowned the literal spans for a fixed-state RNN.
+            identity_bits = []
+            if compact_metadata.get("record_key"):
+                identity_bits.append(f"key={compact_metadata['record_key']}")
+            if compact_metadata.get("source_object_id"):
+                identity_bits.append(f"object={compact_metadata['source_object_id']}")
+            # R56 ablation showed the subject-alignment pair materially helps
+            # the Writer keep object identities apart (game_live/procedure
+            # regressed without it); keep it as compact text, not nested JSON.
+            alignment = compact_metadata.get("rwkv_subject_alignment") or {}
+            requested_subject = str(alignment.get("requested_subject") or "")[:80]
+            observed_subject = str(alignment.get("observed_source_subject") or "")[:80]
+            if requested_subject:
+                identity_bits.append(f"requested_subject={requested_subject}")
+            if observed_subject:
+                identity_bits.append(f"observed_subject={observed_subject}")
+            if identity_bits:
+                lines.append(
+                    "Record identity (routing only): " + "; ".join(identity_bits)[:400]
                 )
-            )
         if unresolved_record_identity and atomic_span:
             # The global Writer contract already defines the atomic boundary.
             # Repeating it for every span consumes evidence budget without
@@ -1377,9 +1391,7 @@ def _source_context_block(
 
     evidence_record_id = str(item.get("evidence_record_id") or "").strip()
     if evidence_record_id:
-        lines.append(
-            f"Internal evidence_record_id: {evidence_record_id} (S{ref_index} is display/citation alias only)"
-        )
+        lines.append(f"Evidence id: {evidence_record_id}")
 
     for label, value in (
         ("Published", item.get("published") or item.get("published_at")),
@@ -1391,10 +1403,13 @@ def _source_context_block(
             lines.append(f"{label}: {value}")
     freshness = item.get("freshness")
     if isinstance(freshness, dict) and freshness:
-        lines.append(
-            "Freshness metadata: "
-            + json.dumps(freshness, ensure_ascii=False, separators=(",", ":"))
-        )
+        # Render freshness only when it carries information: an
+        # unknown-date/no-date row adds noise without a routing signal.
+        state = str(freshness.get("state") or "")
+        source_date = str(freshness.get("source_date") or "")
+        if source_date or (state and state != "unknown_date"):
+            bits = [b for b in (state, source_date) if b]
+            lines.append("Freshness (routing only): " + " ".join(bits))
     task_record_ids = [
         str(value)
         for value in item.get("task_record_ids") or []
@@ -1407,8 +1422,7 @@ def _source_context_block(
         record_date = str(chunk.get("record_date") or "").strip()
         if show_temporal_routing and (temporal_role or record_date):
             lines.append(
-                "Same-page temporal routing metadata "
-                "(literal ordering only; RWKV must judge identity, stability and currentness): "
+                "Temporal routing (literal order only): "
                 + json.dumps(
                     {
                         "record_date": record_date or None,
@@ -1422,15 +1436,13 @@ def _source_context_block(
         observed = _observed_record_markers(chunk.get("text"))
         if observed["dates"] or observed["versions"]:
             lines.append(
-                "Observed literal record markers in occurrence order "
-                "(routing metadata only; no truth/currentness judgment): "
+                "Observed markers (routing only): "
                 + json.dumps(observed, ensure_ascii=False, separators=(",", ":"))
             )
         selected_field_ids = _bounded_unique_text_values(chunk.get("field_ids"))
         if selected_field_ids:
             lines.append(
-                "RWKV candidate field bindings for this span "
-                "(routing metadata only; verify against the literal text): "
+                "Candidate fields (routing only): "
                 + json.dumps(selected_field_ids, ensure_ascii=False, separators=(",", ":"))
             )
         lines.append(f"<{chunk['chunk_id']}>\n{chunk['text']}")
@@ -1731,6 +1743,7 @@ def build_evidence_context(
         "selected_evidence": projected_sources,
         "citation_refs": refs,
         "calculation_results": calculations,
+        "factual_task_records": factual_task_records,
         "usable_evidence_count": len(projected_sources),
         "duplicate_source_count": duplicate_source_count,
         "chunk_count": sum(len(chunks) for chunks in packed),
@@ -1847,7 +1860,45 @@ def _writer_prompt(
         + resolution_section
         + f"EXACT EVIDENCE LANE:\n{evidence_text}\n\n"
         + availability_section
+        + _writer_obligation_tail(query, context)
         + "Write the final answer now."
+    )
+
+
+def _writer_obligation_tail(query: str, context: dict[str, Any]) -> str:
+    """One obligation line rendered LAST, nearest the continuation point.
+
+    RWKV is a fixed-state RNN: the most recently read text dominates its state
+    when writing begins, so the current obligation (which record and fields to
+    answer) is restated at the tail. This adds no new rule — it compresses the
+    already-stated task into one line at the position where it is most salient.
+    """
+
+    records = [
+        record
+        for record in context.get("factual_task_records") or []
+        if isinstance(record, dict)
+    ]
+    if not records:
+        return ""
+    parts = []
+    for record in records[:4]:
+        rid = str(record.get("record_id") or "").strip()
+        fields = [
+            str(field.get("name") or "").strip()
+            for field in record.get("fields") or []
+            if isinstance(field, dict) and str(field.get("name") or "").strip()
+        ]
+        if rid and fields:
+            parts.append(f"{rid}: {', '.join(fields[:6])}")
+        elif rid:
+            parts.append(rid)
+    if not parts:
+        return ""
+    return (
+        "CURRENT OBLIGATION (restated): answer exactly these requested fields — "
+        + "; ".join(parts)
+        + " — every concrete value verbatim from the spans above.\n\n"
     )
 
 

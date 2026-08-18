@@ -408,6 +408,11 @@ class Orchestrator:
                     task_plan,
                     evidence_records,
                     self.llm,
+                    previous_resolution=(
+                        self._evidence_resolution_cache
+                        if isinstance(self._evidence_resolution_cache, dict)
+                        else None
+                    ),
                 )
                 self._evidence_resolution_cache_signature = resolution_cache_signature
                 self._evidence_resolution_cache = resolution

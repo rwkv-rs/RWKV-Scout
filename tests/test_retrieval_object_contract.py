@@ -1151,11 +1151,15 @@ def test_object_identity_survives_round_merge_state_ledger_and_writer_context():
     assert len(context["selected_evidence"]) == 1
     assert context["selected_evidence"][0]["evidence_record_id"] == record["evidence_record_id"]
     assert "owner/project release v2.0" in context["text"]
-    assert "Compact record identity" in context["text"]
-    assert '"relation":"exact"' in context["text"]
+    assert "Record identity (routing only):" in context["text"]
+    # Alignment relations stay in the planner lane; the Writer packet keeps
+    # only the compact identity line.
+    assert "object=" in context["text"]
     assert '"retrieval_requests"' not in context["text"]
-    assert '"relation":"unresolved"' in context["text"]
-    assert '"relation":"exact"' in context["text"]
+    # Alignment relations are planner-lane data, no longer in the Writer packet.
+    # Alignment relations stay in the planner lane; the Writer packet keeps
+    # only the compact identity line.
+    assert "object=" in context["text"]
 
 
 def test_round_merge_preserves_later_candidates_and_all_object_alignments():

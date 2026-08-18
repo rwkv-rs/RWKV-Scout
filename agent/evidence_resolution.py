@@ -7,8 +7,10 @@ candidate span was hidden from its request.
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
@@ -33,6 +35,7 @@ from config import (
     model_sampling_parameters,
 )
 from utils.chunker import get_token_count
+from utils.concurrency import shutdown_pool, submit_with_context, task_wait_timeout
 from utils.model_budget import bounded_completion_budget
 from utils.model_events import visible_model_text
 from utils.rwkv_json_protocol import normalize_json_object_envelope
@@ -53,6 +56,79 @@ def _unique_strings(value: Any, *, limit: int = 16, char_limit: int = 300) -> li
             text for row in rows if (text := _text(row, char_limit))
         )
     )[: max(0, int(limit))]
+
+
+def build_balanced_order_views(
+    values: list[str], *, max_views: int = 10
+) -> list[list[str]]:
+    """Return paired cyclic views that reduce position and direction bias.
+
+    For five values and ten views, every value occupies every position twice
+    and every pair appears in both relative orders equally often. Larger sets
+    use evenly spaced rotations so the request count stays bounded.
+    """
+
+    items = list(dict.fromkeys(str(value) for value in values if str(value)))
+    if len(items) <= 1:
+        return [items]
+    limit = max(1, min(int(max_views or 1), 2 * len(items)))
+    rotation_count = min(len(items), max(1, (limit + 1) // 2))
+    offsets = list(
+        dict.fromkeys(
+            (index * len(items)) // rotation_count
+            for index in range(rotation_count)
+        )
+    )
+    views: list[list[str]] = []
+    for offset in offsets:
+        forward = [*items[offset:], *items[:offset]]
+        for candidate in (forward, list(reversed(forward))):
+            if candidate not in views:
+                views.append(candidate)
+            if len(views) >= limit:
+                return views
+    return views or [items]
+
+
+def build_overlapping_candidate_batches(
+    values: list[str], *, group_size: int = 5, coverage: int = 2
+) -> list[list[str]]:
+    """Cover every candidate in small, differently composed nomination batches."""
+
+    items = list(dict.fromkeys(str(value) for value in values if str(value)))
+    if not items:
+        return []
+    size = max(2, min(int(group_size or 5), len(items)))
+    passes = max(1, min(int(coverage or 2), 4))
+    batches: list[list[str]] = []
+    for pass_index in range(passes):
+        stride = 1 + pass_index * 2
+        while math.gcd(stride, len(items)) != 1:
+            stride += 1
+        if pass_index % 2:
+            stride *= -1
+        start = (pass_index * max(1, size // 2)) % len(items)
+        sequence = [
+            items[(start + position * stride) % len(items)]
+            for position in range(len(items))
+        ]
+        batches.extend(
+            sequence[index : index + size]
+            for index in range(0, len(sequence), size)
+        )
+    return batches
+
+
+def _bounded_confidence(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("confidence must be a number from 0 to 100")
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ValueError("confidence must be a finite number from 0 to 100")
+    confidence = int(round(numeric))
+    if confidence < 0 or confidence > 100:
+        raise ValueError("confidence must be a number from 0 to 100")
+    return confidence
 
 
 def _source_object(item: Mapping[str, Any], metadata: Mapping[str, Any]) -> dict[str, str]:
@@ -494,12 +570,18 @@ def _record_object_selection_schema(
                 "type": "array",
                 "items": {"type": "string", "enum": object_group_ids},
             },
+            "confidence": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+            },
         },
         "required": [
             "contract",
             "task_record_id",
             "selection",
             "object_group_ids",
+            "confidence",
         ],
         "additionalProperties": False,
     }
@@ -567,9 +649,29 @@ def _build_record_object_selection_prompt(
     evidence_records: list[dict[str, Any]],
     *,
     correction: str = "",
+    previous_selection: Mapping[str, Any] | None = None,
+    object_group_order: list[str] | None = None,
 ) -> tuple[str, str]:
     task_record_id = record_id(record)
     ordered_cards = _ordered_cards_for_record(task_record_id, evidence_records)
+    if object_group_order:
+        order_index = {
+            group_id: index for index, group_id in enumerate(object_group_order)
+        }
+        ordered_cards = [
+            card
+            for card in ordered_cards
+            if str(card.get("object_group_id") or "") in order_index
+        ]
+        ordered_cards = sorted(
+            ordered_cards,
+            key=lambda card: (
+                order_index.get(
+                    str(card.get("object_group_id") or ""), len(order_index)
+                ),
+                str(card.get("evidence_record_id") or ""),
+            ),
+        )
     object_groups = build_evidence_object_groups(ordered_cards)
     object_group_ids = [
         str(group.get("object_group_id") or "")
@@ -586,7 +688,7 @@ def _build_record_object_selection_prompt(
         "object. Use missing with an empty group list when no shown group establishes the "
         "requested object. Historical and current records are alternatives, not automatically "
         "a conflict. Object metadata locates records; exact spans are the factual material. "
-        "Use only IDs in the schema. Output no facts, reasoning, scores, query, prose or new IDs.\n\n"
+        "Use only IDs in the schema. The confidence is your 0-100 estimate that this selection correctly classifies the shown exact spans for the requested object; it is not source authority and is not a fact. Output no facts, reasoning, scores other than confidence, query, prose or new IDs.\n\n"
         "Return exactly one JSON object conforming to this Output Schema:\n"
         + json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
         + "\n\nUSER QUESTION:\n"
@@ -598,6 +700,25 @@ def _build_record_object_selection_prompt(
         + "\n\nEVIDENCE RECORDS:\n"
         + json.dumps(ordered_cards, ensure_ascii=False, separators=(",", ":"))
     )
+    if isinstance(previous_selection, Mapping) and str(
+        previous_selection.get("selection") or ""
+    ).strip() in {"selected", "conflict"}:
+        # Monotonicity observation only: RWKV sees its own earlier decision for
+        # this record and still makes the choice itself. This guards against
+        # silently regressing an already-selected correct object when new,
+        # weaker candidates arrive (observed as correct_evidence_discarded).
+        prior_compact = {
+            "selection": str(previous_selection.get("selection") or ""),
+            "object_group_ids": list(previous_selection.get("object_group_ids") or [])[:4],
+        }
+        user_prompt += (
+            "\n\nPREVIOUS RESOLUTION FOR THIS RECORD (your own earlier decision; "
+            "re-evaluate against the current groups, do not blindly repeat): "
+            + json.dumps(prior_compact, ensure_ascii=False, separators=(",", ":"))[:400]
+            + "\nIf you move away from a previously selected group, the replacement "
+            "group's exact spans must explicitly supersede it for the requested "
+            "object (a newer date or a more specific matching identity)."
+        )
     if correction:
         user_prompt += (
             "\n\nPROTOCOL CORRECTION: The previous continuation was invalid ("
@@ -626,6 +747,7 @@ def _parse_record_object_selection(
         "task_record_id",
         "selection",
         "object_group_ids",
+        "confidence",
     }:
         raise ValueError("object selection contains unexpected or missing keys")
     if _text(payload.get("task_record_id"), 80).casefold() != task_record_id.casefold():
@@ -643,6 +765,7 @@ def _parse_record_object_selection(
     return {
         "selection": selection,
         "object_group_ids": group_ids,
+        "confidence": _bounded_confidence(payload.get("confidence")),
         "input_format": envelope.input_format,
         "transport_normalized": envelope.normalized,
     }
@@ -869,6 +992,319 @@ def _call_resolution_stage(
         "raw_model_output": raw,
         "error": last_error[:1000],
         "completion_token_budget": requested_max,
+    }
+
+
+def _selection_semantic_key(selection: Mapping[str, Any]) -> str:
+    return json.dumps(
+        {
+            "selection": str(selection.get("selection") or ""),
+            "object_group_ids": sorted(
+                str(value) for value in selection.get("object_group_ids") or []
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _aggregate_object_selection_calls(
+    calls: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Choose the RWKV plurality and expose agreement separately from self-confidence."""
+
+    valid = [
+        (index, call, call.get("value"))
+        for index, call in enumerate(calls)
+        if call.get("status") == "ok" and isinstance(call.get("value"), Mapping)
+    ]
+    if not valid:
+        return None
+    buckets: dict[str, list[tuple[int, dict[str, Any], Mapping[str, Any]]]] = {}
+    for index, call, value in valid:
+        buckets.setdefault(_selection_semantic_key(value), []).append(
+            (index, call, value)
+        )
+    winner = max(
+        buckets.values(),
+        key=lambda rows: (
+            len(rows),
+            sum(int(row[2].get("confidence") or 0) for row in rows),
+            -rows[0][0],
+        ),
+    )
+    representative = dict(winner[0][2])
+    model_confidence = round(
+        sum(int(row[2].get("confidence") or 0) for row in winner) / len(winner)
+    )
+    agreement = len(winner) / len(valid)
+    completion_ratio = len(valid) / len(calls)
+    combined_confidence = round(model_confidence * agreement * completion_ratio)
+    representative["model_confidence"] = model_confidence
+    representative["confidence"] = combined_confidence
+    representative["consensus"] = {
+        "order_design": "paired_cyclic_rotations.v1",
+        "requested_view_count": len(calls),
+        "valid_view_count": len(valid),
+        "winning_view_count": len(winner),
+        "distinct_decision_count": len(buckets),
+        "agreement": round(agreement, 4),
+        "completion_ratio": round(completion_ratio, 4),
+        "model_confidence_mean": model_confidence,
+        "combined_confidence": combined_confidence,
+        "unanimous": len(winner) == len(valid),
+    }
+    return representative
+
+
+def _run_object_selection_ensemble(
+    query: str,
+    record: Mapping[str, Any],
+    evidence_records: list[dict[str, Any]],
+    llm: Any,
+    *,
+    allowed_object_group_ids: set[str],
+    retries: int,
+    sampling_temperature: float,
+    previous_selection: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    task_record_id = record_id(record)
+    ordered_cards = _ordered_cards_for_record(task_record_id, evidence_records)
+    base_group_ids = [
+        str(group.get("object_group_id") or "")
+        for group in build_evidence_object_groups(ordered_cards)
+        if str(group.get("object_group_id") or "")
+    ]
+    ensemble_enabled = bool(
+        DATA_PIPELINE.get("evidence_resolution_order_ensemble_enabled", True)
+    )
+    configured_views = int(
+        DATA_PIPELINE.get("evidence_resolution_order_ensemble_max_views", 10) or 10
+    )
+    configured_workers = int(
+        DATA_PIPELINE.get("evidence_resolution_order_ensemble_parallelism", 10)
+        or 10
+    )
+
+    def run_view(
+        view_index: int, group_order: list[str], ensemble_stage: str
+    ) -> dict[str, Any]:
+        visible_groups = set(group_order)
+        prior_groups = set(
+            str(value)
+            for value in (previous_selection or {}).get("object_group_ids") or []
+            if str(value)
+        )
+        visible_prior = (
+            previous_selection
+            if previous_selection and prior_groups.issubset(visible_groups)
+            else None
+        )
+        call = _call_resolution_stage(
+            llm,
+            lambda correction: _build_record_object_selection_prompt(
+                query,
+                record,
+                evidence_records,
+                correction=correction,
+                previous_selection=visible_prior,
+                object_group_order=group_order,
+            ),
+            lambda raw: _parse_record_object_selection(
+                raw,
+                task_record_id=task_record_id,
+                allowed_object_group_ids=visible_groups,
+            ),
+            requested_max=256,
+            retries=retries,
+            sampling_temperature=sampling_temperature,
+        )
+        call["order_view_index"] = view_index
+        call["object_group_order"] = group_order
+        call["ensemble_stage"] = ensemble_stage
+        return call
+
+    def run_views(
+        view_orders: list[list[str]], ensemble_stage: str
+    ) -> list[dict[str, Any]]:
+        view_orders = view_orders or [[]]
+        calls: list[dict[str, Any]] = [{} for _ in view_orders]
+        if len(view_orders) == 1:
+            calls[0] = run_view(0, view_orders[0], ensemble_stage)
+            return calls
+        worker_count = max(1, min(configured_workers, len(view_orders)))
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+        futures = {
+            submit_with_context(
+                executor, run_view, index, group_order, ensemble_stage
+            ): index
+            for index, group_order in enumerate(view_orders)
+        }
+        cancelled = False
+        try:
+            for future in concurrent.futures.as_completed(
+                futures, timeout=task_wait_timeout()
+            ):
+                index = futures[future]
+                try:
+                    calls[index] = future.result()
+                except Exception as exc:
+                    calls[index] = {
+                        "status": "unavailable",
+                        "value": None,
+                        "attempts": 0,
+                        "prompt": "",
+                        "raw_model_output": "",
+                        "error": f"{type(exc).__name__}: {exc}"[:1000],
+                        "completion_token_budget": 256,
+                        "order_view_index": index,
+                        "object_group_order": view_orders[index],
+                        "ensemble_stage": ensemble_stage,
+                    }
+        except concurrent.futures.TimeoutError:
+            cancelled = True
+            raise
+        finally:
+            shutdown_pool(executor, list(futures), cancelled=cancelled)
+        return calls
+
+    hierarchy_enabled = bool(
+        DATA_PIPELINE.get("evidence_resolution_hierarchy_enabled", True)
+    )
+    group_size = max(
+        2,
+        min(
+            int(DATA_PIPELINE.get("evidence_resolution_hierarchy_group_size", 5) or 5),
+            8,
+        ),
+    )
+    coverage = max(
+        1,
+        min(
+            int(DATA_PIPELINE.get("evidence_resolution_hierarchy_coverage", 2) or 2),
+            4,
+        ),
+    )
+    finalist_limit = max(
+        2,
+        min(
+            int(DATA_PIPELINE.get("evidence_resolution_hierarchy_finalists", 5) or 5),
+            8,
+        ),
+    )
+    finalist_group_ids = list(base_group_ids)
+    nomination_calls: list[dict[str, Any]] = []
+    hierarchy: dict[str, Any] = {
+        "enabled": False,
+        "input_group_count": len(base_group_ids),
+        "finalist_group_ids": list(base_group_ids),
+    }
+    if hierarchy_enabled and len(base_group_ids) > finalist_limit:
+        batches = build_overlapping_candidate_batches(
+            base_group_ids,
+            group_size=group_size,
+            coverage=coverage,
+        )
+        nomination_calls = run_views(batches, "object_nomination")
+        base_index = {group_id: index for index, group_id in enumerate(base_group_ids)}
+        stats = {
+            group_id: {
+                "appearances": 0,
+                "nominations": 0,
+                "confidence_total": 0,
+            }
+            for group_id in base_group_ids
+        }
+        for batch, call in zip(batches, nomination_calls):
+            for group_id in batch:
+                stats[group_id]["appearances"] += 1
+            value = call.get("value")
+            if call.get("status") != "ok" or not isinstance(value, Mapping):
+                continue
+            confidence = int(value.get("confidence") or 0)
+            for group_id in value.get("object_group_ids") or []:
+                if group_id in stats:
+                    stats[group_id]["nominations"] += 1
+                    stats[group_id]["confidence_total"] += confidence
+
+        nominated = [
+            group_id
+            for group_id in base_group_ids
+            if stats[group_id]["nominations"] > 0
+        ]
+        nominated.sort(
+            key=lambda group_id: (
+                -stats[group_id]["nominations"],
+                -(
+                    stats[group_id]["confidence_total"]
+                    / stats[group_id]["nominations"]
+                ),
+                base_index[group_id],
+            )
+        )
+        prior_group_ids = [
+            str(value)
+            for value in (previous_selection or {}).get("object_group_ids") or []
+            if str(value) in allowed_object_group_ids
+        ]
+        ranked = list(dict.fromkeys([*prior_group_ids, *nominated]))
+        fallback_full_set = not ranked
+        if ranked:
+            finalist_group_ids = ranked[:finalist_limit]
+        hierarchy = {
+            "enabled": True,
+            "method": "overlapping_id_nomination.v1",
+            "input_group_count": len(base_group_ids),
+            "group_size": group_size,
+            "coverage": coverage,
+            "batch_count": len(batches),
+            "valid_batch_count": sum(
+                call.get("status") == "ok" for call in nomination_calls
+            ),
+            "nominated_group_count": len(nominated),
+            "fallback_full_set": fallback_full_set,
+            "finalist_group_ids": list(finalist_group_ids),
+            "nomination_stats": {
+                group_id: {
+                    "appearances": stats[group_id]["appearances"],
+                    "nominations": stats[group_id]["nominations"],
+                    "model_confidence_mean": (
+                        round(
+                            stats[group_id]["confidence_total"]
+                            / stats[group_id]["nominations"]
+                        )
+                        if stats[group_id]["nominations"]
+                        else 0
+                    ),
+                }
+                for group_id in base_group_ids
+            },
+        }
+
+    views = (
+        build_balanced_order_views(
+            finalist_group_ids, max_views=configured_views
+        )
+        if ensemble_enabled
+        else [finalist_group_ids]
+    )
+    selection_calls = run_views(views, "object_selection")
+    selection = _aggregate_object_selection_calls(selection_calls)
+    if selection is not None:
+        selection["consensus"]["hierarchy"] = hierarchy
+
+    calls = [*nomination_calls, *selection_calls]
+    errors = [str(call.get("error") or "") for call in calls if call.get("error")]
+    return {
+        "status": "ok" if selection is not None else "unavailable",
+        "value": selection,
+        "calls": calls,
+        "attempts": sum(int(call.get("attempts") or 0) for call in calls),
+        "error": " | ".join(errors)[:2000],
+        "completion_token_budget": sum(
+            int(call.get("completion_token_budget") or 0) for call in calls
+        ),
     }
 
 
@@ -1179,6 +1615,8 @@ def resolve_evidence(
     task_plan: Mapping[str, Any] | None,
     evidence_records: list[dict[str, Any]],
     llm: Any,
+    *,
+    previous_resolution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve each Task Record with narrow object-then-field RWKV calls.
 
@@ -1224,35 +1662,72 @@ def resolve_evidence(
     total_attempts = 0
     partial = False
     accepted_stage_count = 0
+    previous_decisions: dict[str, Mapping[str, Any]] = {}
+    record_consensus: dict[str, dict[str, Any]] = {}
+    if isinstance(previous_resolution, Mapping):
+        for row in previous_resolution.get("decisions") or []:
+            if isinstance(row, Mapping) and str(row.get("task_record_id") or ""):
+                status = str(row.get("status") or "")
+                selected_group = str(row.get("selected_object_group_id") or "")
+                conflicting_groups = [
+                    str(value)
+                    for value in row.get("conflicting_object_group_ids") or []
+                    if str(value)
+                ]
+                previous_decisions[str(row["task_record_id"])] = {
+                    "selection": (
+                        "selected"
+                        if status == "resolved" and selected_group
+                        else "conflict"
+                        if status == "conflict" and conflicting_groups
+                        else "missing"
+                    ),
+                    "object_group_ids": (
+                        conflicting_groups
+                        if status == "conflict"
+                        else [selected_group]
+                        if selected_group
+                        else []
+                    ),
+                }
 
     for record in records:
         task_record_id = record_id(record)
-        object_budget = 256
-        object_call = _call_resolution_stage(
+        object_call = _run_object_selection_ensemble(
+            query,
+            record,
+            bounded_evidence_records,
             llm,
-            lambda correction, record=record: _build_record_object_selection_prompt(
-                query,
-                record,
-                bounded_evidence_records,
-                correction=correction,
-            ),
-            lambda raw, task_record_id=task_record_id: _parse_record_object_selection(
-                raw,
-                task_record_id=task_record_id,
-                allowed_object_group_ids=allowed_groups,
-            ),
-            requested_max=object_budget,
+            allowed_object_group_ids=allowed_groups,
             retries=retries,
             sampling_temperature=sampling_temperature,
+            previous_selection=previous_decisions.get(task_record_id),
         )
         total_attempts += int(object_call.get("attempts") or 0)
-        stage_calls.append(
-            {
-                "task_record_id": task_record_id,
-                "stage": "object_selection",
-                **{key: value for key, value in object_call.items() if key != "value"},
-            }
-        )
+        for view_call in object_call.get("calls") or []:
+            parsed = view_call.get("value") if isinstance(view_call.get("value"), Mapping) else {}
+            stage_calls.append(
+                {
+                    "task_record_id": task_record_id,
+                    "stage": str(
+                        view_call.get("ensemble_stage") or "object_selection"
+                    ),
+                    **{
+                        key: value
+                        for key, value in view_call.items()
+                        if key != "value"
+                    },
+                    "parsed_selection": (
+                        {
+                            "selection": parsed.get("selection"),
+                            "object_group_ids": parsed.get("object_group_ids") or [],
+                            "confidence": parsed.get("confidence"),
+                        }
+                        if parsed
+                        else {}
+                    ),
+                }
+            )
         if object_call["status"] != "ok":
             partial = True
             error = f"{task_record_id}/object_selection: {object_call.get('error') or 'unavailable'}"
@@ -1263,6 +1738,11 @@ def resolve_evidence(
             continue
 
         selection = dict(object_call["value"])
+        record_consensus[task_record_id] = {
+            "object_selection": dict(selection.get("consensus") or {}),
+            "model_confidence": int(selection.get("model_confidence") or 0),
+            "combined_confidence": int(selection.get("confidence") or 0),
+        }
         accepted_stage_count += 1
         selection_kind = str(selection.get("selection") or "")
         selected_group_ids = [
@@ -1459,6 +1939,7 @@ def resolve_evidence(
         },
         "object_groups": object_groups,
         "decisions": decisions,
+        "consensus": record_consensus,
         "attempts": total_attempts,
         "input_digest": input_digest,
         "raw_model_output": raw_log,
@@ -1485,6 +1966,11 @@ def render_evidence_resolution_view(
     lines = [
         "EVIDENCE RESOLUTION CONTROL MAP (attention only; E-* identifies evidence, S# is display only):"
     ]
+    consensus_by_record = (
+        resolution.get("consensus")
+        if isinstance(resolution.get("consensus"), Mapping)
+        else {}
+    )
     for raw in resolution.get("decisions") or []:
         if not isinstance(raw, Mapping):
             continue
@@ -1510,6 +1996,21 @@ def render_evidence_resolution_view(
             values.append("missing=" + ",".join(raw["missing_field_ids"]))
         if raw.get("conflict_field_ids"):
             values.append("conflict_fields=" + ",".join(raw["conflict_field_ids"]))
+        record_consensus = consensus_by_record.get(str(raw.get("task_record_id") or ""))
+        if isinstance(record_consensus, Mapping):
+            object_consensus = record_consensus.get("object_selection")
+            if isinstance(object_consensus, Mapping):
+                values.append(
+                    "order_consensus="
+                    + str(object_consensus.get("winning_view_count") or 0)
+                    + "/"
+                    + str(object_consensus.get("valid_view_count") or 0)
+                )
+                values.append(
+                    "object_confidence="
+                    + str(record_consensus.get("combined_confidence") or 0)
+                    + "/100"
+                )
         values.append(
             "needs_more_evidence="
             + ("true" if raw.get("needs_more_evidence") else "false")

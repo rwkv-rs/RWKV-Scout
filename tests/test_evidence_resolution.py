@@ -4,10 +4,13 @@ from types import SimpleNamespace
 import pytest
 
 from agent.evidence_resolution import (
+    _aggregate_object_selection_calls,
     attach_evidence_resolution_to_context,
+    build_balanced_order_views,
     build_evidence_object_groups,
     build_evidence_record_set,
     build_evidence_resolution_prompt,
+    build_overlapping_candidate_batches,
     evidence_resolution_completion_token_budget,
     parse_evidence_resolution_output,
     evidence_resolution_signature,
@@ -371,6 +374,244 @@ def test_resolution_completion_budget_scales_with_record_and_field_count():
     assert large_budget <= 4096
 
 
+def test_balanced_order_views_cover_positions_and_pair_directions_for_five_items():
+    values = ["A", "B", "C", "D", "E"]
+    views = build_balanced_order_views(values, max_views=10)
+
+    assert len(views) == 10
+    assert all(sorted(view) == values for view in views)
+    for value in values:
+        assert [view.index(value) for view in views].count(0) == 2
+        assert sorted(view.index(value) for view in views) == [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+    for left_index, left in enumerate(values):
+        for right in values[left_index + 1 :]:
+            assert sum(view.index(left) < view.index(right) for view in views) == 5
+
+
+def test_overlapping_batches_cover_twenty_candidates_twice_without_large_prompts():
+    values = [f"G{index:02d}" for index in range(20)]
+    batches = build_overlapping_candidate_batches(
+        values, group_size=5, coverage=2
+    )
+
+    assert len(batches) == 8
+    assert all(1 <= len(batch) <= 5 for batch in batches)
+    assert all(
+        sum(value in batch for batch in batches) == 2 for value in values
+    )
+    assert len({tuple(sorted(batch)) for batch in batches}) == len(batches)
+
+
+def test_consensus_confidence_penalizes_incomplete_order_views():
+    result = _aggregate_object_selection_calls(
+        [
+            {
+                "status": "ok",
+                "value": {
+                    "selection": "selected",
+                    "object_group_ids": ["G1"],
+                    "confidence": 90,
+                },
+            },
+            {"status": "unavailable", "value": None},
+        ]
+    )
+
+    assert result is not None
+    assert result["model_confidence"] == 90
+    assert result["confidence"] == 45
+    assert result["consensus"]["agreement"] == 1.0
+    assert result["consensus"]["completion_ratio"] == 0.5
+
+
+def test_object_selection_uses_balanced_views_and_reports_consensus(monkeypatch):
+    task_plan = normalize_task_plan(
+        {
+            "goal": "current version",
+            "records": [{"question": "current version", "fields": ["version"]}],
+        }
+    )
+    current = _selected_record(text="Version 4.4 is current.")
+    older = _selected_record(
+        ref_id="S2",
+        evidence_record_id="E-release-43",
+        text="Version 4.3 is historical.",
+    )
+    older["url"] = "https://example.test/releases/4.3"
+    older["record_metadata"]["record_key"] = "4.3"
+    older["record_metadata"]["source_object"]["source_record_id"] = "4.3"
+    evidence_records = build_evidence_record_set([current, older])
+    current_group = evidence_records[0]["object_group_id"]
+    older_group = evidence_records[1]["object_group_id"]
+    model = FakeRWKV(
+        [
+            json.dumps(
+                {
+                    "contract": "rwkv.ecra.runtime.evidence-resolution",
+                    "task_record_id": "P1",
+                    "selection": "selected",
+                    "object_group_ids": [current_group],
+                    "confidence": 90,
+                }
+            ),
+            json.dumps(
+                {
+                    "contract": "rwkv.ecra.runtime.evidence-resolution",
+                    "task_record_id": "P1",
+                    "selection": "selected",
+                    "object_group_ids": [current_group],
+                    "confidence": 70,
+                }
+            ),
+            json.dumps(
+                {
+                    "contract": "rwkv.ecra.runtime.evidence-resolution",
+                    "task_record_id": "P1",
+                    "fields": [
+                        {
+                            "field_id": "P1:F1",
+                            "state": "supported",
+                            "evidence_record_ids": ["E-release-44"],
+                        }
+                    ],
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "agent.evidence_resolution.get_llm_context_length", lambda: 32768
+    )
+
+    result = resolve_evidence(
+        task_plan["goal"], task_plan, evidence_records, model
+    )
+
+    assert result["status"] == "ok"
+    assert result["decisions"][0]["selected_object_group_id"] == current_group
+    consensus = result["consensus"]["P1"]
+    assert consensus["model_confidence"] == 80
+    assert consensus["combined_confidence"] == 80
+    assert consensus["object_selection"] == {
+        "order_design": "paired_cyclic_rotations.v1",
+        "requested_view_count": 2,
+        "valid_view_count": 2,
+        "winning_view_count": 2,
+        "distinct_decision_count": 1,
+        "agreement": 1.0,
+        "completion_ratio": 1.0,
+        "model_confidence_mean": 80,
+        "combined_confidence": 80,
+        "unanimous": True,
+        "hierarchy": {
+            "enabled": False,
+            "input_group_count": 2,
+            "finalist_group_ids": [current_group, older_group],
+        },
+    }
+    object_calls = [
+        call for call in result["stage_calls"] if call["stage"] == "object_selection"
+    ]
+    assert len(object_calls) == 2
+    assert {tuple(call["object_group_order"]) for call in object_calls} == {
+        (current_group, older_group),
+        (older_group, current_group),
+    }
+
+
+def test_hierarchy_uses_overlapping_nominations_before_final_selection(monkeypatch):
+    task_plan = normalize_task_plan(
+        {
+            "goal": "current version",
+            "records": [{"question": "current version", "fields": ["version"]}],
+        }
+    )
+    selected = []
+    for index in range(6):
+        row = _selected_record(
+            ref_id=f"S{index + 1}",
+            evidence_record_id=f"E-release-{index}",
+            text=(
+                f"Version {index} is current."
+                if index == 5
+                else f"Version {index} is historical."
+            ),
+        )
+        row["url"] = f"https://example.test/releases/{index}"
+        row["record_metadata"]["record_key"] = str(index)
+        row["record_metadata"]["source_object"]["source_record_id"] = str(index)
+        selected.append(row)
+    evidence_records = build_evidence_record_set(selected)
+    target_group = evidence_records[5]["object_group_id"]
+
+    class PromptAwareRWKV:
+        provider = "local_test"
+
+        def __init__(self):
+            self.calls = []
+
+        def text_completion(self, prompt, max_tokens=0, stop=None):
+            self.calls.append(
+                {"prompt": prompt, "max_tokens": max_tokens, "stop": stop}
+            )
+            if "SELECTED EVIDENCE RECORDS" in prompt:
+                payload = {
+                    "contract": "rwkv.ecra.runtime.evidence-resolution",
+                    "task_record_id": "P1",
+                    "fields": [
+                        {
+                            "field_id": "P1:F1",
+                            "state": "supported",
+                            "evidence_record_ids": ["E-release-5"],
+                        }
+                    ],
+                }
+            elif target_group in prompt:
+                payload = {
+                    "contract": "rwkv.ecra.runtime.evidence-resolution",
+                    "task_record_id": "P1",
+                    "selection": "selected",
+                    "object_group_ids": [target_group],
+                    "confidence": 95,
+                }
+            else:
+                payload = {
+                    "contract": "rwkv.ecra.runtime.evidence-resolution",
+                    "task_record_id": "P1",
+                    "selection": "missing",
+                    "object_group_ids": [],
+                    "confidence": 80,
+                }
+            return SimpleNamespace(content=json.dumps(payload))
+
+    model = PromptAwareRWKV()
+    monkeypatch.setattr(
+        "agent.evidence_resolution.get_llm_context_length", lambda: 32768
+    )
+
+    result = resolve_evidence(
+        task_plan["goal"], task_plan, evidence_records, model
+    )
+
+    assert result["status"] == "ok"
+    assert result["decisions"][0]["selected_object_group_id"] == target_group
+    hierarchy = result["consensus"]["P1"]["object_selection"]["hierarchy"]
+    assert hierarchy["enabled"] is True
+    assert hierarchy["input_group_count"] == 6
+    assert hierarchy["batch_count"] == 4
+    assert hierarchy["valid_batch_count"] == 4
+    assert hierarchy["nomination_stats"][target_group]["nominations"] == 2
+    assert hierarchy["finalist_group_ids"] == [target_group]
+    assert hierarchy["fallback_full_set"] is False
+    nomination_calls = [
+        call for call in result["stage_calls"] if call["stage"] == "object_nomination"
+    ]
+    assert len(nomination_calls) == 4
+    assert all(len(call["object_group_order"]) <= 5 for call in nomination_calls)
+    assert [
+        call["stage"] for call in result["stage_calls"]
+    ].count("object_selection") == 1
+
+
 def test_local_resolution_uses_record_scoped_object_then_field_calls(monkeypatch):
     evidence_records = build_evidence_record_set([_selected_record()])
     object_group_id = evidence_records[0]["object_group_id"]
@@ -382,6 +623,7 @@ def test_local_resolution_uses_record_scoped_object_then_field_calls(monkeypatch
                     "task_record_id": "P1",
                     "selection": "selected",
                     "object_group_ids": [object_group_id],
+                    "confidence": 90,
                 }
             ),
             json.dumps(
@@ -408,6 +650,7 @@ def test_local_resolution_uses_record_scoped_object_then_field_calls(monkeypatch
                     "task_record_id": "P2",
                     "selection": "missing",
                     "object_group_ids": [],
+                    "confidence": 80,
                 }
             ),
         ]
@@ -500,6 +743,7 @@ def test_partial_resolution_is_advisory_and_keeps_writer_evidence_immutable(monk
                     "task_record_id": "P1",
                     "selection": "selected",
                     "object_group_ids": [object_group_id],
+                    "confidence": 90,
                 }
             ),
             "invalid field binding",
@@ -510,6 +754,7 @@ def test_partial_resolution_is_advisory_and_keeps_writer_evidence_immutable(monk
                     "task_record_id": "P2",
                     "selection": "missing",
                     "object_group_ids": [],
+                    "confidence": 80,
                 }
             ),
         ]

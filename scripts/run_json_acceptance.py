@@ -944,7 +944,15 @@ def run(
             answer = ""
             error = f"TimeoutError: {exc}"
         except Exception as exc:
-            if classify_error(exc) not in {"network", "timeout", "provider", "auth", "quota"}:
+            # evidence_review_protocol: the R53 contract refuses to enter the
+            # Writer without a valid RWKV finish decision. That is a per-case
+            # outcome (this case ends with no authorized answer), never a
+            # batch-level crash — one case's protocol failure must not discard
+            # the other cases in the same part runner.
+            if classify_error(exc) not in {
+                "network", "timeout", "provider", "auth", "quota",
+                "evidence_review_protocol",
+            }:
                 raise
             answer = ""
             error = f"{type(exc).__name__}: {exc}"

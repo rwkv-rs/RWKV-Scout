@@ -563,7 +563,7 @@ def test_context_exposes_observed_record_order_without_selecting_truth():
 
     assert '"dates":["2026-07-01","2026-08-05"]' in context["text"]
     assert '"versions":["Version 4.1","Version 4.2"]' in context["text"]
-    assert "no truth/currentness judgment" in context["text"]
+    assert "Observed markers (routing only):" in context["text"]
 
 
 def test_context_backfills_unselected_original_chunks_when_budget_allows():
@@ -694,9 +694,9 @@ def test_evidence_records_on_same_url_keep_version_identity_separate():
         "E-current",
     ]
     assert context["text"].count("RWKV-CANDIDATE SOURCE RECORD") == 2
-    assert '"record_key":"Version 4.4"' in context["text"]
-    assert '"record_key":"Version 4.0"' in context["text"]
-    assert context["text"].count("RWKV candidate field bindings for this span") == 2
+    assert "key=Version 4.4" in context["text"]
+    assert "key=Version 4.0" in context["text"]
+    assert context["text"].count("Candidate fields (routing only):") == 2
     assert '["P1:F1","P1:F2"]' in context["text"]
     assert '["P1:F3"]' in context["text"]
     assert context["selected_evidence"][-1]["packed_chunks"][0]["field_ids"] == [
@@ -1344,13 +1344,20 @@ def test_writer_keeps_advisory_before_one_unchanged_exact_evidence_lane():
             "text": evidence,
             "evidence_text": evidence,
             "evidence_resolution_view": advisory,
+            "factual_task_records": [
+                {
+                    "record_id": "P1",
+                    "fields": [{"field_id": "P1:F1", "name": "version"}],
+                }
+            ],
         },
     )
 
     assert prompt.count(advisory) == 1
     assert prompt.count(evidence) == 1
     assert prompt.index(advisory) < prompt.index(evidence)
-    assert prompt.index(evidence) < prompt.index("Write the final answer now.")
+    assert prompt.index(evidence) < prompt.index("CURRENT OBLIGATION")
+    assert prompt.index("CURRENT OBLIGATION") < prompt.index("Write the final answer now.")
 
 
 def test_writer_recognizes_record_first_span_refs_as_literal_facts():
