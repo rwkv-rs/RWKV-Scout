@@ -16,7 +16,7 @@ import re
 import threading
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import urlparse
 from agent.page_evidence import build_page_chunks, extract_single_page_evidence, select_grounded_source_chunks
 from agent.retrieval_query_plan import (
@@ -189,6 +189,7 @@ def _admit_cached_and_novel_candidates(
     *,
     limit: int,
     per_domain_limit: int,
+    priority_hosts: Iterable[str] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Select cached and network candidates without letting either crowd the other."""
 
@@ -201,15 +202,53 @@ def _admit_cached_and_novel_candidates(
         limit=limit,
         per_domain_limit=per_domain_limit,
     )
+    novel_pool = [
+        dict(item)
+        for item in candidates
+        if retrieval_url_identity(str(item.get("url") or "")) not in seen_urls
+    ]
     novel = select_domain_diverse(
-        [
-            dict(item)
-            for item in candidates
-            if retrieval_url_identity(str(item.get("url") or "")) not in seen_urls
-        ],
+        novel_pool,
         limit=limit,
         per_domain_limit=per_domain_limit,
     )
+    # Fetch-budget boundary, mirror of the per-domain cap: when the pool holds
+    # candidates from a host the request itself marked authoritative (the task
+    # source policy's required domains or the model's own domain hypotheses),
+    # reserve up to two fetch slots for the best of them. Which hosts count is
+    # decided upstream (user policy / RWKV output), never here.
+    hosts = {
+        str(host or "").casefold().removeprefix("www.")
+        for host in priority_hosts
+        if str(host or "").strip()
+    }
+    if hosts and novel:
+        def _priority(row: dict[str, Any]) -> bool:
+            host = _host(str(row.get("url") or ""))
+            return bool(host) and any(
+                host == target or host.endswith("." + target) for target in hosts
+            )
+
+        selected_priority = sum(1 for row in novel if _priority(row))
+        reserve = min(2, max(0, len(novel) - 1))
+        if selected_priority < reserve:
+            replacements = [
+                row
+                for row in novel_pool
+                if _priority(row)
+                and retrieval_url_identity(str(row.get("url") or ""))
+                not in {
+                    retrieval_url_identity(str(item.get("url") or ""))
+                    for item in novel
+                }
+            ][: reserve - selected_priority]
+            for row in replacements:
+                # Drop the lowest-ranked non-priority candidate for each
+                # reserved authoritative page.
+                for index in range(len(novel) - 1, -1, -1):
+                    if not _priority(novel[index]):
+                        novel[index] = {**row, "priority_host_reserved": True}
+                        break
     return cached, novel
 
 
@@ -2189,6 +2228,10 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         seen_urls,
         limit=max_pages,
         per_domain_limit=per_domain_fetch_limit,
+        priority_hosts=[
+            *(source_policy.get("required_domains") or []),
+            *(model_domain_hypotheses or []),
+        ],
     )
     reused_records = []
     retrieval = getattr(agent_state, "retrieval", None)

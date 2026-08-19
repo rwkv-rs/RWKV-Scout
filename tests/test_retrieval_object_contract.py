@@ -369,6 +369,7 @@ def test_connector_catalog_has_one_unambiguous_operation_axis():
         "crates_release",
         "pypi_release",
         "npm_release",
+        "security_advisories",
     ]
 
 

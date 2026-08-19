@@ -81,6 +81,7 @@ class AgentProductToolTests(unittest.TestCase):
                 "crates_release",
                 "pypi_release",
                 "npm_release",
+                "security_advisories",
             ],
         )
         self.assertNotIn("scope", schema["properties"])

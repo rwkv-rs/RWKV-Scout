@@ -14,6 +14,7 @@ from urllib.parse import quote, unquote, urlparse
 
 from tools.github_rest import fetch_github_rest, search_github_rest
 from tools.paper_search import search_papers
+from tools.security_feeds import security_advisories_payload
 from tools.registry import ToolRegistry
 from tools.weather import get_current_weather
 from tools.weather_alerts import get_current_weather_alerts
@@ -37,6 +38,7 @@ _OPERATION_CONTRACT = {
     "crates_release": ("crates", "release"),
     "pypi_release": ("pypi", "release"),
     "npm_release": ("npm", "release"),
+    "security_advisories": ("security", "advisories"),
 }
 
 _ACCEPTED_OBJECT_TYPES = {
@@ -50,6 +52,7 @@ _ACCEPTED_OBJECT_TYPES = {
     "crates_release": ("crates_package",),
     "pypi_release": ("pypi_package",),
     "npm_release": ("npm_package",),
+    "security_advisories": ("security_advisory", "vendor_product", "cve_catalog"),
 }
 
 _CONNECTOR_COOLDOWN_SECONDS = {
@@ -375,14 +378,16 @@ def _package_release_payload(registry: str, query: str) -> dict[str, Any]:
     name="connector_lookup",
     phase="ALL",
     plugin="connectors.domain",
-    capabilities=("weather", "weather_alerts", "github", "paper", "package_registry", "structured_api"),
+    capabilities=("weather", "weather_alerts", "github", "paper", "package_registry", "security_advisories", "structured_api"),
     retrieval_role="discovery",
     model_visible=True,
     category="connector",
     description=(
         "Structured lookup for current weather/alerts, GitHub repositories/code/releases, "
-        "one exact crates.io/PyPI/npm package, or scholarly records. It does not read product "
-        "status pages, ordinary websites, game/service documentation, forums, or arbitrary URLs; "
+        "one exact crates.io/PyPI/npm package, scholarly records, or one vendor's official "
+        "security-advisory feed (CISA KEV, Mozilla/Firefox MFSA, Microsoft MSRC, Kubernetes "
+        "CVE feed, OpenSSL, GitHub advisories). It does not read product status pages, "
+        "ordinary websites, game/service documentation, forums, or arbitrary URLs; "
         "those object types are supported by web_search."
     ),
     accepted_object_types=_ACCEPTED_OBJECT_TYPES,
@@ -402,6 +407,7 @@ def _package_release_payload(registry: str, query: str) -> dict[str, Any]:
                     "crates_release",
                     "pypi_release",
                     "npm_release",
+                    "security_advisories",
                 ],
             },
             "query": {"type": "string"},
@@ -412,9 +418,9 @@ def _package_release_payload(registry: str, query: str) -> dict[str, Any]:
     },
     signature="""[Tool] connector_lookup
 - Function: use one curated structured connector rather than general web search.
-- Parameters: operation (weather_current|weather_alerts|github_repository|github_code|github_release|paper|paper_series|crates_release|pypi_release|npm_release), query, max_results (optional).
+- Parameters: operation (weather_current|weather_alerts|github_repository|github_code|github_release|paper|paper_series|crates_release|pypi_release|npm_release|security_advisories), query, max_results (optional).
 - The result is structured evidence with provider/source metadata; it is not a final answer.
-- Positive boundary: weather operations accept locations; github_release accepts one explicit owner/repository; package release operations accept one exact registry package identifier; paper operations accept scholarly identities or searches.
+- Positive boundary: weather operations accept locations; github_release accepts one explicit owner/repository; package release operations accept one exact registry package identifier; paper operations accept scholarly identities or searches; security_advisories accepts one supported vendor identity (CISA KEV / Mozilla MFSA / Microsoft MSRC / Kubernetes / OpenSSL / GitHub advisories) and returns that vendor's newest official advisory entries.
 - Negative boundary: this connector does not accept product status pages, ordinary sites, game/service documentation, forums, or arbitrary non-GitHub URLs. Those remain available through web_search.
 - A capability or runtime error reports the mismatch/unavailability to RWKV and never chooses a fallback tool or query.""",
 )
@@ -575,6 +581,11 @@ def connector_lookup(
         elif name in {"crates", "pypi", "npm"}:
             payload = _structured_rows(
                 _package_release_payload(name, text),
+                name,
+            )
+        elif name == "security":
+            payload = _structured_rows(
+                security_advisories_payload(text, max_results=max_results),
                 name,
             )
         else:

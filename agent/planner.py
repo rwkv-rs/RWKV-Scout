@@ -137,6 +137,7 @@ _ROUTE_FAMILY_CONNECTOR_OPERATIONS: dict[str, tuple[str, ...]] = {
     "target_github": ("github_repository", "github_code", "github_release"),
     "target_package_registry": ("crates_release", "pypi_release", "npm_release"),
     "target_scholarly": ("paper", "paper_series"),
+    "target_security_advisories": ("security_advisories",),
     "target_general_web": (),
 }
 
@@ -2385,7 +2386,8 @@ class Planner:
                     "Choose when the question names a GitHub repository (owner/repo, a project "
                     "hosted on github.com) or asks for a repository's latest release, tag, "
                     "release notes, or code. The structured GitHub connector reads the official "
-                    "release record directly."
+                    "release record directly. Not for npm/PyPI/crates package names — those "
+                    "belong to target_package_registry."
                 ),
                 "arguments": empty_arguments,
             },
@@ -2407,11 +2409,22 @@ class Planner:
                 "arguments": empty_arguments,
             },
             {
+                "name": "target_security_advisories",
+                "description": (
+                    "Choose when the question asks for a vendor's latest official security "
+                    "advisories, bulletins, or CVE catalog entries and the vendor is one of: "
+                    "CISA KEV, Mozilla/Firefox (MFSA), Microsoft (MSRC/Patch Tuesday), "
+                    "Kubernetes, OpenSSL, GitHub advisories. The structured connector reads "
+                    "the vendor's official advisory feed directly."
+                ),
+                "arguments": empty_arguments,
+            },
+            {
                 "name": "target_general_web",
                 "description": (
                     "Choose when none of the structured families above matches: an explicit URL, "
                     "documentation, a product or service status page, game or vendor announcements, "
-                    "security advisories, news."
+                    "security advisories of other vendors, news."
                 ),
                 "arguments": empty_arguments,
             },
@@ -2454,8 +2467,10 @@ class Planner:
             "- a paper, arXiv ID, DOI, author, or research topic -> target_scholarly\n"
             "- one exact crates.io/PyPI/npm package version -> target_package_registry\n"
             "- current weather or weather alerts -> target_weather\n"
+            "- latest security advisories/bulletins of CISA KEV, Mozilla/Firefox, Microsoft, "
+            "Kubernetes, OpenSSL, or GitHub -> target_security_advisories\n"
             "- anything else (explicit URLs, documentation, status pages, game or vendor "
-            "announcements, security advisories) -> target_general_web.\n"
+            "announcements, other vendors' advisories) -> target_general_web.\n"
             "web_search stays available in every family, so a structured family declaration "
             "never removes the general-web fallback."
         )
