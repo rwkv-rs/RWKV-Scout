@@ -15,6 +15,18 @@ from utils.evidence_quality import date_mentions, evidence_text, has_substantive
 
 
 def _record_key(item: Mapping[str, Any]) -> str:
+    # Feed/connector rows may legitimately share one catalog URL; their
+    # per-entry identity travels in source_record_id (also inside the
+    # source_object contract). Honor it before URL identity so distinct
+    # entries never collapse when the URL key strips query/fragment.
+    source_object = item.get("source_object")
+    record_identity = str(
+        item.get("source_record_id")
+        or (source_object.get("source_record_id") if isinstance(source_object, Mapping) else "")
+        or ""
+    ).strip().casefold()
+    if record_identity:
+        return f"record:{record_identity}"
     doi = str(item.get("doi") or "").strip().casefold()
     doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", doi).rstrip("/")
     if doi.startswith("10."):

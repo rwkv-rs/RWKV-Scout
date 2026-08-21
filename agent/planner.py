@@ -2413,9 +2413,12 @@ class Planner:
                 "description": (
                     "Choose when the question asks for a vendor's latest official security "
                     "advisories, bulletins, or CVE catalog entries and the vendor is one of: "
-                    "CISA KEV, Mozilla/Firefox (MFSA), Microsoft (MSRC/Patch Tuesday), "
-                    "Kubernetes, OpenSSL, GitHub advisories. The structured connector reads "
-                    "the vendor's official advisory feed directly."
+                    "CISA KEV (known exploited vulnerabilities 已知被利用漏洞目录), "
+                    "Mozilla/Firefox (MFSA), Microsoft/微软 (MSRC/Patch Tuesday 安全更新), "
+                    "Kubernetes, OpenSSL, GitHub package advisories (GHSA). The structured "
+                    "connector reads the vendor's official advisory feed directly. Not for "
+                    "Cisco, Android, Chrome, GitLab, or GitHub Enterprise Server advisories "
+                    "— those belong to target_general_web."
                 ),
                 "arguments": empty_arguments,
             },

@@ -2231,6 +2231,12 @@ def web_search(query: str, max_results: int = 8, **kwargs: Any) -> str:
         priority_hosts=[
             *(source_policy.get("required_domains") or []),
             *(model_domain_hypotheses or []),
+            # Hosts the request itself names via explicit URLs are an
+            # upstream (user/model) decision, not a code judgment.
+            *re.findall(
+                r"https?://([A-Za-z0-9.-]+)",
+                f"{original_goal or ''} {query or ''} {constraint_query or ''}",
+            ),
         ],
     )
     reused_records = []
