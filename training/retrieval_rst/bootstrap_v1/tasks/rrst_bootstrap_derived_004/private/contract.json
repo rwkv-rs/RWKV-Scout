@@ -1,0 +1,42 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "calendar_anniversary_date",
+      "expected": "2036-12-03",
+      "evidence_refs": [
+        "S1"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S1",
+          "text": "public service launched on 2033-12-03"
+        }
+      ],
+      "required": true,
+      "may_be_public": false,
+      "derivation": {
+        "operation": "date_add_years",
+        "evidence_ref": "S1",
+        "source_value": "2033-12-03",
+        "years": 3
+      }
+    }
+  ],
+  "forbidden_values": [
+    "an official anniversary event begins on 2036-12-03"
+  ],
+  "behavior": {
+    "max_tool_calls": 2,
+    "allowed_urls": [
+      "https://records.lighthouse-board.invalid/launch"
+    ]
+  },
+  "reward_dimensions": [
+    "date_derivation",
+    "epistemic_label",
+    "citation_grounding"
+  ]
+}

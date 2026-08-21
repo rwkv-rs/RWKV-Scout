@@ -26,7 +26,7 @@ def evidence_tokens(configured: int) -> int:
     # actual model window instead of silently throwing away relevant chunks.
     # Reserve roughly 5K output tokens plus system/instruction margin for the
     # final writer.  Evidence is packed claim-first inside the remaining room.
-    return max(2048, min(8000, limit - 6000))
+    return max(2048, min(6000, limit - 7000))
 
 
 def planner_prompt_tokens(configured: int) -> int:

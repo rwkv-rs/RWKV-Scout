@@ -1,0 +1,295 @@
+{
+  "schema_version": "rwkv-retrieval-rst-pool.v1",
+  "root": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks",
+  "evaluation_prompt_count": 240,
+  "task_count": 5,
+  "accepted_count": 5,
+  "rejected_count": 0,
+  "tasks": [
+    {
+      "schema_version": "rwkv-retrieval-rst-validation.v1",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks/rrst_r1_lumen_temporal_001",
+      "task_id": "rrst_r1_lumen_temporal_001",
+      "accepted": true,
+      "issues": [],
+      "metrics": {
+        "source_count": 5,
+        "claim_count": 4,
+        "oracle_event_count": 7,
+        "oracle_tool_call_count": 2,
+        "oracle_evidence_assessment_count": 1,
+        "instruction_tokens": 39,
+        "answer_tokens": 55,
+        "contamination": {
+          "exact_window_size": 13,
+          "exact_matches": [],
+          "max_5gram_jaccard": 0.0,
+          "nearest": [
+            {
+              "id": "INT_001",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_002",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_003",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_004",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_005",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "bundle_sha256": "01a4b8a3ff72b58e54c3a594a9dcb6838f4b80eb1efa3a7b3e15e38561571685",
+        "task_sha256": "8564c981443f40db7eac825b1c754323a7829ab275ce00ed5c3533031b7554a6",
+        "instruction_sha256": "9bc0e13e1e7f047566651467381e4b6063cd20fbd020bf0870542ea6bdfb9e0a",
+        "sources_sha256": "a889e9c2ddf465d18d14bfdc700bd481b3e89e3ded21e62f01265606cb4b6fc8",
+        "contract_sha256": "1493e611d8de9b335b627bf2b6ab4571283bd5621700780d7a1d554f5cb052ca",
+        "oracle_sha256": "e3759ae3703e73e79c72ae00ff124779f516aa2b045631334176ed3772b62cf1",
+        "reference_answer_sha256": "6dbaebe42e32c8a7c178fa1b9efa3666b2959a57a409378f975e11ff0ec426c4"
+      }
+    },
+    {
+      "schema_version": "rwkv-retrieval-rst-validation.v1",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks/rrst_seed_derived_anniversary_001",
+      "task_id": "rrst_seed_derived_anniversary_001",
+      "accepted": true,
+      "issues": [],
+      "metrics": {
+        "source_count": 1,
+        "claim_count": 1,
+        "oracle_event_count": 7,
+        "oracle_tool_call_count": 2,
+        "oracle_evidence_assessment_count": 1,
+        "instruction_tokens": 31,
+        "answer_tokens": 35,
+        "contamination": {
+          "exact_window_size": 13,
+          "exact_matches": [],
+          "max_5gram_jaccard": 0.0,
+          "nearest": [
+            {
+              "id": "INT_001",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_002",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_003",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_004",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_005",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "bundle_sha256": "94e1791b61de182836f8df43c9bc96e5f425ffb69fac1a6948d13170f5c5d48f",
+        "task_sha256": "1a3e9155ea667b3ebc83d71f1a9c40717a8ce1b8a786e96c6f53743f25435b7a",
+        "instruction_sha256": "4c30211169ebb3771505a42ca2c8ca379de531400856611b9db68137faf54089",
+        "sources_sha256": "46d2ea9b07b9715df61295dc1af14c82212489a18635664c3ff7335f73fbb7f4",
+        "contract_sha256": "b1c0b0d53beec5d9834961299736764fea2763232a28534a64dc8a9dbda786a8",
+        "oracle_sha256": "a111ba03ea1a4bf5fd0cd8eb11ae7aa3dbca39eab92eee7ceaf0cc4458998c24",
+        "reference_answer_sha256": "a6b60ffcd28c3f32acbcb85dc8c9adf1a4f48e4dbe92a434b8ca50c592017446"
+      }
+    },
+    {
+      "schema_version": "rwkv-retrieval-rst-validation.v1",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks/rrst_seed_direct_page_policy_001",
+      "task_id": "rrst_seed_direct_page_policy_001",
+      "accepted": true,
+      "issues": [],
+      "metrics": {
+        "source_count": 1,
+        "claim_count": 2,
+        "oracle_event_count": 5,
+        "oracle_tool_call_count": 1,
+        "oracle_evidence_assessment_count": 1,
+        "instruction_tokens": 31,
+        "answer_tokens": 36,
+        "contamination": {
+          "exact_window_size": 13,
+          "exact_matches": [],
+          "max_5gram_jaccard": 0.0,
+          "nearest": [
+            {
+              "id": "INT_001",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_002",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_003",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_004",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_005",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "bundle_sha256": "8f1830eebbd00f37d3ae36840aead16f9a6b6780c455013525d60beee9313859",
+        "task_sha256": "b3d76e4a803b1d38c63dadd46f7fe1efdb1dc23d6b711f205793ab6b2b9c0ec3",
+        "instruction_sha256": "6b246af0ee045b96a5cc2e2970c579047abd79286076168a16fe538245fd606c",
+        "sources_sha256": "b70f7e8eb9770519706e116f6f2856787ef28ab42381c03be4d582dbcf8f6dd0",
+        "contract_sha256": "07cc45d18db1a70bf9857cd0ec5ee2701669d337e65c1a578a57e1fb0a42bb50",
+        "oracle_sha256": "435c5061bb7d126e162c3e8f5dcc356e23573711d223bc6a5bbf2e6751a69fcc",
+        "reference_answer_sha256": "cde012811a4181e50a03c39e5b16783ddda95eee2bdf39c27634b170d5316bf2"
+      }
+    },
+    {
+      "schema_version": "rwkv-retrieval-rst-validation.v1",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks/rrst_seed_lumen_current_001",
+      "task_id": "rrst_seed_lumen_current_001",
+      "accepted": true,
+      "issues": [],
+      "metrics": {
+        "source_count": 2,
+        "claim_count": 3,
+        "oracle_event_count": 5,
+        "oracle_tool_call_count": 1,
+        "oracle_evidence_assessment_count": 1,
+        "instruction_tokens": 33,
+        "answer_tokens": 35,
+        "contamination": {
+          "exact_window_size": 13,
+          "exact_matches": [],
+          "max_5gram_jaccard": 0.0,
+          "nearest": [
+            {
+              "id": "INT_001",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_002",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_003",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_004",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_005",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "bundle_sha256": "bc80dd283dad38b737ba63281f31d592270443e360a39ea7396572f99bd1961b",
+        "task_sha256": "695993768ac33c4c5f16bdfb1fb976d0b64ca54758b9f32b017d29372295c825",
+        "instruction_sha256": "6b64e171b73366ea3abfe01a3f9abef1062d53eb6eb53af9b56d5a9968855406",
+        "sources_sha256": "ee01926ae8360536da1afeeda46a1ff2822e308c6ca0ac6614bfef03432e2107",
+        "contract_sha256": "a1b8165c96ae403748972416224d26958bf65f1b2d20fbddf0869a0dc3774336",
+        "oracle_sha256": "d8a73fe231ca1760f83cfe6e958fac511a22eed2063a28cb192c5ed9952e7756",
+        "reference_answer_sha256": "2a3fe5a110065323e1c07aceeb4beaeb06bfc4dd09a0649835151f461109774e"
+      }
+    },
+    {
+      "schema_version": "rwkv-retrieval-rst-validation.v1",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks/rrst_seed_portable_bundle_menu_001",
+      "task_id": "rrst_seed_portable_bundle_menu_001",
+      "accepted": true,
+      "issues": [],
+      "metrics": {
+        "source_count": 2,
+        "claim_count": 3,
+        "oracle_event_count": 5,
+        "oracle_tool_call_count": 1,
+        "oracle_evidence_assessment_count": 1,
+        "instruction_tokens": 35,
+        "answer_tokens": 81,
+        "contamination": {
+          "exact_window_size": 13,
+          "exact_matches": [],
+          "max_5gram_jaccard": 0.0,
+          "nearest": [
+            {
+              "id": "INT_001",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_002",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_003",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_004",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            },
+            {
+              "id": "INT_005",
+              "path": "/home/chase/GitHub/RWKV-ECRA/data/evaluation/interference_40_query_only_20260808.json",
+              "jaccard_5gram": 0.0
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "bundle_sha256": "ec0479b9c987e27b393ec1023b8b2a820eed3d6536f3a5fab334a481f3f1649b",
+        "task_sha256": "59468da3fb4867d91278c0bca574669d4d3949c37b1a4ecd1a5c0c7e045e2884",
+        "instruction_sha256": "fc79e0aebf7088896577c9e0aeb82f42462751e68462b9f24e226c47399b195e",
+        "sources_sha256": "c4ee1f262bb1b9fbef6628ca006b425910a73a2ec827e42a4f09e55be596efe9",
+        "contract_sha256": "4dc34cf8ff4a7ba2e8cf3a9e9ab47a7607eeddb13a862a052d4ecf2715e69895",
+        "oracle_sha256": "d9384833f014287d31a6e90fd4bb12e92ec914e2ae7131c7ed91e61a907ed82e",
+        "reference_answer_sha256": "fe1da803018fed28c3126dcf13be19689a89abfa0b702345cf12ab2404fef1a3"
+      }
+    }
+  ]
+}

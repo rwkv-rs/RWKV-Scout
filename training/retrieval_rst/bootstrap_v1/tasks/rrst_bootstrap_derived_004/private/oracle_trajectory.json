@@ -1,0 +1,107 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "records": [
+          {
+            "record_id": "P1",
+            "question": "Source the launch date and derive the requested calendar anniversary.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "direct_page",
+      "args": {
+        "url": "https://records.lighthouse-board.invalid/launch"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "direct_page",
+      "content": {
+        "source_id": "S1",
+        "url": "https://records.lighthouse-board.invalid/launch",
+        "title": "Lighthouse Board launch record",
+        "authority": "official",
+        "published_at": "2033-12-03",
+        "retrieved_at": "2045-01-15T12:00:00Z",
+        "content": "Lighthouse Board public service launched on 2033-12-03. No anniversary campaign is documented here."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "date_diff",
+      "args": {
+        "operation": "add_years",
+        "date": "2033-12-03",
+        "years": 3
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "date_diff",
+      "content": {
+        "result": "2036-12-03"
+      }
+    },
+    {
+      "type": "oracle_evidence_assessment",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ],
+            "supported_facts": [
+              {
+                "field": "calendar_anniversary_date",
+                "value": "2036-12-03",
+                "evidence_ref": "S1",
+                "quote": "public service launched on 2033-12-03"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "Lighthouse Board launched on **2033-12-03** [S1]. Adding **3 calendar years** gives **2036-12-03**, its third calendar anniversary. This is a deterministic derivation; the source does not announce an anniversary event."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "final",
+      "failure_class": "derived_fact_presented_as_sourced_event",
+      "prompt": {
+        "source_date": "2033-12-03",
+        "operation": "add 3 years"
+      },
+      "rejected": {
+        "content": "The official source announces an anniversary event on 2036-12-03."
+      },
+      "chosen": {
+        "content": "Lighthouse Board launched on **2033-12-03** [S1]. Adding **3 calendar years** gives **2036-12-03**, its third calendar anniversary. This is a deterministic derivation; the source does not announce an anniversary event."
+      }
+    }
+  ]
+}

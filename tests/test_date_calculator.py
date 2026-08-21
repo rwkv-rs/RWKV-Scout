@@ -134,13 +134,13 @@ class DateCalculatorTests(unittest.TestCase):
             ]
         )
         orchestrator.planner.observe_tool_result = Mock()
-        orchestrator._cross_validate_research = Mock(return_value={"decision": "finish"})
+        orchestrator._review_evidence = Mock(return_value={"decision": "finish"})
         orchestrator._complete_model_tool_loop = Mock(return_value="done")
         with patch("agent.unified_research.append_task_event") as append_event:
             result = orchestrator._run_single_loop(
                 "How many days?",
                 {},
-                {"atomic_points": []},
+                {"records": []},
                 max_steps=2,
             )
 

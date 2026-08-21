@@ -1,0 +1,205 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "records": [
+          {
+            "record_id": "P1",
+            "question": "Separate first reveal from launch.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          },
+          {
+            "record_id": "P2",
+            "question": "Find the dated first-anniversary event.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          },
+          {
+            "record_id": "P3",
+            "question": "Bind current version and theme.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "Velvet Engine official reveal launch first anniversary"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S1",
+            "url": "https://news.velvet-engine.invalid/reveal",
+            "title": "Velvet Engine reveal",
+            "authority": "official",
+            "published_at": "2036-07-04",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Velvet Engine was first publicly revealed on 2036-07-04; this was not the live launch."
+          },
+          {
+            "source_id": "S2",
+            "url": "https://news.velvet-engine.invalid/launch",
+            "title": "Velvet Engine launch",
+            "authority": "official",
+            "published_at": "2037-11-16",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Velvet Engine entered public live service on 2037-11-16."
+          },
+          {
+            "source_id": "S3",
+            "url": "https://events.velvet-engine.invalid/anniversary-one",
+            "title": "Velvet Engine first anniversary",
+            "authority": "official",
+            "published_at": "2038-11-16",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "The first anniversary event for Velvet Engine begins on 2038-11-16."
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "site:updates.velvet-engine.invalid current live release"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S4",
+            "url": "https://updates.velvet-engine.invalid/current",
+            "title": "Velvet Engine current release",
+            "authority": "official",
+            "published_at": "2042-05-30",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "The current live release is Velvet Engine version 3.9, launched on 2042-05-30, with theme After the Brass Rain."
+          }
+        ]
+      }
+    },
+    {
+      "type": "oracle_evidence_assessment",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1",
+              "S2"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_reveal_date",
+                "value": "2036-07-04",
+                "evidence_ref": "S1",
+                "quote": "first publicly revealed on 2036-07-04"
+              },
+              {
+                "field": "launch_date",
+                "value": "2037-11-16",
+                "evidence_ref": "S2",
+                "quote": "entered public live service on 2037-11-16"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P2": {
+            "status": "supported",
+            "evidence_refs": [
+              "S3"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_anniversary_event_date",
+                "value": "2038-11-16",
+                "evidence_ref": "S3",
+                "quote": "first anniversary event for Velvet Engine begins on 2038-11-16"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P3": {
+            "status": "supported",
+            "evidence_refs": [
+              "S4"
+            ],
+            "supported_facts": [
+              {
+                "field": "current_version",
+                "value": "3.9",
+                "evidence_ref": "S4",
+                "quote": "current live release is Velvet Engine version 3.9"
+              },
+              {
+                "field": "current_theme",
+                "value": "After the Brass Rain",
+                "evidence_ref": "S4",
+                "quote": "with theme After the Brass Rain"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "- First public reveal: **2036-07-04** [S1].\n- Public live launch: **2037-11-16** [S2].\n- First anniversary event: **2038-11-16** [S3].\n- Current live release: **version 3.9**, themed **After the Brass Rain** [S4]."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "final",
+      "failure_class": "temporal_role_conflation",
+      "prompt": {
+        "required_fields": [
+          "first_reveal_date",
+          "launch_date",
+          "first_anniversary_event_date",
+          "current_version",
+          "current_theme"
+        ]
+      },
+      "rejected": {
+        "content": "Velvet Engine was revealed, launched, and first celebrated on 2037-11-16."
+      },
+      "chosen": {
+        "content": "- First public reveal: **2036-07-04** [S1].\n- Public live launch: **2037-11-16** [S2].\n- First anniversary event: **2038-11-16** [S3].\n- Current live release: **version 3.9**, themed **After the Brass Rain** [S4]."
+      }
+    }
+  ]
+}

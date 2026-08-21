@@ -1,0 +1,68 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "launcher_directory",
+      "expected": "~/.local/share/applications",
+      "evidence_refs": [
+        "S1"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S1",
+          "text": "per-user launchers in ~/.local/share/applications"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C2",
+      "point_id": "P1",
+      "field": "required_fields",
+      "expected": "Type, Name, and Exec",
+      "evidence_refs": [
+        "S1"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S1",
+          "text": "containing Type, Name, and Exec"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C3",
+      "point_id": "P2",
+      "field": "bundle_procedure",
+      "expected": "make the .LaunchPack file executable, keep it at a stable absolute path, and create ~/.local/share/applications/launchpack-example.desktop",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "make the .LaunchPack file executable, keep it at a stable absolute path, and create ~/.local/share/applications/launchpack-example.desktop"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    }
+  ],
+  "forbidden_values": [
+    "official LaunchPack guide",
+    "tested on Birch 7.2"
+  ],
+  "behavior": {
+    "max_tool_calls": 2
+  },
+  "reward_dimensions": [
+    "procedure_correctness",
+    "source_role_accuracy",
+    "no_fabricated_testing"
+  ]
+}

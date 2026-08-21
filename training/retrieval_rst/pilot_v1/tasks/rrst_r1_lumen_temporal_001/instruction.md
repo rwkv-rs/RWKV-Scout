@@ -1,0 +1,1 @@
+For Project Lumen, report the first public reveal date, the first anniversary event date, and the current live version theme at the snapshot time. Keep historical events separate from current-version information, resolve stale conflicts, and cite each field.

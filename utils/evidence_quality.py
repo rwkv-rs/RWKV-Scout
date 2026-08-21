@@ -177,15 +177,30 @@ def clean_page_body(value: Any) -> dict[str, Any]:
     """
 
     raw = str(value or "").replace("\x00", "").replace("\r\n", "\n")
-    raw_lines = [re.sub(r"\s+", " ", line).strip() for line in raw.splitlines()]
-    raw_lines = [line for line in raw_lines if line]
+    raw_lines = raw.splitlines()
     output: list[str] = []
     seen: set[str] = set()
     removed_navigation = 0
     removed_images = 0
     removed_link_only = 0
 
-    for line in raw_lines:
+    in_code_fence = False
+    for raw_line in raw_lines:
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            in_code_fence = not in_code_fence
+            output.append(stripped)
+            continue
+        if in_code_fence:
+            # Exact whitespace, punctuation and line breaks are factual for
+            # commands, source code, YAML and configuration examples.
+            line = raw_line.rstrip()
+            if line or (output and output[-1] != ""):
+                output.append(line)
+            continue
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
         line = _IMAGE_PLACEHOLDER_RE.sub("", line)
         line = _MARKDOWN_IMAGE_RE.sub("", line)
         if not line.strip():

@@ -5,11 +5,28 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping, Sequence
 
+from agent.runtime_contracts import MODEL_EXTRACTION_DIAGNOSTICS_CONTRACT
+from agent.retrieval_object_contract import (
+    merge_candidate_observations,
+    merge_mapping_rows,
+)
 from utils.experiment_strategies import normalize_strategy
 from utils.evidence_quality import date_mentions, evidence_text, has_substantive_evidence, substantive_evidence_items
 
 
 def _record_key(item: Mapping[str, Any]) -> str:
+    # Feed/connector rows may legitimately share one catalog URL; their
+    # per-entry identity travels in source_record_id (also inside the
+    # source_object contract). Honor it before URL identity so distinct
+    # entries never collapse when the URL key strips query/fragment.
+    source_object = item.get("source_object")
+    record_identity = str(
+        item.get("source_record_id")
+        or (source_object.get("source_record_id") if isinstance(source_object, Mapping) else "")
+        or ""
+    ).strip().casefold()
+    if record_identity:
+        return f"record:{record_identity}"
     doi = str(item.get("doi") or "").strip().casefold()
     doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", doi).rstrip("/")
     if doi.startswith("10."):
@@ -135,13 +152,132 @@ def merge_retrieval_results(
                 value = dict(item)
                 value["candidate_queries"] = [candidate_query]
                 value["candidate_ranks"] = [rank]
+                value["object_alignments"] = merge_mapping_rows(
+                    item.get("object_alignments"),
+                    item.get("object_alignment"),
+                )
+                value["retrieval_requests"] = merge_mapping_rows(
+                    item.get("retrieval_requests"),
+                    item.get("retrieval_request"),
+                )
+                value["retrieval_bindings"] = merge_mapping_rows(
+                    item.get("retrieval_bindings")
+                )
                 merged[key] = value
             else:
                 current = merged[key]
                 current["candidate_queries"] = list(dict.fromkeys([*current.get("candidate_queries", []), candidate_query]))
                 current["candidate_ranks"] = [*current.get("candidate_ranks", []), rank]
-                for field in ("page_excerpt", "abstract", "snippet"):
+                current["task_record_ids"] = list(
+                    dict.fromkeys(
+                        [
+                            *[
+                                str(value)
+                                for value in current.get("task_record_ids") or []
+                                if str(value).strip()
+                            ],
+                            *[
+                                str(value)
+                                for value in item.get("task_record_ids") or []
+                                if str(value).strip()
+                            ],
+                        ]
+                    )
+                )
+                for field in (
+                    "source_excerpt",
+                    "page_excerpt",
+                    "structured_evidence_text",
+                    "content",
+                    "abstract",
+                    "snippet",
+                    "model_locator_facts",
+                ):
                     if len(str(item.get(field) or "")) > len(str(current.get(field) or "")):
+                        current[field] = item.get(field)
+                current_chunks = current.get("source_chunks") or []
+                item_chunks = item.get("source_chunks") or []
+                current_chunk_chars = sum(
+                    len(str(row.get("text") or ""))
+                    for row in current_chunks
+                    if isinstance(row, Mapping)
+                )
+                item_chunk_chars = sum(
+                    len(str(row.get("text") or ""))
+                    for row in item_chunks
+                    if isinstance(row, Mapping)
+                )
+                if item_chunk_chars > current_chunk_chars:
+                    current["source_chunks"] = list(item_chunks)
+                # A focused follow-up on the same page can nominate different
+                # original chunks for a newly missing Task Record. Keep the
+                # newest attention selection first while retaining prior
+                # selections and the complete source_chunks provenance.
+                selected_chunks: list[dict[str, Any]] = []
+                selected_seen: set[tuple[str, int, str]] = set()
+                for selected in [
+                    *list(item.get("selected_source_chunks") or []),
+                    *list(current.get("selected_source_chunks") or []),
+                ]:
+                    if not isinstance(selected, Mapping):
+                        continue
+                    text = str(selected.get("text") or "").strip()
+                    if not text:
+                        continue
+                    identity = (
+                        str(selected.get("chunk_id") or ""),
+                        int(selected.get("index") or 0),
+                        text,
+                    )
+                    if identity in selected_seen:
+                        continue
+                    selected_seen.add(identity)
+                    selected_chunks.append(dict(selected))
+                if selected_chunks:
+                    current["selected_source_chunks"] = selected_chunks[:12]
+                merged_candidates = merge_candidate_observations(
+                    item.get("chunk_candidates"),
+                    current.get("chunk_candidates"),
+                )
+                if merged_candidates:
+                    current["chunk_candidates"] = merged_candidates
+                current["object_alignments"] = merge_mapping_rows(
+                    current.get("object_alignments"),
+                    current.get("object_alignment"),
+                    item.get("object_alignments"),
+                    item.get("object_alignment"),
+                )
+                current["retrieval_requests"] = merge_mapping_rows(
+                    current.get("retrieval_requests"),
+                    current.get("retrieval_request"),
+                    item.get("retrieval_requests"),
+                    item.get("retrieval_request"),
+                )
+                current["retrieval_bindings"] = merge_mapping_rows(
+                    current.get("retrieval_bindings"),
+                    item.get("retrieval_bindings"),
+                )
+                for field in (
+                    "source",
+                    "provider",
+                    "source_type",
+                    "published",
+                    "published_at",
+                    "updated",
+                    "updated_at",
+                    "date",
+                    "retrieved_at",
+                    "freshness",
+                    "source_object",
+                    "object_alignment",
+                    "retrieval_request",
+                ):
+                    if current.get(field) in (None, "", [], {}) and item.get(field) not in (
+                        None,
+                        "",
+                        [],
+                        {},
+                    ):
                         current[field] = item.get(field)
     results = list(merged.values())
     quality_terms = _quality_terms(query, candidate_queries)
@@ -191,7 +327,7 @@ def merge_retrieval_results(
         "citation_refs": citation_refs,
         "evidence_missing_count": evidence_missing_count,
         "model_extraction": {
-            "schema_version": "model-extraction-diagnostics.v1",
+            "contract": MODEL_EXTRACTION_DIAGNOSTICS_CONTRACT,
             "complete": not extraction_events,
             "event_count": len(extraction_events),
             "degraded_page_count": sum(int(item["degraded_page_count"]) for item in extraction_events),

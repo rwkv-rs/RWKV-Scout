@@ -1,0 +1,25 @@
+{
+  "schema_version": "rwkv-retrieval-rst-export.v1",
+  "trajectory_sft": 5,
+  "stage_sft": 22,
+  "preference": 3,
+  "verifier_rl": 5,
+  "files": {
+    "trajectory_sft.jsonl": {
+      "rows": 5,
+      "sha256": "4c11abae5f87a2f7fec25a3f759ba3008f417e5d380062948f50852f3bd81197"
+    },
+    "stage_sft.jsonl": {
+      "rows": 22,
+      "sha256": "a9539b26e569217b73b31c384f32f57f961657736c687c849215b2c18b36e81c"
+    },
+    "preference.jsonl": {
+      "rows": 3,
+      "sha256": "59a84eddce63b1db2964099e55825c6238cc04f1637207c365b04f45c3b61c4d"
+    },
+    "verifier_rl.jsonl": {
+      "rows": 5,
+      "sha256": "b994ad93be3e5feda434a8824e201a6ce269a0a7edd49b76c3bfaa4aad63e940"
+    }
+  }
+}

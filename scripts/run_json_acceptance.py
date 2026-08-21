@@ -9,10 +9,12 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import os
 import signal
 import statistics
 import re
 import sys
+import tempfile
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime
@@ -36,6 +38,42 @@ from utils.task_events import append_task_event, get_task_events
 def _safe_id(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "case"))
     return cleaned.strip("._") or "case"
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    """Durably replace one checkpoint without exposing a truncated JSON file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing_mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, existing_mode)
+        os.replace(temporary, path)
+        try:
+            directory_fd = os.open(path.parent, getattr(os, "O_DIRECTORY", 0))
+        except OSError:
+            directory_fd = None
+        if directory_fd is not None:
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 @contextmanager
@@ -230,6 +268,126 @@ def _numeric_summary(values: list[Any]) -> dict[str, Any]:
     }
 
 
+_RWKV_SEMANTIC_CONTROL_EVENTS = frozenset(
+    {
+        "evidence_review",
+        "task_record_binding",
+        "planner_session_rebuilt",
+        "task_replan",
+    }
+)
+_PROHIBITED_OUTPUT_INTERVENTION_EVENTS = frozenset(
+    {
+        "completion_judgement",
+        "answer_repair",
+        "answer_rewrite",
+        "answer_translation",
+        "answer_fallback",
+        "refusal_fallback",
+    }
+)
+_RWKV_SEMANTIC_CONTROL_STAGES = frozenset(
+    {
+        "evidence_review",
+        "planner_replan",
+        "task_record_binding",
+    }
+)
+_PROHIBITED_OUTPUT_INTERVENTION_STAGES = frozenset(
+    {
+        "answer_repair",
+        "answer_rewrite",
+        "answer_translation",
+        "answer_fallback",
+    }
+)
+
+
+def _module_responsibility_metrics(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Measure whether online modules stay inside their declared boundaries.
+
+    Retrieval may fetch, clean, chunk, deduplicate and verify an exact quote
+    span.  It must not add a second semantic completion decision, replace an
+    RWKV-selected action, or rewrite the public RWKV answer.  These metrics are
+    offline observations only; they never affect execution.
+    """
+
+    rwkv_control_events = collections.Counter(
+        str(event.get("type") or "")
+        for event in events
+        if str(event.get("type") or "") in _RWKV_SEMANTIC_CONTROL_EVENTS
+    )
+    prohibited_events = collections.Counter(
+        str(event.get("type") or "")
+        for event in events
+        if str(event.get("type") or "") in _PROHIBITED_OUTPUT_INTERVENTION_EVENTS
+    )
+    rwkv_control_stages = collections.Counter()
+    prohibited_stages = collections.Counter()
+    controller_overrides = 0
+    gateway_overrides = 0
+    for event in events:
+        if event.get("controller_override") is True or event.get("override") is True:
+            controller_overrides += 1
+        if event.get("gateway_override") is True:
+            gateway_overrides += 1
+        if event.get("type") != "model_call":
+            continue
+        stage = str(
+            event.get("request_stage")
+            or event.get("sampling_stage")
+            or event.get("stage")
+            or ""
+        ).strip()
+        if stage in _RWKV_SEMANTIC_CONTROL_STAGES:
+            rwkv_control_stages[stage] += 1
+        if stage in _PROHIBITED_OUTPUT_INTERVENTION_STAGES:
+            prohibited_stages[stage] += 1
+
+    synthesis_outputs = [
+        str(event.get("content") or "")
+        for event in events
+        if event.get("type") == "synthesis" and str(event.get("content") or "")
+    ]
+    final_outputs = [
+        str(event.get("content") or "")
+        for event in events
+        if event.get("type") == "final" and str(event.get("content") or "")
+    ]
+    final_output_mismatch = int(
+        bool(synthesis_outputs)
+        and bool(final_outputs)
+        and synthesis_outputs[-1] != final_outputs[-1]
+    )
+    prohibited_interventions = sum(prohibited_events.values()) + sum(
+        prohibited_stages.values()
+    )
+    violation_count = (
+        prohibited_interventions
+        + controller_overrides
+        + gateway_overrides
+        + final_output_mismatch
+    )
+    return {
+        "schema_version": "module-responsibility-isolation.v2",
+        "pass": violation_count == 0,
+        "violation_count": violation_count,
+        "rwkv_semantic_control_count": sum(rwkv_control_events.values())
+        + sum(rwkv_control_stages.values()),
+        "rwkv_semantic_control_events": dict(rwkv_control_events),
+        "rwkv_semantic_control_model_stages": dict(rwkv_control_stages),
+        "prohibited_output_intervention_count": prohibited_interventions,
+        "prohibited_output_intervention_events": dict(prohibited_events),
+        "prohibited_output_intervention_model_stages": dict(prohibited_stages),
+        "controller_override_count": controller_overrides,
+        "gateway_override_count": gateway_overrides,
+        "final_output_mismatch_count": final_output_mismatch,
+        "trace_bytes": len(
+            json.dumps(events, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ),
+    }
+
+
 def _trace_summary(task_id: str) -> dict[str, Any]:
     """Summarize execution boundaries without judging task-specific content."""
     events = get_task_events(task_id)
@@ -281,6 +439,14 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                         "duration_ms",
                         "prompt_tokens",
                         "completion_tokens",
+                        "request_max_tokens",
+                        "finish_reason",
+                        "stop",
+                        "request_stage",
+                        "sampling_policy_reason",
+                        "temperature",
+                        "seed",
+                        "sampling_parameters",
                         "input_messages",
                         "prompt",
                         "output",
@@ -303,7 +469,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "step": event.get("step"),
                     "phase": event.get("phase"),
                     "branch_id": event.get("branch_id") or "",
-                    "task_point_id": event.get("task_point_id") or "",
+                    "task_record_id": event.get("task_record_id") or "",
                     "action": event.get("action") or "",
                     "query": event.get("query") or "",
                     "data": event.get("data") or {},
@@ -365,15 +531,19 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             plan = event.get("data") or {}
             plans.append(
                 {
-                    "schema_version": plan.get("schema_version"),
-                "status": plan.get("status", "ok"),
-                "error_class": plan.get("error_class", ""),
-                "message": str(plan.get("message") or "")[:1000],
-                "raw_model_output_chars": len(str(plan.get("raw_model_output") or "")),
-                "point_count": len(plan.get("atomic_points") or []) if isinstance(plan, dict) else 0,
-                    "point_ids": [
-                        str(point.get("id") or "")
-                        for point in (plan.get("atomic_points") or [])
+                    "contract": plan.get("contract"),
+                    "status": plan.get("status", "ok"),
+                    "error_class": plan.get("error_class", ""),
+                    "message": str(plan.get("message") or "")[:1000],
+                    "raw_model_output_chars": len(
+                        str(plan.get("raw_model_output") or "")
+                    ),
+                    "record_count": len(plan.get("records") or [])
+                    if isinstance(plan, dict)
+                    else 0,
+                    "record_ids": [
+                        str(point.get("record_id") or "")
+                        for point in (plan.get("records") or [])
                         if isinstance(point, dict)
                     ],
                 }
@@ -382,12 +552,14 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             plan = event.get("data") or {}
             plans.append(
                 {
-                    "schema_version": plan.get("schema_version") if isinstance(plan, dict) else None,
+                    "contract": plan.get("contract")
+                    if isinstance(plan, dict)
+                    else None,
                     "status": plan.get("status", "ok") if isinstance(plan, dict) else "unknown",
-                    "point_count": len(plan.get("atomic_points") or []) if isinstance(plan, dict) else 0,
-                    "point_ids": [
-                        str(point.get("id") or "")
-                        for point in (plan.get("atomic_points") or [])
+                    "record_count": len(plan.get("records") or []) if isinstance(plan, dict) else 0,
+                    "record_ids": [
+                        str(point.get("record_id") or "")
+                        for point in (plan.get("records") or [])
                         if isinstance(point, dict)
                     ],
                 }
@@ -397,8 +569,8 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                 {
                     "step": event.get("step"),
                     "strategy": event.get("strategy") or "",
-                    "point_count": event.get("point_count") or 0,
-                    "point_ids": event.get("point_ids") or [],
+                    "record_count": event.get("record_count") or event.get("point_count") or 0,
+                    "record_ids": event.get("record_ids") or event.get("point_ids") or [],
                     "source": event.get("source") or "",
                     "reason": event.get("reason") or "",
                     "override": bool(event.get("override")),
@@ -416,7 +588,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     "branch_id": event.get("branch_id") or "",
                     "branch_step": event.get("branch_step"),
                     "action": action,
-                    "task_point_id": event.get("task_point_id") or "",
+                    "task_record_id": event.get("task_record_id") or "",
                     "args": event.get("args") or {},
                     "planner_error": event.get("planner_error") or "",
                 }
@@ -516,7 +688,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                 {
                     "step": event.get("step"),
                     "status": data.get("status", ""),
-                    "missing_point_ids": data.get("missing_point_ids") or [],
+                    "missing_task_record_ids": data.get("missing_task_record_ids") or data.get("missing_point_ids") or [],
                     "reason": data.get("reason", ""),
                 }
             )
@@ -548,6 +720,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
         for context in contexts
         if isinstance(context, dict)
     ]
+    module_responsibility = _module_responsibility_metrics(events)
     return {
         "event_count": len(events),
         "plans": plans,
@@ -576,9 +749,9 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
             "phase_counts": dict(phase_counts),
             "tool_result_statuses": dict(tool_result_statuses),
             "error_class_counts": dict(error_classes),
-            "task_point_selection": {
+            "task_record_selection": {
                 "decision_count": len(decisions),
-                "with_task_point_id": sum(bool(item.get("task_point_id")) for item in decisions),
+                "with_task_record_id": sum(bool(item.get("task_record_id")) for item in decisions),
             },
             "page_fetches": len(evidence),
             "web_search_page_evidence": sum(
@@ -636,6 +809,7 @@ def _trace_summary(task_id: str) -> dict[str, Any]:
                     str(item.get("error_type") or "none") for item in finals
                 )
             ),
+            "module_responsibility": module_responsibility,
         },
     }
 
@@ -664,12 +838,47 @@ def _aggregate_trace_summaries(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ):
             for key, value in (stats.get(namespace) or {}).items():
                 aggregate[f"{namespace}.{key}"] += int(value or 0)
+    responsibility_rows = [
+        ((row.get("trace") or {}).get("stats") or {}).get("module_responsibility") or {}
+        for row in rows
+    ]
+    responsibility_passes = sum(value.get("pass") is True for value in responsibility_rows)
+    responsibility_violations = sum(
+        int(value.get("violation_count") or 0) for value in responsibility_rows
+    )
     return {
         "case_count": len(rows),
         "returned_answer_cases": sum(row.get("delivery") == "answer" for row in rows),
         "network_error_cases": sum(row.get("runtime_error") == "network_error" for row in rows),
         "pass_cases": sum(row.get("quality") == "pass" for row in rows),
         "no_pass_cases": sum(row.get("quality") == "no-pass" for row in rows),
+        "module_responsibility": {
+            "schema_version": "module-responsibility-isolation.v2",
+            "pass_cases": responsibility_passes,
+            "pass_rate": round(responsibility_passes / len(rows), 4) if rows else 0.0,
+            "violation_count": responsibility_violations,
+            "rwkv_semantic_control_count": sum(
+                int(value.get("rwkv_semantic_control_count") or 0)
+                for value in responsibility_rows
+            ),
+            "prohibited_output_intervention_count": sum(
+                int(value.get("prohibited_output_intervention_count") or 0)
+                for value in responsibility_rows
+            ),
+            "controller_override_count": sum(
+                int(value.get("controller_override_count") or 0)
+                for value in responsibility_rows
+            ),
+            "gateway_override_count": sum(
+                int(value.get("gateway_override_count") or 0)
+                for value in responsibility_rows
+            ),
+            "final_output_mismatch_count": sum(
+                int(value.get("final_output_mismatch_count") or 0)
+                for value in responsibility_rows
+            ),
+            "trace_bytes": sum(int(value.get("trace_bytes") or 0) for value in responsibility_rows),
+        },
         "counters": dict(aggregate),
     }
 
@@ -707,9 +916,7 @@ def run(
             "cases": rows,
             "aggregate_trace_summary": _aggregate_trace_summaries(rows),
         }
-        with output_path.open("w", encoding="utf-8") as handle:
-            json.dump(report, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
+        _atomic_write_json(output_path, report)
         return report
 
     for case in cases:
@@ -737,7 +944,15 @@ def run(
             answer = ""
             error = f"TimeoutError: {exc}"
         except Exception as exc:
-            if classify_error(exc) not in {"network", "timeout", "provider", "auth", "quota"}:
+            # evidence_review_protocol: the R53 contract refuses to enter the
+            # Writer without a valid RWKV finish decision. That is a per-case
+            # outcome (this case ends with no authorized answer), never a
+            # batch-level crash — one case's protocol failure must not discard
+            # the other cases in the same part runner.
+            if classify_error(exc) not in {
+                "network", "timeout", "provider", "auth", "quota",
+                "evidence_review_protocol",
+            }:
                 raise
             answer = ""
             error = f"{type(exc).__name__}: {exc}"

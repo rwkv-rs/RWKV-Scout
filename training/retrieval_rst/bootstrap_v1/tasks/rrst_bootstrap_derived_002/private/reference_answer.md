@@ -1,0 +1,1 @@
+Marble Calendar launched on **2031-04-18** [S1]. Adding **2 calendar years** gives **2033-04-18**, its second calendar anniversary. This is a deterministic derivation; the source does not announce an anniversary event.

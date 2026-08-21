@@ -8,15 +8,161 @@ provider-specific code and its source metadata.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+from urllib.parse import quote, unquote, urlparse
 
 from tools.github_rest import fetch_github_rest, search_github_rest
 from tools.paper_search import search_papers
+from tools.security_feeds import security_advisories_payload
 from tools.registry import ToolRegistry
 from tools.weather import get_current_weather
 from tools.weather_alerts import get_current_weather_alerts
+from agent.retrieval_object_contract import (
+    github_repository_target,
+    source_object_contract,
+)
 from utils.freshness import annotate_result_freshness, build_freshness_policy
 from utils.source_authority import annotate_source
+from utils.network_fetch import fetch_json
+
+
+_OPERATION_CONTRACT = {
+    "weather_current": ("weather", "current"),
+    "weather_alerts": ("weather_alerts", "alerts"),
+    "github_repository": ("github", "repository"),
+    "github_code": ("github", "code"),
+    "github_release": ("github", "release"),
+    "paper": ("paper", "paper"),
+    "paper_series": ("paper", "series"),
+    "crates_release": ("crates", "release"),
+    "pypi_release": ("pypi", "release"),
+    "npm_release": ("npm", "release"),
+    "security_advisories": ("security", "advisories"),
+}
+
+_ACCEPTED_OBJECT_TYPES = {
+    "weather_current": ("location",),
+    "weather_alerts": ("location",),
+    "github_repository": ("github_repository", "repository_search"),
+    "github_code": ("github_repository", "github_code_search"),
+    "github_release": ("github_repository",),
+    "paper": ("scholarly_work", "doi", "arxiv_id", "paper_search"),
+    "paper_series": ("scholarly_series", "author", "research_topic"),
+    "crates_release": ("crates_package",),
+    "pypi_release": ("pypi_package",),
+    "npm_release": ("npm_package",),
+    "security_advisories": ("security_advisory", "vendor_product", "cve_catalog"),
+}
+
+_CONNECTOR_COOLDOWN_SECONDS = {
+    "invalid_identity": 300,
+    "rate_limited": 300,
+    "temporarily_unavailable": 60,
+    "network_error": 30,
+}
+
+
+def _connector_runtime_status(
+    payload: dict[str, Any],
+    *,
+    connector: str,
+    operation: str,
+) -> dict[str, Any]:
+    """Project provider availability without selecting a replacement tool."""
+
+    payload_status = str(payload.get("status") or "").strip().casefold()
+    error_class = str(payload.get("error_class") or "").strip().casefold()
+    messages = [
+        str(payload.get("message") or ""),
+        *(str(value) for value in payload.get("provider_errors") or []),
+    ]
+    error_text = " ".join(messages).casefold()
+    runtime_status = "available"
+    if payload_status in {"error", "failed", "unavailable", "unauthorized"}:
+        if error_class in {
+            "object_type_mismatch",
+            "unsupported_operation",
+            "empty_query",
+        }:
+            runtime_status = "available"
+        elif error_class in _CONNECTOR_COOLDOWN_SECONDS:
+            runtime_status = error_class
+        elif (
+            "rate limit" in error_text
+            or "too many requests" in error_text
+            or re.search(r"\b429\b", error_text)
+            or connector == "github" and re.search(r"\b403\b", error_text)
+        ):
+            runtime_status = "rate_limited"
+        elif (
+            "bad credentials" in error_text
+            or "unauthorized" in error_text
+            or "authentication" in error_text
+            or re.search(r"\b401\b", error_text)
+            or re.search(r"\b403\b", error_text)
+        ):
+            runtime_status = "invalid_identity"
+        elif any(
+            marker in error_text
+            for marker in (
+                "networkfetcherror",
+                "connection",
+                "timed out",
+                "timeout",
+                "name resolution",
+                "dns",
+            )
+        ):
+            runtime_status = "network_error"
+        else:
+            runtime_status = "temporarily_unavailable"
+    return {
+        "provider": f"connector.{connector}" if connector else "connector",
+        "operation": operation,
+        "status": runtime_status,
+        "available": runtime_status == "available",
+        "cooldown_seconds": _CONNECTOR_COOLDOWN_SECONDS.get(runtime_status, 0),
+        "error_class": error_class,
+        "message": " ".join(messages).strip()[:500],
+    }
+
+
+def _finalize_connector_payload(
+    payload: dict[str, Any],
+    *,
+    connector: str,
+    operation: str,
+    real_network: bool,
+) -> dict[str, Any]:
+    result = dict(payload)
+    capability_error = str(result.get("error_class") or "").casefold() in {
+        "object_type_mismatch",
+        "unsupported_operation",
+        "empty_query",
+    }
+    result.update(
+        {
+            "tool": "connector_lookup",
+            "connector": connector,
+            "operation": operation,
+            "accepted_object_types": list(_ACCEPTED_OBJECT_TYPES.get(operation, ())),
+            "real_network": bool(real_network and not capability_error),
+        }
+    )
+    runtime = _connector_runtime_status(
+        result,
+        connector=connector,
+        operation=operation,
+    )
+    result["connector_runtime"] = runtime
+    if (
+        runtime["status"] != "available"
+        and str(result.get("error_class") or "").casefold()
+        not in {"object_type_mismatch", "unsupported_operation", "empty_query"}
+    ):
+        result["error_class"] = runtime["status"]
+    return result
 
 
 def _payload(value: Any) -> dict[str, Any]:
@@ -38,14 +184,36 @@ def _structured_rows(payload: dict[str, Any], connector: str) -> dict[str, Any]:
         if not isinstance(raw, dict):
             continue
         row = dict(raw)
-        text = str(
-            row.get("structured_evidence_text")
-            or row.get("page_excerpt")
-            or row.get("content")
-            or row.get("abstract")
-            or row.get("snippet")
-            or ""
-        ).strip()
+        if connector == "paper":
+            paper_lines = []
+            for label, value in (
+                ("Title", row.get("title")),
+                ("Provider", row.get("source")),
+                ("arXiv version", row.get("version")),
+                ("Published", row.get("published")),
+                ("Updated", row.get("updated")),
+                ("DOI", row.get("doi")),
+                ("URL", row.get("url")),
+                (
+                    "Abstract",
+                    row.get("page_excerpt")
+                    or row.get("content")
+                    or row.get("abstract"),
+                ),
+            ):
+                rendered = str(value or "").strip()
+                if rendered:
+                    paper_lines.append(f"{label}: {rendered}")
+            text = "\n".join(paper_lines)
+        else:
+            text = str(
+                row.get("structured_evidence_text")
+                or row.get("page_excerpt")
+                or row.get("content")
+                or row.get("abstract")
+                or row.get("snippet")
+                or ""
+            ).strip()
         if text:
             row["structured_evidence_text"] = text[:14000]
             row.setdefault("evidence_origin", "structured_api_record")
@@ -53,6 +221,7 @@ def _structured_rows(payload: dict[str, Any], connector: str) -> dict[str, Any]:
             row.setdefault("evidence_boundary", "structured_api_record_only")
             row.setdefault("body_verified", True)
         row["connector"] = connector
+        row["source_object"] = source_object_contract(row, connector=connector)
         rows.append(row)
     result["results"] = rows
     result["connector"] = connector
@@ -75,36 +244,248 @@ def _structured_rows(payload: dict[str, Any], connector: str) -> dict[str, Any]:
     return result
 
 
+def _package_identifier(value: str, registry: str) -> str:
+    """Read one explicit package identifier from the model-authored request."""
+
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    host = parsed.netloc.casefold().removeprefix("www.")
+    if registry == "crates" and host == "crates.io" and len(parts) >= 2 and parts[0] == "crates":
+        return parts[1]
+    if registry == "pypi" and host == "pypi.org" and len(parts) >= 2 and parts[0] in {"project", "pypi"}:
+        return parts[1]
+    if registry == "npm" and host == "npmjs.com" and len(parts) >= 2 and parts[0] == "package":
+        return "/".join(parts[1:3] if parts[1].startswith("@") else parts[1:2])
+    patterns = {
+        "crates": r"\bcrates\.io(?:\s+上)?\s+([A-Za-z0-9_.-]+)",
+        "pypi": r"\bPyPI(?:\s+上)?\s+([A-Za-z0-9_.-]+)",
+        "npm": r"\bnpm(?:\s+上)?\s+(@?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?)",
+    }
+    match = re.search(patterns[registry], text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return text if re.fullmatch(r"@?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?", text) else ""
+
+
+def _package_release_payload(registry: str, query: str) -> dict[str, Any]:
+    """Fetch one registry-declared current release as typed source evidence."""
+
+    package = _package_identifier(query, registry)
+    if not package:
+        return {
+            "status": "error",
+            "error_class": "object_type_mismatch",
+            "identity_error_class": "invalid_package_identifier",
+            "query": query,
+            "results": [],
+            "provider_errors": [
+                f"{registry} release lookup requires one exact package identifier or registry URL"
+            ],
+        }
+    encoded = quote(package, safe="@")
+    if registry == "crates":
+        payload = fetch_json(
+            f"https://crates.io/api/v1/crates/{encoded}",
+            timeout=20,
+            headers={"User-Agent": "RWKV-ECRA/0.1 structured registry lookup"},
+        )
+        crate = payload.get("crate") if isinstance(payload.get("crate"), dict) else {}
+        version = str(crate.get("max_stable_version") or "").strip()
+        record = next(
+            (
+                row
+                for row in payload.get("versions") or []
+                if isinstance(row, dict) and str(row.get("num") or "") == version
+            ),
+            {},
+        )
+        public_url = f"https://crates.io/crates/{package}"
+        fields = {
+            "Package": package,
+            "Version": version,
+            "Published": record.get("created_at") or "",
+            "Yanked": record.get("yanked"),
+            "Repository": crate.get("repository") or "",
+            "Registry URL": public_url,
+        }
+        provider = "crates.io API"
+    elif registry == "pypi":
+        payload = fetch_json(f"https://pypi.org/pypi/{encoded}/json", timeout=20)
+        info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+        version = str(info.get("version") or "").strip()
+        releases = payload.get("releases") if isinstance(payload.get("releases"), dict) else {}
+        files = [row for row in releases.get(version, []) if isinstance(row, dict)]
+        published = next(
+            (
+                str(row.get("upload_time_iso_8601") or row.get("upload_time") or "")
+                for row in files
+                if row.get("upload_time_iso_8601") or row.get("upload_time")
+            ),
+            "",
+        )
+        public_url = f"https://pypi.org/project/{package}/"
+        fields = {
+            "Package": package,
+            "Version": version,
+            "Published": published,
+            "Project URL": info.get("project_url") or public_url,
+            "Registry URL": public_url,
+        }
+        provider = "PyPI JSON API"
+    else:
+        payload = fetch_json(f"https://registry.npmjs.org/{encoded}", timeout=20)
+        tags = payload.get("dist-tags") if isinstance(payload.get("dist-tags"), dict) else {}
+        version = str(tags.get("latest") or "").strip()
+        versions = payload.get("versions") if isinstance(payload.get("versions"), dict) else {}
+        record = versions.get(version) if isinstance(versions.get(version), dict) else {}
+        times = payload.get("time") if isinstance(payload.get("time"), dict) else {}
+        public_url = f"https://www.npmjs.com/package/{package}"
+        fields = {
+            "Package": package,
+            "Version": version,
+            "Published": times.get(version) or "",
+            "Repository": record.get("repository") or "",
+            "Registry URL": public_url,
+        }
+        provider = "npm registry API"
+    evidence = "\n".join(
+        f"{key}: {json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value}"
+        for key, value in fields.items()
+        if value not in (None, "", [], {})
+    )
+    return {
+        "status": "ok" if version else "no_results",
+        "provider": provider,
+        "query": query,
+        "results": [
+            {
+                "title": f"{package} {version}".strip(),
+                "url": public_url,
+                "version": version,
+                "published": fields.get("Published") or "",
+                "structured_evidence_text": evidence,
+                "source": provider,
+            }
+        ] if version else [],
+        "provider_errors": [],
+    }
+
+
 @ToolRegistry.register(
     name="connector_lookup",
     phase="ALL",
     plugin="connectors.domain",
-    capabilities=("weather", "weather_alerts", "github", "papers", "structured_api"),
+    capabilities=("weather", "weather_alerts", "github", "paper", "package_registry", "security_advisories", "structured_api"),
     retrieval_role="discovery",
     model_visible=True,
     category="connector",
-    description="Query one structured domain connector: weather, weather alerts, GitHub, or scholarly records.",
+    description=(
+        "Structured lookup for current weather/alerts, GitHub repositories/code/releases, "
+        "one exact crates.io/PyPI/npm package, scholarly records, or one vendor's official "
+        "security-advisory feed (CISA KEV, Mozilla/Firefox MFSA, Microsoft MSRC, Kubernetes "
+        "CVE feed, OpenSSL, GitHub advisories). It does not read product status pages, "
+        "ordinary websites, game/service documentation, forums, or arbitrary URLs; "
+        "those object types are supported by web_search."
+    ),
+    accepted_object_types=_ACCEPTED_OBJECT_TYPES,
+    argument_schema={
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": [
+                    "weather_current",
+                    "weather_alerts",
+                    "github_repository",
+                    "github_code",
+                    "github_release",
+                    "paper",
+                    "paper_series",
+                    "crates_release",
+                    "pypi_release",
+                    "npm_release",
+                    "security_advisories",
+                ],
+            },
+            "query": {"type": "string"},
+            "max_results": {"type": "integer", "minimum": 1, "maximum": 8},
+        },
+        "required": ["operation", "query"],
+        "additionalProperties": False,
+    },
     signature="""[Tool] connector_lookup
 - Function: use one curated structured connector rather than general web search.
-- Parameters: connector (weather|weather_alerts|github|papers), query, scope (optional), max_results (optional).
+- Parameters: operation (weather_current|weather_alerts|github_repository|github_code|github_release|paper|paper_series|crates_release|pypi_release|npm_release|security_advisories), query, max_results (optional).
 - The result is structured evidence with provider/source metadata; it is not a final answer.
-- Use weather for current conditions, github for repositories/files, and papers for scholarly records.""",
+- Positive boundary: weather operations accept locations; github_release accepts one explicit owner/repository; package release operations accept one exact registry package identifier; paper operations accept scholarly identities or searches; security_advisories accepts one supported vendor identity (CISA KEV / Mozilla MFSA / Microsoft MSRC / Kubernetes / OpenSSL / GitHub package advisories) and returns that vendor's newest official advisory entries. It does NOT cover Cisco, Android, Chrome, GitLab, or GitHub Enterprise Server advisories — those stay on web_search.
+- Negative boundary: this connector does not accept product status pages, ordinary sites, game/service documentation, forums, or arbitrary non-GitHub URLs. Those remain available through web_search.
+- A capability or runtime error reports the mismatch/unavailability to RWKV and never chooses a fallback tool or query.""",
 )
 def connector_lookup(
-    connector: str,
+    operation: str,
     query: str,
-    scope: str = "",
     max_results: int = 8,
     **kwargs: Any,
 ) -> str:
-    name = str(connector or "").strip().casefold()
-    aliases = {"weather": "weather", "天气": "weather", "github": "github", "代码": "github", "papers": "papers", "paper": "papers", "论文": "papers"}
-    name = aliases.get(name, name)
+    selected_operation = str(operation or "").strip().casefold().replace("-", "_")
+    legacy_scope = str(kwargs.get("scope") or "").strip().casefold().replace("-", "_")
+    if selected_operation == "github" and legacy_scope:
+        selected_operation = {
+            "repositories": "github_repository",
+            "repository": "github_repository",
+            "code": "github_code",
+            "release": "github_release",
+            "releases": "github_release",
+            "latest_release": "github_release",
+        }.get(legacy_scope, selected_operation)
+    elif selected_operation in {"paper", "papers"} and legacy_scope == "series":
+        selected_operation = "paper_series"
+    aliases = {
+        "weather": "weather_current",
+        "天气": "weather_current",
+        "github": "github_repository",
+        "代码": "github_code",
+        "papers": "paper",
+        "论文": "paper",
+    }
+    selected_operation = aliases.get(selected_operation, selected_operation)
+    name, scope = _OPERATION_CONTRACT.get(selected_operation, ("", ""))
     text = " ".join(str(query or "").split()).strip()
-    if name not in {"weather", "weather_alerts", "github", "papers"}:
-        return json.dumps({"status": "error", "tool": "connector_lookup", "error_class": "unsupported_connector", "connector": name, "results": []}, ensure_ascii=False)
+    if not name:
+        return json.dumps(
+            _finalize_connector_payload(
+                {
+                    "status": "error",
+                    "error_class": "unsupported_operation",
+                    "message": "operation is not supported by connector_lookup",
+                    "supported_operations": list(_OPERATION_CONTRACT),
+                    "results": [],
+                },
+                connector="",
+                operation=selected_operation,
+                real_network=False,
+            ),
+            ensure_ascii=False,
+        )
     if not text:
-        return json.dumps({"status": "error", "tool": "connector_lookup", "error_class": "empty_query", "connector": name, "results": []}, ensure_ascii=False)
+        return json.dumps(
+            _finalize_connector_payload(
+                {
+                    "status": "error",
+                    "error_class": "object_type_mismatch",
+                    "identity_error_class": "empty_query",
+                    "message": "query must identify one accepted object type",
+                    "results": [],
+                },
+                connector=name,
+                operation=selected_operation,
+                real_network=False,
+            ),
+            ensure_ascii=False,
+        )
 
     context = {
         "task_id": str(kwargs.get("task_id") or ""),
@@ -144,18 +525,83 @@ def connector_lookup(
                 name,
             )
         elif name == "github":
-            if text.startswith(("http://", "https://")) or "/" in text and " " not in text:
-                payload = _payload(fetch_github_rest(text, path=scope, max_chars=20000, **context))
+            github_scope = str(scope or "repository").strip().casefold().replace("-", "_")
+            github_scope = {
+                "repositories": "repository",
+                "latest_release": "release",
+                "releases": "release",
+            }.get(github_scope, github_scope)
+            release_scope = github_scope == "release"
+            explicit_repository = github_repository_target(text)
+            direct_repository = bool(explicit_repository)
+            if release_scope:
+                # A latest-release API path is valid only for an explicit
+                # owner/repository identity.  Silently taking the first fuzzy
+                # repository-search hit changes the model-selected object
+                # (for example package ``typescript`` -> an unrelated repo).
+                # Return a typed tool error and let RWKV choose a new route.
+                candidate = explicit_repository
+                if not direct_repository:
+                    payload = {
+                        "status": "error",
+                        "provider": "connector.github",
+                        "query": text,
+                        "results": [],
+                        "error_class": "object_type_mismatch",
+                        "identity_error_class": "invalid_repository_identifier",
+                        "message": (
+                            "github_release requires an explicit owner/repository "
+                            "identifier or GitHub repository URL"
+                        ),
+                    }
+                else:
+                    if candidate and not candidate.startswith(("http://", "https://")):
+                        candidate = f"https://github.com/{candidate.strip('/')}"
+                    owner_repo = github_repository_target(candidate)
+                    release_url = f"https://api.github.com/repos/{owner_repo}/releases/latest" if "/" in owner_repo else ""
+                    payload = (
+                        _payload(fetch_github_rest(release_url, max_chars=20000, **context))
+                        if release_url
+                        else {"status": "no_results", "results": []}
+                    )
+            elif direct_repository:
+                payload = _payload(
+                    fetch_github_rest(
+                        f"https://github.com/{explicit_repository}",
+                        max_chars=20000,
+                        **context,
+                    )
+                )
             else:
-                discovered = _payload(search_github_rest(text, scope=scope or "repositories", max_results=max_results, **context))
+                search_scope = "code" if github_scope == "code" else "repositories"
+                discovered = _payload(search_github_rest(text, scope=search_scope, max_results=max_results, **context))
                 first = next((item for item in discovered.get("results") or [] if isinstance(item, dict) and item.get("url")), None)
                 payload = _payload(fetch_github_rest(str(first.get("url")), max_chars=20000, **context)) if first else discovered
             payload = _structured_rows(payload, name)
+        elif name in {"crates", "pypi", "npm"}:
+            payload = _structured_rows(
+                _package_release_payload(name, text),
+                name,
+            )
+        elif name == "security":
+            payload = _structured_rows(
+                security_advisories_payload(text, max_results=max_results),
+                name,
+            )
         else:
-            payload = _payload(search_papers(text, scope=scope or "paper", max_results=max_results, **context))
+            paper_scope = str(scope or "paper").strip().casefold()
+            paper_scope = "series" if paper_scope == "series" else "paper"
+            payload = _payload(search_papers(text, scope=paper_scope, max_results=max_results, **context))
             payload = _structured_rows(payload, name)
     except Exception as exc:
-        payload = {"status": "error", "provider": f"connector.{name}", "query": text, "results": [], "provider_errors": [f"{type(exc).__name__}: {exc}"], "error_class": "connector_execution"}
+        payload = {
+            "status": "error",
+            "provider": f"connector.{name}",
+            "query": text,
+            "results": [],
+            "provider_errors": [f"{type(exc).__name__}: {exc}"],
+            "error_class": "connector_execution",
+        }
 
     policy = build_freshness_policy(kwargs.get("original_goal") or text, context["task_plan"])
     payload = annotate_result_freshness(payload, policy)
@@ -168,7 +614,12 @@ def connector_lookup(
         for row in payload.get("results") or []
         if isinstance(row, dict)
     ]
-    payload.update({"tool": "connector_lookup", "connector": name, "real_network": True})
+    payload = _finalize_connector_payload(
+        payload,
+        connector=name,
+        operation=selected_operation,
+        real_network=True,
+    )
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 

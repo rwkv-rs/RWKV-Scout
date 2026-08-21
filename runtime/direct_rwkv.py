@@ -15,7 +15,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Sequence
 
-from config import get_direct_rwkv_config, get_llm_model, get_llm_temperature
+from config import (
+    get_direct_rwkv_config,
+    get_llm_model,
+    get_llm_sampling_parameters,
+    get_llm_temperature,
+)
 from runtime.backend import BackendResponse
 from runtime.transcript import render_rwkv_transcript
 
@@ -169,8 +174,14 @@ class DirectRWKVBackend:
         token_ids = self._tokenizer.encode(str(prompt)) or [0]
         max_tokens = max(1, int(max_tokens))
         temperature = get_llm_temperature()
-        top_p = float(self.settings.get("top_p", 1.0) or 1.0)
-        top_k = max(0, int(self.settings.get("top_k", 0) or 0))
+        request_sampling = get_llm_sampling_parameters()
+        top_p = float(
+            request_sampling.get("top_p", self.settings.get("top_p", 1.0)) or 1.0
+        )
+        top_k = max(
+            0,
+            int(request_sampling.get("top_k", self.settings.get("top_k", 0)) or 0),
+        )
         stop_strings = tuple(str(item) for item in (stop or ()) if str(item))
         stop_tokens = {int(item) for item in (self.settings.get("stop_tokens") or [0])}
 

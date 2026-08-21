@@ -76,7 +76,7 @@ class ChunkContractTests(unittest.TestCase):
         self.assertEqual(page_evidence["error_class"], "")
         self.assertEqual(page_evidence["model_extraction_status"], "empty")
 
-    def test_explicit_negative_locator_rejects_page_body(self):
+    def test_explicit_negative_locator_keeps_bounded_body_with_negative_metadata(self):
         evidence = {
             "status": "no_evidence",
             "page_chars": len(self.body),
@@ -98,11 +98,73 @@ class ChunkContractTests(unittest.TestCase):
                 "CHUNK_EXPLICIT_NEGATIVE_TEST",
             )
 
-        self.assertIsNone(record)
-        self.assertEqual(page_evidence["status"], "no_evidence")
+        self.assertIsNotNone(record)
+        self.assertEqual(page_evidence["status"], "ok")
         self.assertEqual(page_evidence["model_extraction_status"], "negative")
-        self.assertFalse(page_evidence["deterministic_chunk_fallback"])
+        self.assertTrue(page_evidence["deterministic_chunk_fallback"])
         self.assertTrue(page_evidence["source_body_available"])
+        self.assertEqual(page_evidence["evidence_origin"], "bounded_fetched_page_body")
+        self.assertEqual(record["model_extraction_status"], "negative")
+
+    def test_selected_chunk_negative_keeps_only_bounded_selected_body(self):
+        evidence = {
+            "status": "no_evidence",
+            "page_chars": len(self.body),
+            "chunk_count": 4,
+            "inspected_chunk_count": 2,
+            "candidates": [],
+            "compact_facts": "",
+            "source_chunks": [{"chunk_id": "chunk-1", "text": self.body}],
+            "valid_json_count": 2,
+            "negative_response_count": 2,
+            "all_chunks_valid_negative": False,
+            "all_selected_chunks_valid_negative": True,
+            "errors": [],
+        }
+        with patch("tools.web_search_generic.extract_single_page_evidence", return_value=evidence):
+            record, page_evidence = _compact_page(
+                "a fact absent from the selected relevant chunks",
+                self.candidate,
+                self.fetched,
+                object(),
+                "CHUNK_SELECTED_NEGATIVE_TEST",
+            )
+
+        self.assertIsNotNone(record)
+        self.assertEqual(page_evidence["model_extraction_status"], "negative")
+        self.assertTrue(page_evidence["deterministic_chunk_fallback"])
+        self.assertEqual(record["evidence_origin"], "bounded_fetched_page_body")
+
+    def test_semantic_rejection_keeps_bounded_body_and_preserves_metadata(self):
+        evidence = {
+            "status": "no_evidence",
+            "page_chars": len(self.body),
+            "chunk_count": 1,
+            "inspected_chunk_count": 1,
+            "candidates": [],
+            "compact_facts": "",
+            "source_chunks": [{"chunk_id": "chunk-1", "text": self.body}],
+            "valid_json_count": 1,
+            "valid_contract_count": 1,
+            "negative_response_count": 0,
+            "all_selected_chunks_valid_negative": False,
+            "all_selected_chunks_semantically_rejected": True,
+            "errors": [],
+        }
+        with patch("tools.web_search_generic.extract_single_page_evidence", return_value=evidence):
+            record, page_evidence = _compact_page(
+                "a target product fact absent from this other product page",
+                self.candidate,
+                self.fetched,
+                object(),
+                "CHUNK_SEMANTIC_REJECTION_TEST",
+            )
+
+        self.assertIsNotNone(record)
+        self.assertEqual(page_evidence["model_extraction_status"], "semantically_rejected")
+        self.assertEqual(page_evidence["evidence_origin"], "bounded_fetched_page_body")
+        self.assertTrue(page_evidence["deterministic_chunk_fallback"])
+        self.assertEqual(record["model_extraction_status"], "semantically_rejected")
 
     def test_long_body_with_failed_extraction_keeps_bounded_original_chunks(self):
         evidence = {
@@ -252,6 +314,8 @@ class ChunkContractTests(unittest.TestCase):
                         "chunk_candidates": [
                             {
                                 "chunk_id": "chunk-1",
+                                "supported": True,
+                                "task_record_ids": ["P1"],
                                 "facts": ["release date is 2025-04-16"],
                                 "quote": "The release date is 2025-04-16.",
                             }

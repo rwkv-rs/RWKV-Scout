@@ -45,7 +45,7 @@ class WigoloClient:
             headers={
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "User-Agent": "RWKV-ECRA/wigolo-adapter",
+                "User-Agent": "RWKV-Scout/wigolo-adapter",
             },
             method="POST",
         )

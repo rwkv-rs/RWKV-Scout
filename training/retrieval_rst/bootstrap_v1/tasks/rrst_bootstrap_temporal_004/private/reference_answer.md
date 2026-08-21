@@ -1,0 +1,4 @@
+- First public reveal: **2037-09-19** [S1].
+- Public live launch: **2038-12-07** [S2].
+- First anniversary event: **2039-12-07** [S3].
+- Current live release: **version 9.2**, themed **Last Train to Dawn** [S4].

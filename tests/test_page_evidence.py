@@ -8,12 +8,491 @@ from unittest.mock import patch
 
 from agent.page_evidence import (
     _apply_deterministic_candidate_gates,
+    _build_candidate_retry_prompt,
     _entity_status_record_candidates,
     _procedure_command_candidates,
+    _query_signal_terms,
+    _structural_attention_windows,
+    build_chunk_candidate_prompt,
     build_page_chunks,
     extract_single_page_evidence,
     parse_chunk_candidate,
+    select_model_evidence_chunks,
+    select_grounded_source_chunks,
 )
+
+
+def test_candidate_retry_instruction_stays_in_user_turn():
+    prompt = "System: Return only one JSON object.\n\nUser: Extract one fact.\n\nAssistant: ```json\n"
+    repaired = _build_candidate_retry_prompt(prompt)
+
+    user_turn, assistant_turn = repaired.rsplit("\n\nAssistant: ", 1)
+    assert "supported=false" in user_turn
+    assert "one best contiguous source quote" in user_turn
+    assert "never a JSON array" in user_turn
+    assert assistant_turn == "```json\n"
+
+
+def test_array_candidate_is_rejected_instead_of_silently_taking_first_row():
+    candidate = parse_chunk_candidate(
+        '[{"supported":true,"quote":"wrong first row"},'
+        '{"supported":true,"quote":"right later row"}]',
+        {"chunk_id": "c1", "index": 0, "text": "right later row"},
+    )
+
+    assert candidate["supported"] is False
+    assert candidate["quote"] == ""
+
+
+def test_singleton_array_candidate_is_losslessly_normalized():
+    candidate = parse_chunk_candidate(
+        '[{"supported":true,"quote":"one exact source span"}]',
+        {"chunk_id": "c1", "index": 0, "text": "one exact source span"},
+    )
+
+    assert candidate["supported"] is True
+    assert candidate["quote"] == "one exact source span"
+    assert candidate["protocol_input_format"] == "singleton_object_array"
+    assert candidate["protocol_normalized"] is True
+
+
+def test_legacy_extractor_aliases_are_losslessly_mapped_to_runtime_ids():
+    candidate = parse_chunk_candidate(
+        json.dumps(
+            {
+                "supported": True,
+                "claim_ids": ["P1"],
+                "field_keys": ["version"],
+                "quote": "Version 4.4 is current.",
+            }
+        ),
+        {"chunk_id": "c1", "index": 0, "text": "Version 4.4 is current."},
+        planned_task_record_ids={"P1"},
+        planned_field_ids_by_record_id={"P1": {"P1:F1"}},
+        planned_field_name_to_id_by_record_id={
+            "P1": {"version": "P1:F1", "p1:f1": "P1:F1"}
+        },
+    )
+
+    assert candidate["task_record_ids"] == ["P1"]
+    assert candidate["field_ids"] == ["P1:F1"]
+
+
+def test_extractor_prompt_has_no_concrete_output_id_example():
+    prompt = build_chunk_candidate_prompt(
+        "current version",
+        "https://example.test/releases",
+        "Releases",
+        {"chunk_id": "c1", "index": 0, "text": "Version 4.4 is current."},
+        1,
+        task_records=[
+            {
+                "record_id": "P1",
+                "question": "current version",
+                "fields": [{"field_id": "P1:F1", "name": "version"}],
+            }
+        ],
+    )
+
+    format_prefix = prompt.split("任务记录：", 1)[0]
+    assert '"task_record_ids":["P1"]' not in format_prefix
+    assert '"field_ids":["P1:F1"]' not in format_prefix
+    assert "这里不提供任何可复制的 ID 或事实示例" in prompt
+
+
+def test_structural_windows_route_requested_headings_before_marker_dense_noise():
+    chunks = [
+        {
+            "chunk_id": "page",
+            "index": 0,
+            "text": (
+                "# Network policies\nGeneral introduction.\n"
+                "## Default deny all ingress traffic\n"
+                "kind: NetworkPolicy\nspec:\n  podSelector: {}\n  policyTypes:\n  - Ingress\n"
+                "## Version history\n"
+                + "Version 1.20 released 2020-01-01. " * 40
+                + "\n## Default deny all egress traffic\n"
+                "kind: NetworkPolicy\nspec:\n  podSelector: {}\n  policyTypes:\n  - Egress\n"
+            ),
+        }
+    ]
+
+    selected = select_model_evidence_chunks(
+        "Show default deny ingress and egress NetworkPolicy YAML",
+        chunks,
+        {
+            "requested_fields": ["ingress YAML", "egress YAML"],
+            "answer_requirements": [{"type": "procedure"}],
+        },
+        max_chunks=3,
+    )
+
+    joined = "\n".join(row["text"] for row in selected)
+    assert "Default deny all ingress traffic" in joined
+    assert "Default deny all egress traffic" in joined
+    assert all("rank_scores" in row for row in selected)
+
+
+def test_current_release_keeps_newest_record_with_bounded_date_tiebreaker():
+    chunks = [
+        {
+            "chunk_id": "release-page",
+            "index": 0,
+            "text": (
+                "# Widget release notes\n"
+                "## 4.86.0\n*2026-08-10*\nCurrent release details.\n"
+                "## 4.81.0\n*2026-07-06*\nLatest compatibility migration notes.\n"
+                "## 4.66.0\n*2026-03-23*\nLatest stable migration notes and release details.\n"
+            ),
+        }
+    ]
+
+    selected = select_model_evidence_chunks(
+        "What is the latest stable Widget version and release date?",
+        chunks,
+        {
+            "freshness_policy": {"now": "2026-08-12T00:00:00+00:00"},
+            "records": [
+                {"id": "P1", "task": "latest stable Widget version and release date"}
+            ],
+        },
+        max_chunks=3,
+    )
+
+    by_version = {row["text"].splitlines()[0]: row for row in selected}
+    newest = by_version["## 4.86.0"]
+    assert newest["record_date"] == "2026-08-10"
+    assert newest["record_temporal_role"] == "newest_dated_window_in_page"
+    assert newest["rank_scores"]["temporal"] == 12
+    assert newest["rank_scores"]["temporal_shadow"] == 96
+
+
+def test_current_release_reserves_newest_structural_record_attention_lane():
+    chunks = [
+        {
+            "chunk_id": "release-page",
+            "index": 0,
+            "text": (
+                "# Widget release notes\n"
+                "## Widget 9.0.0\n*2026-08-10*\nWidget release date.\n"
+                "## Widget 8.0.0\n*2026-07-01*\n"
+                + "Widget version release compatibility 8.0.0. " * 30
+                + "\n## Widget 7.0.0\n*2026-06-01*\n"
+                + "Widget version release compatibility 7.0.0. " * 30
+            ),
+        }
+    ]
+
+    selected = select_model_evidence_chunks(
+        "What is the latest Widget version and release date?",
+        chunks,
+        {
+            "freshness_policy": {"now": "2026-08-12T00:00:00+00:00"},
+            "records": [
+                {
+                    "id": "P1",
+                    "question": "latest Widget version and release date",
+                    "fields": ["version", "release date"],
+                }
+            ],
+        },
+        max_chunks=2,
+    )
+
+    newest = next(row for row in selected if "9.0.0" in row["text"])
+    assert newest["record_temporal_role"] == "newest_dated_window_in_page"
+    assert "temporal_candidate_coverage_lane" in newest["selection_reasons"]
+
+
+def test_newer_unrelated_record_cannot_override_task_relevant_record():
+    chunks = [
+        {
+            "chunk_id": "release-page",
+            "index": 0,
+            "text": (
+                "# Widget release notes\n"
+                "## Site navigation refresh\n*2026-08-10*\nArchive colors changed.\n"
+                "## Widget 4.9.0 stable release\n*2026-08-09*\n"
+                "Widget stable version 4.9.0 release date and compatibility details.\n"
+            ),
+        }
+    ]
+
+    selected = select_model_evidence_chunks(
+        "What is the latest stable Widget version and release date?",
+        chunks,
+        {
+            "freshness_policy": {"now": "2026-08-12T00:00:00+00:00"},
+            "records": [
+                {
+                    "id": "P1",
+                    "question": "latest stable Widget version and release date",
+                    "fields": ["stable version", "release date"],
+                }
+            ],
+        },
+        max_chunks=1,
+    )
+
+    assert selected[0]["text"].startswith("## Widget 4.9.0 stable release")
+    assert selected[0]["record_temporal_role"] == "older_dated_window_in_page"
+    assert selected[0]["rank_scores"]["temporal"] == 0
+    assert selected[0]["rank_scores"]["temporal_shadow"] == 0
+
+
+def test_current_release_keeps_after_cutoff_metadata_when_capacity_allows():
+    chunks = [
+        {
+            "chunk_id": "release-page",
+            "index": 0,
+            "text": (
+                "# Widget release notes\n"
+                "## 5.0.0 pre-release\n*2026-08-15*\nPreview record.\n"
+                "## 4.9.0\n*2026-08-09*\nStable record.\n"
+                "## 4.8.0\n*2026-07-20*\nOlder stable record.\n"
+            ),
+        }
+    ]
+
+    selected = select_model_evidence_chunks(
+        "Widget latest stable version as of 2026-08-10",
+        chunks,
+        {
+            "freshness_policy": {"as_of": "2026-08-10"},
+            "records": [{"id": "P1", "task": "latest stable Widget version"}],
+        },
+        max_chunks=4,
+    )
+
+    by_version = {row["text"].splitlines()[0]: row for row in selected}
+    assert by_version["## 4.9.0"]["record_temporal_role"] == "newest_dated_window_in_page"
+    assert by_version["## 5.0.0 pre-release"]["record_temporal_role"] == "after_question_cutoff"
+    assert by_version["## 4.9.0"]["rank_scores"]["temporal"] == 12
+    assert by_version["## 5.0.0 pre-release"]["rank_scores"]["temporal"] == 0
+
+
+def test_current_table_rows_are_independent_literal_attention_records():
+    chunks = [
+        {
+            "chunk_id": "release-table",
+            "index": 0,
+            "text": (
+                "## Release history\n"
+                "| Version | Date | OS Build |\n"
+                "| --- | --- | --- |\n"
+                "| 25H2 | 2026-08-11 | 26200.9999 |\n"
+                "| 24H2 | 2026-07-14 | 26100.8888 |\n"
+            ),
+        }
+    ]
+
+    selected = select_model_evidence_chunks(
+        "Windows 11 current public version latest OS Build",
+        chunks,
+        {
+            "records": [
+                {
+                    "id": "P1",
+                    "question": "current public version and latest OS Build",
+                    "fields": ["version", "date", "build"],
+                    "time_scope": "current",
+                }
+            ],
+            "freshness_policy": {"as_of": "2026-08-13"},
+        },
+        max_chunks=3,
+    )
+
+    row = next(item for item in selected if "26200.9999" in item["text"])
+    assert row["attention_window_kind"] == "table_record"
+    assert row["text"] == "| 25H2 | 2026-08-11 | 26200.9999 |"
+    assert row["record_temporal_role"] == "newest_dated_window_in_page"
+    assert row["rank_scores"]["temporal"] == 12
+
+
+def test_rrf_shadow_uses_provider_ranks_not_incomparable_provider_scores():
+    fused = rrf_fuse(
+        [
+            {
+                "provider": "alpha",
+                "results": [
+                    {"url": "https://example.com/a", "title": "A", "discovery_score": 0.01},
+                    {"url": "https://example.com/shared", "title": "Shared", "discovery_score": 0.02},
+                ],
+            },
+            {
+                "provider": "beta",
+                "results": [
+                    {"url": "https://example.com/shared", "title": "Shared", "discovery_score": 999},
+                    {"url": "https://example.com/b", "title": "B", "discovery_score": 998},
+                ],
+            },
+        ],
+        rrf_k=60,
+        pool_limit=8,
+    )
+
+    assert fused[0]["url"] == "https://example.com/shared"
+    assert fused[0]["provider_ranks"] == {"alpha": 2, "beta": 1}
+    assert "discovery_score" not in fused[0]
+
+
+def test_exact_query_focused_source_span_outranks_model_candidate_order():
+    chunks = [
+        {
+            "chunk_id": "intro",
+            "index": 0,
+            "text": "NetworkPolicy is a Kubernetes resource for controlling traffic.",
+        },
+        {
+            "chunk_id": "unrelated-example",
+            "index": 1,
+            "text": "This example selects frontend pods and allows traffic from monitoring.",
+        },
+        {
+            "chunk_id": "default-deny",
+            "index": 2,
+            "text": (
+                "Default deny ingress and egress policy:\n"
+                "spec:\n  podSelector: {}\n  policyTypes:\n"
+                "  - Ingress\n  - Egress"
+            ),
+        },
+    ]
+    candidates = [
+        {
+            "supported": True,
+            "chunk_id": "unrelated-example",
+            "quote": "allows traffic from monitoring",
+        },
+        {
+            "supported": True,
+            "chunk_id": "intro",
+            "quote": "controlling traffic",
+        },
+    ]
+
+    selected = select_grounded_source_chunks(
+        "Kubernetes default deny ingress and egress NetworkPolicy YAML podSelector",
+        chunks,
+        candidates,
+        max_chunks=3,
+        task_plan={
+            "answer_requirements": [
+                {"type": "procedure", "requested_fields": ["exact YAML"]}
+            ]
+        },
+        preferred_chunks=[chunks[2]],
+    )
+
+    assert selected[0]["chunk_id"] == "default-deny"
+    assert "podSelector: {}" in selected[0]["text"]
+    assert selected[0]["attention_rank"] == 1
+    assert "query_focused_source_span" in selected[0]["attention_reasons"]
+
+
+def test_markdown_cli_option_record_keeps_constraint_with_option_signature():
+    page = (
+        "### Options\n"
+        "`-F *`format`*`\n"
+        "`--format=*`format`*`\n"
+        "Select the output format. Directory is required for parallel dumps.\n"
+        "`-j *`njobs`*`\n"
+        "`--jobs=*`njobs`*`\n"
+        "Run the dump in parallel.\n"
+        "pg_dump opens *`njobs`* + 1 database connections.\n"
+        "`-v`\n"
+        "`--verbose`\n"
+        "Enable verbose output.\n"
+    )
+    windows = _structural_attention_windows(
+        [{"chunk_id": "docs", "index": 0, "text": page}],
+        max_tokens=384,
+    )
+
+    jobs = [row for row in windows if "`-j *`njobs`*`" in row["text"]]
+    assert len(jobs) == 1
+    assert "njobs`* + 1 database connections" in jobs[0]["text"]
+    assert "Select the output format" not in jobs[0]["text"]
+    assert jobs[0]["attention_window_kind"] == "markdown_option_record"
+    assert jobs[0]["text"] in page
+
+
+def test_direct_page_url_path_does_not_create_temporal_intent():
+    selected = select_model_evidence_chunks(
+        (
+            "只阅读这个页面并回答："
+            "https://docs.example.org/current/tool.html 。"
+            "说明 -j 的并行行为。"
+        ),
+        [
+            {
+                "chunk_id": "docs",
+                "index": 0,
+                "text": (
+                    "2026-08-12: Documentation navigation updated.\n"
+                    "## Options\n"
+                    "`-j jobs`\nRun in parallel and open jobs + 1 connections.\n"
+                ),
+            }
+        ],
+        {
+            "records": [
+                {
+                    "id": "P1",
+                    "question": "说明 -j 的并行行为。",
+                    "fields": ["extra_connections"],
+                    "time_scope": "current",
+                }
+            ]
+        },
+        max_chunks=2,
+    )
+
+    assert selected
+    assert all(not row.get("record_temporal_role") for row in selected)
+    assert all(row["rank_scores"]["temporal"] == 0 for row in selected)
+
+
+def test_task_plan_identifiers_and_short_cli_flags_reach_option_record():
+    terms = _query_signal_terms(
+        "https://docs.example.org/current/tool.html -j output_format extra_connections"
+    )
+    assert {"-j", "output", "format", "extra", "connections"} <= terms
+    assert "current" not in terms
+
+    selected = select_model_evidence_chunks(
+        "这个页面中 -j 会额外占用多少数据库连接？",
+        [
+            {
+                "chunk_id": "docs",
+                "index": 0,
+                "text": (
+                    "## General notes\nThe tool exports one database.\n"
+                    "## Options\n"
+                    "`-F format`\nSelect the output format.\n"
+                    "`-j jobs`\nRun the dump in parallel. Directory output is required. "
+                    "The client opens jobs + 1 database connections.\n"
+                    "`--verbose`\nPrint progress messages.\n"
+                ),
+            }
+        ],
+        {
+            "records": [
+                {
+                    "id": "P1",
+                    "question": "-j 会额外占用多少数据库连接？",
+                    "fields": ["output_format", "extra_connections"],
+                }
+            ]
+        },
+        max_chunks=2,
+    )
+
+    joined = "\n".join(row["text"] for row in selected)
+    assert "`-j jobs`" in joined
+    assert "Directory output is required" in joined
+    assert "jobs + 1 database connections" in joined
 from tools.web_search_keyless import (
     _YahooResultParser,
     _looks_related,
@@ -29,6 +508,7 @@ from tools.web_search_generic import (
     _model_extraction_diagnostics,
 )
 from utils.network_fetch import NetworkFetchError, fetch_text
+from utils.retrieval_ranking import rrf_fuse
 
 
 class _FakeLLM:
@@ -55,7 +535,7 @@ class _GroundedFakeLLM:
 
     def text_completion(self, prompt, max_tokens=None):
         self.prompts.append((prompt, max_tokens))
-        source_line = prompt.rsplit("\n\n### Assistant", 1)[0].splitlines()[-1]
+        source_line = prompt.rsplit("\n\nAssistant:", 1)[0].splitlines()[-1]
         return SimpleNamespace(
             content=json.dumps(
                 {
@@ -81,7 +561,7 @@ def test_locator_quote_finishes_sentence_instead_of_cutting_a_word():
     assert len(candidate["quote"]) <= 1040
 
 
-def test_multiline_model_locator_keeps_structure_until_source_grounding():
+def test_multiline_model_locator_rejects_omitted_source_line():
     source = (
         "### Package manager\n"
         "Formatting-only source line.\n"
@@ -114,11 +594,215 @@ def test_multiline_model_locator_keeps_structure_until_source_grounding():
         [parsed],
         {},
     )[0]
-    assert gated["supported"] is True
+    assert gated["supported"] is False
+    assert gated["source_grounded"] is False
+    assert gated["rejection_reason"] == "model_quote_not_grounded"
+    assert gated["model_quote"] == model_quote
+
+
+def test_chunk_candidate_keeps_only_valid_rwkv_claim_bindings():
+    candidate = parse_chunk_candidate(
+        json.dumps(
+            {
+                "supported": True,
+                "task_record_ids": ["P2", "P999", "P2"],
+                "quote": "Version 2.0 was released on 2026-08-12.",
+            }
+        ),
+        {
+            "chunk_id": "chunk-2",
+            "index": 1,
+            "text": "Version 2.0 was released on 2026-08-12.",
+            "token_count": 12,
+        },
+        planned_task_record_ids={"P1", "P2"},
+    )
+
+    assert candidate["task_record_ids"] == ["P2"]
+
+
+def test_chunk_candidate_keeps_grounded_record_identity_and_requested_fields():
+    chunk = {
+        "chunk_id": "chunk-4",
+        "index": 3,
+        "text": "Example Game Version 4.4 is titled New Dawn.",
+        "token_count": 12,
+    }
+    candidate = parse_chunk_candidate(
+        json.dumps(
+            {
+                "supported": True,
+                "task_record_ids": ["P1"],
+                "field_ids": ["P1:F1", "P1:F2", "invented field"],
+                "subject_key": "Example Game",
+                "record_key": "Version 4.4",
+                "quote": chunk["text"],
+            }
+        ),
+        chunk,
+        planned_task_record_ids={"P1"},
+        planned_field_ids_by_record_id={"P1": {"P1:F1", "P1:F2", "P1:F3"}},
+    )
+    gated = _apply_deterministic_candidate_gates(
+        "What is the current Example Game version and title?",
+        [chunk],
+        [candidate],
+        {},
+    )[0]
+
+    assert gated["task_record_ids"] == ["P1"]
+    assert gated["field_ids"] == ["P1:F1", "P1:F2"]
+    assert gated["subject_key"] == "Example Game"
+    assert gated["record_key"] == "Version 4.4"
     assert gated["source_grounded"] is True
-    assert gated["grounding_basis"] == "ordered_source_segments"
-    assert gated["grounded_segment_count"] == 4
-    assert gated["quote"].endswith("`package-manager --version`")
+
+
+def test_chunk_prompt_lists_actual_task_fields_without_an_output_example():
+    prompt = build_chunk_candidate_prompt(
+        "当前版本是什么？",
+        "https://example.test/releases",
+        "发布记录",
+        {"chunk_id": "c1", "index": 0, "text": "版本 3.0", "token_count": 4},
+        1,
+        task_records=[
+            {
+                "record_id": "P7",
+                "question": "当前版本是什么？",
+                "subject": "示例项目",
+                "relation": "当前版本",
+                "fields": [
+                    {"field_id": "P7:F1", "name": "版本号"},
+                    {"field_id": "P7:F2", "name": "发布日期"},
+                ],
+                "time_scope": "current",
+                "set_semantics": "single",
+            }
+        ],
+    )
+
+    output_contract = prompt.split("任务记录：", 1)[0]
+    task_records = prompt.split("任务记录：", 1)[1]
+    assert '"task_record_ids":["P7"]' not in output_contract
+    assert '"field_ids":["P7:F1"]' not in output_contract
+    assert '"record_id":"P7"' in task_records
+    assert '"field_id":"P7:F1"' in task_records
+    assert '"field_ids":["version"]' not in prompt
+
+
+def test_chunk_prompt_preserves_raw_markdown_for_model_input():
+    prompt = build_chunk_candidate_prompt(
+        "How do I verify Cargo?",
+        "https://example.test/guide",
+        "Guide",
+        {
+            "chunk_id": "c1",
+            "index": 0,
+            "text": (
+                "### Verify\n"
+                "Read [the guide](https://example.test/details), then run "
+                "`cargo --version` with `foo_bar`."
+            ),
+            "token_count": 20,
+        },
+        1,
+    )
+
+    assert "Read [the guide](https://example.test/details)" in prompt
+    assert "`cargo --version` with `foo_bar`" in prompt
+    assert "来源可见文本视图" not in prompt
+
+
+def test_same_subject_other_record_is_preserved_as_candidate_not_exact_support():
+    candidate = parse_chunk_candidate(
+        json.dumps(
+            {
+                "supported": True,
+                "record_match": "same_subject_other_record",
+                "task_record_ids": ["P1"],
+                "field_ids": ["P1:F1"],
+                "record_key": "1.0",
+                "quote": "示例项目 1.0 于 2020 年发布。",
+            },
+            ensure_ascii=False,
+        ),
+        {
+            "chunk_id": "c1",
+            "index": 0,
+            "text": "示例项目 1.0 于 2020 年发布。",
+            "token_count": 10,
+        },
+        planned_task_record_ids={"P1"},
+        planned_field_ids_by_record_id={"P1": {"P1:F1", "P1:F2"}},
+    )
+
+    assert candidate["supported"] is True
+    # A page-local extractor cannot decide the global current/exact record.
+    # Preserve its declaration for audit, but expose the span to later RWKV
+    # comparison only as a evidence record.
+    assert candidate["record_match"] == "evidence_record_candidate"
+    assert candidate["extractor_declared_record_match"] == "same_subject_other_record"
+    assert candidate["field_ids"] == ["P1:F1"]
+    assert candidate["field_contract_valid"] is True
+
+
+def test_grounding_preserves_the_exact_model_quote_without_record_header_replacement():
+    chunk = {
+        "chunk_id": "release",
+        "index": 0,
+        "text": "## 4.86.0\n2026-08-10\nDownload the release.",
+        "token_count": 12,
+    }
+    candidate = parse_chunk_candidate(
+        json.dumps(
+            {
+                "supported": True,
+                "record_match": "same_subject_other_record",
+                "task_record_ids": ["P1"],
+                "field_ids": ["P1:F1", "P1:F2"],
+                "record_key": "4.86.0",
+                "quote": "2026-08-10\nDownload the release.",
+            }
+        ),
+        chunk,
+        planned_task_record_ids={"P1"},
+        planned_field_ids_by_record_id={"P1": {"P1:F1", "P1:F2"}},
+    )
+
+    gated = _apply_deterministic_candidate_gates(
+        "latest release version and date", [chunk], [candidate], {}
+    )[0]
+
+    assert gated["quote"] == "2026-08-10\nDownload the release."
+    assert gated["record_key"] == ""
+    assert "record_key" in gated["ungrounded_routing_labels"]
+    assert gated.get("record_key_quote_expanded") is not True
+    assert gated["grounding_basis"] == "exact"
+
+
+def test_ungrounded_record_grouping_label_is_not_forwarded():
+    chunk = {"chunk_id": "c1", "index": 0, "text": "Version 4.4 is current."}
+    candidate = parse_chunk_candidate(
+        json.dumps(
+            {
+                "supported": True,
+                "task_record_ids": ["P1"],
+                "subject_key": "Different Product",
+                "record_key": "Version 9.9",
+                "quote": chunk["text"],
+            }
+        ),
+        chunk,
+        planned_task_record_ids={"P1"},
+    )
+
+    gated = _apply_deterministic_candidate_gates(
+        "What is the current version?", [chunk], [candidate], {}
+    )[0]
+
+    assert gated["supported"] is True
+    assert gated["subject_key"] == ""
+    assert gated["record_key"] == ""
+    assert gated["ungrounded_routing_labels"] == ["subject_key", "record_key"]
 
 
 def test_current_plan_schema_activates_markdown_version_command_locator():
@@ -136,7 +820,7 @@ def test_current_plan_schema_activates_markdown_version_command_locator():
         [{"chunk_id": "chunk-1", "index": 0, "text": source, "token_count": 50}],
         {
             "requested_fields": ["installation_method", "version_check_command"],
-            "atomic_points": [
+            "records": [
                 {
                     "task": "extract the installation and verification commands",
                     "objective": "report the exact commands from the source",
@@ -288,6 +972,31 @@ class PageEvidenceTests(unittest.TestCase):
         self.assertEqual(candidate["grounding_basis"], "normalized_whitespace")
         self.assertIn("fetch API as experimental", evidence["compact_facts"])
         self.assertNotIn("invented adjacent fact", evidence["compact_facts"])
+
+    def test_post_gate_rejection_is_distinct_from_raw_model_negative(self):
+        evidence = extract_single_page_evidence(
+            query="Target product current release theme",
+            page={
+                "title": "Different product release notes",
+                "url": "https://example.com/different-product",
+                "page_excerpt": (
+                    "Different Product version 4.4 introduces an unrelated festival. " * 24
+                ),
+                "body_cleaned": True,
+            },
+            llm=_FixedCandidateLLM(
+                facts=["Target product version 4.4 has the unrelated festival theme."],
+                quote="Target product version 4.4 has the unrelated festival theme.",
+            ),
+            task_plan={"answer_requirements": [{"type": "latest_version"}]},
+        )
+
+        self.assertEqual(evidence["valid_contract_count"], 1)
+        self.assertEqual(evidence["negative_response_count"], 0)
+        self.assertFalse(evidence["all_selected_chunks_valid_negative"])
+        self.assertTrue(evidence["all_selected_chunks_semantically_rejected"])
+        self.assertFalse(evidence["chunk_candidates"][0]["supported"])
+        self.assertEqual(evidence["candidates"], [])
 
     def test_entity_status_history_is_located_when_model_translates_the_quote(self):
         body = (
@@ -631,7 +1340,7 @@ class PageEvidenceTests(unittest.TestCase):
             [("chunk-1", 0), ("chunk-2", 0), ("chunk-2", 1)],
         )
 
-    def test_latest_release_record_is_selected_deterministically_with_cutoff(self):
+    def test_current_release_records_remain_for_rwkv_instead_of_python_selecting_one(self):
         page = {
             "title": "Release Notes",
             "url": "https://example.org/release-notes/",
@@ -654,15 +1363,50 @@ class PageEvidenceTests(unittest.TestCase):
                 "freshness_policy": {"as_of": "2026-07-29"},
             },
         )
-        selected = [
-            row for row in evidence["chunk_candidates"]
-            if row.get("deterministic_locator") == "latest_release_record"
-        ]
-        self.assertEqual(selected[0]["record"], {"version": "0.141.1", "date": "2026-07-29"})
-        self.assertIn("0.141.1 (2026-07-29)", evidence["compact_facts"])
-        self.assertNotIn("0.142.0 (2026-08-01)", evidence["compact_facts"])
+        self.assertFalse(
+            any(
+                row.get("deterministic_locator") == "latest_release_record"
+                for row in evidence["chunk_candidates"]
+            )
+        )
+        retained = "\n".join(row["text"] for row in evidence["selected_source_chunks"])
+        self.assertIn("0.142.0 (2026-08-01)", retained)
+        self.assertIn("0.141.1 (2026-07-29)", retained)
 
-    def test_explicit_version_anchor_rejects_adjacent_release_page(self):
+    def test_stable_and_prerelease_rows_are_both_preserved_for_rwkv_review(self):
+        page = {
+            "title": "Widget downloads",
+            "url": "https://example.org/downloads/",
+            "page_excerpt": (
+                "# Widget downloads\n"
+                "1. Widget 4.7.2 Aug. 5, 2026 Download\n"
+                "2. Widget 5.0 pre-release Oct. 1, 2026 Download\n"
+                + "Supported release details. " * 30
+            ),
+        }
+        evidence = extract_single_page_evidence(
+            query="Widget latest stable version and release date",
+            page=page,
+            llm=_NegativeLLM(),
+            task_plan={
+                "answer_requirements": [{"type": "version"}, {"type": "date"}],
+                "freshness_policy": {
+                    "as_of": None,
+                    "now": "2026-08-09T12:00:00+00:00",
+                },
+            },
+        )
+        self.assertFalse(
+            any(
+                row.get("deterministic_locator") == "latest_release_record"
+                for row in evidence["chunk_candidates"]
+            )
+        )
+        retained = "\n".join(row["text"] for row in evidence["selected_source_chunks"])
+        self.assertIn("Widget 4.7.2 Aug. 5, 2026", retained)
+        self.assertIn("Widget 5.0 pre-release Oct. 1, 2026", retained)
+
+    def test_explicit_version_mismatch_remains_visible_for_rwkv_comparison(self):
         page = {
             "title": "Kubernetes 1.14",
             "url": "https://example.org/kubernetes-1-14",
@@ -677,8 +1421,16 @@ class PageEvidenceTests(unittest.TestCase):
             llm=_GroundedFakeLLM(),
             task_plan={"answer_requirements": [{"type": "date"}]},
         )
-        self.assertEqual(evidence["status"], "no_evidence")
-        self.assertFalse(any(row.get("supported") for row in evidence["chunk_candidates"]))
+        self.assertEqual(evidence["status"], "ok")
+        candidates = [
+            row for row in evidence["chunk_candidates"] if row.get("supported")
+        ]
+        self.assertTrue(candidates)
+        self.assertIn("Kubernetes 1.14", candidates[0]["quote"])
+        self.assertNotIn(
+            "explicit_identity_anchor_mismatch",
+            {str(row.get("rejection_reason") or "") for row in candidates},
+        )
 
     def test_explicit_version_anchor_recovers_source_span_when_model_misses_it(self):
         page = {
@@ -968,7 +1720,7 @@ class PageEvidenceTests(unittest.TestCase):
             "Django 5.2 的官方发布日期",
         )
 
-    def test_provider_noise_is_rejected_again_at_the_shared_candidate_gate(self):
+    def test_provider_noise_is_soft_ranked_without_blocking_page_fetch(self):
         candidates = _merge_candidates(
             "why is seawater salty salt sources ocean salinity balance",
             [
@@ -990,7 +1742,15 @@ class PageEvidenceTests(unittest.TestCase):
             ],
             limit=8,
         )
-        self.assertEqual([row["url"] for row in candidates], ["https://science.example/ocean-salinity"])
+        self.assertEqual(
+            [row["url"] for row in candidates],
+            [
+                "https://science.example/ocean-salinity",
+                "https://dictionary.example/grammar/why",
+            ],
+        )
+        self.assertTrue(candidates[0]["query_relevance"]["related"])
+        self.assertFalse(candidates[1]["query_relevance"]["related"])
 
 
 if __name__ == "__main__":

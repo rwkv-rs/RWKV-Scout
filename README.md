@@ -1,14 +1,14 @@
-# RWKV-ECRA
+# RWKV-Scout
 
-RWKV-ECRA 是一个以 RWKV 为决策核心的联网检索 Agent。它面向需要实时网页、官方资料、结构化数据和多来源核验的问题：RWKV 负责拆解任务、选择工具与查询、判断是否需要继续检索，以及生成最终回答；工程层负责稳定执行工具、抓取和清洗网页、分块提取证据、隔离并发状态、记录 trace 与控制资源。
+RWKV-Scout 是一个以 RWKV 为决策核心的联网检索 Agent。它面向需要实时网页、官方资料、结构化数据和多来源核验的问题：RWKV 负责拆解任务、选择工具与查询、判断是否需要继续检索，以及生成最终回答；工程层负责稳定执行工具、抓取和清洗网页、分块提取证据、隔离并发状态、记录 trace 与控制资源。
 
-当前版本定位为**可运行、可审计的公开 Beta**。单轮检索 Agent 的主链路、并发控制、request-level temperature、网页证据抽取、交叉验证和前后端均已实现；它不是通用长程任务执行器，长任务持久化、断点恢复和 Task Graph 将在后续本地开发分支中实现。
+当前版本定位为**可运行、可审计的公开 Beta**。单轮检索 Agent 的主链路、并发控制、request-level temperature、网页证据抽取、Evidence Review 和前后端均已实现；它不是通用长程任务执行器，长任务持久化、断点恢复和 Task Graph 属于独立项目。
 
 ## 设计边界
 
 - RWKV 拥有任务计划、工具、查询、来源、replan 和最终文本的决策权。
 - Controller 执行模型选择的动作，不用规则替换检索路线，也不改写最终回答。
-- Claim Ledger 和 Retrieval Ledger 用于整理共享证据与避免完全重复的请求，不作为算法拒答门禁。
+- Evidence Ledger 和 Retrieval Ledger 用于整理共享证据与避免完全重复的请求，不作为算法拒答门禁。
 - 页面层允许确定性的抓取、正文清洗、结构解析和有限候选补偿，但最终事实选择与表达仍由 RWKV 完成。
 - 生产链路返回模型输出；`pass` / `no-pass` 只属于离线评测，不参与用户回答。
 
@@ -31,14 +31,19 @@ flowchart TD
     DT --> S["Per-task Shared State"]
     PE --> S
     S --> RL["Retrieval Ledger"]
-    S --> CL["Claim Ledger"]
+    S --> CL["Evidence Ledger"]
     RL --> P
     CL --> P
-    P -->|finish_task| V["RWKV Cross-validation"]
+    P -->|finish_task| EC["Immutable Bounded Exact Evidence Lane"]
+    EC --> ERS["Evidence Record Set"]
+    ERS --> ER["RWKV Evidence Resolution Advisory"]
+    EC --> V["RWKV Evidence Review"]
+    ER -.->|optional attention metadata| V
     V -->|missing evidence| RP["Rebuild Planner Session"]
     RP --> P
-    V -->|finish| EC["Bounded Evidence Context"]
-    EC --> W["RWKV Final Writer"]
+    V -->|finish| W["RWKV Final Writer"]
+    EC --> W
+    ER -.->|optional attention metadata| W
     W --> A["Unmodified Final Answer"]
 
     T["Request-level Temp Scope"] -.-> TP
@@ -60,11 +65,11 @@ flowchart TD
 | --- | --- | --- |
 | API 与任务生命周期 | `api.py`, `app/services/task_runner.py` | 创建后台任务、隔离请求配置、记录历史、暴露 health/readiness/metrics |
 | Orchestrator | `agent/orchestrator.py` | 初始化单任务状态、调用 RWKV 任务规划、启动研究循环、构造最终证据上下文 |
-| Planner / Replanner | `agent/planner.py` | 由 RWKV 生成任务点、选择下一工具调用、交叉验证证据、在需要时重建 planner 会话 |
+| Planner / Plan Revision | `agent/planner.py` | 由 RWKV 生成 Task Record、选择下一工具调用、审查证据、在需要时重建 Planner 会话 |
 | 单一研究循环 | `agent/unified_research.py` | 执行模型动作、反馈工具结果、冻结完全重复路径、连接 replan 和最终写作 |
 | 工具 Harness | `tools/registry.py`, `tools/builtin.py` | 暴露确定性的参数协议和工具目录；不替 RWKV 选择路线 |
 | 搜索与网页管线 | `tools/web_search_generic.py`, `agent/page_evidence.py` | 并发搜索、抓取、正文清洗、分块、RWKV 证据抽取和有限结构化补偿 |
-| 任务状态与账本 | `agent/state.py`, `agent/claim_ledger.py`, `utils/retrieval_ledger.py` | 保存本任务的 query、URL、证据、claim、重复请求、replan 和冻结路径 |
+| 任务状态与账本 | `agent/state.py`, `agent/evidence_ledger.py`, `utils/retrieval_ledger.py` | 保存本任务的 query、URL、证据记录、重复请求、Plan Revision 和冻结路径 |
 | 最终写作 | `agent/retrieval_synthesis.py` | 在 16K 上下文预算内选择证据并请求 RWKV 写作，返回原始模型文本 |
 | 模型运行时 | `clients/llm_client.py`, `runtime/compat.py`, `runtime/direct_rwkv.py` | 连接 OpenAI-compatible `/v1` 服务或直接 RWKV runtime，传播采样配置 |
 | Trace 与资源控制 | `utils/task_events.py`, `utils/runtime_gate.py`, `utils/time_budget.py` | 记录模型输入/输出、工具调用、温度和错误；限制并发与单任务时长 |
@@ -75,9 +80,9 @@ flowchart TD
 2. RWKV 生成任务计划；工程层不通过 Intake 规则改写计划。
 3. RWKV 在单一循环中逐步选择工具、查询、URL 和参数。
 4. 搜索结果被抓取、清洗和分块；页面证据抽取结果写入本任务的共享状态。
-5. RWKV 请求 `finish_task` 时，独立的 RWKV 交叉验证请求判断是结束还是重新规划。
+5. RWKV 请求 `finish_task` 时，系统先构造一次不可变的有界 exact evidence lane；Evidence Resolution 只能通过独立参数附加可选注意力映射，不能删除、替换、筛选、重排或混入其中的材料。独立的 RWKV Evidence Review 再判断是写答案还是重新规划。
 6. 若需要补证据，系统保留账本、重建 planner 会话，再由 RWKV 选择新路径。
-7. 若可以结束，系统只投影必要证据到最终上下文，RWKV 生成回答，代码不删句、不改写、不做摘录替代。
+7. 只有绑定当前 evidence digest 的有效 RWKV `finish` 才能启动 Writer；Review 缺失、协议错误或旧的 `replan` 不会被解释成隐式完成。检索资源耗尽时会发起一次独立的终端 Review，该请求只允许 RWKV 显式选择 `write_answer`，让 Writer 基于已保留证据回答可支持部分并说明缺失信息。Writer 接收同一份不可变 evidence lane 和独立 advisory metadata 后生成回答；代码不根据 Resolution 改变证据，也不删句、不改写、不做摘录替代。
 
 ## Temp 机制
 
@@ -87,22 +92,22 @@ flowchart TD
 
 | 阶段 | 当前默认值 | 行为 |
 | --- | ---: | --- |
-| Task-plan creation | 全局默认 `0.00001` | 当前尚未设置独立 task-plan stage，使用稳定低温 |
+| Task Plan | `0.1` | 稳定生成结构化事实记录 |
 | Planner tool decision | `0.1` | 保持工具 JSON 稳定，同时允许少量搜索策略变化 |
-| Replanner generation 1 | `0.25` | 在旧路径不足时扩大探索范围 |
-| Later replans | 每代 `+0.1`，最高 `0.55` | 避免每次重建仍生成完全相同的路径 |
-| Cross-validation | `0.1` | 稳定输出 `finish` / `replan` 结构 |
-| Page evidence extraction | 全局默认 `0.00001` | 当前使用低温抽取事实与 span |
-| Final answer writer | 全局默认 `0.00001` | 当前使用低温生成事实回答 |
+| Plan Revision | `0.3`，冲突/升级边界最高 `0.4` | 在旧路径不足时扩大搜索策略空间 |
+| Evidence Review | `0.1` | 稳定输出 `write_answer` / `continue_retrieval` 结构 |
+| Evidence Resolution | `0.1` | 稳定输出字段与 Evidence Record 的映射 |
+| Page Evidence | `0.3` | 降低复读并抽取可回定位 span |
+| Final Writer | `0.1` | 从最终证据包生成事实回答 |
 
 阶段值位于 `config.json` 的 `MODEL_RUNTIME.sampling`。全局默认值来自当前 provider 的 `temperature`，可用 `RWKV_ECRA_LLM_TEMPERATURE` 覆盖。
 
 ### 完整调用链
 
 ```text
-Planner / Cross-validation stage
+Planner / Evidence Review stage
   -> get_model_stage_temperature(stage)
-  -> replanner 可调用 get_model_replan_temperature(generation)
+  -> Plan Revision 可调用 get_model_replan_temperature(generation)
   -> model_sampling_parameters(temp, optional seed)
   -> request-local ContextVar
   -> LLMClient
@@ -113,14 +118,14 @@ Planner / Cross-validation stage
 
 `ContextVar` 的作用是隔离并发任务：一个任务的 replanner 即使临时使用 `0.45`，也不会把另一个任务的提取或最终回答改成同一温度。scope 退出后会自动恢复原值。
 
-OpenAI-compatible runtime 会在每个 `/chat/completions` 或 `/completions` 请求中读取当前温度并写入 payload。Replanner 还会生成 request-local seed；其他阶段默认不发送 seed。Direct RWKV runtime 同样逐请求读取当前温度，但当前不使用 seed。
+OpenAI-compatible runtime 会在每个 `/chat/completions` 或 `/completions` 请求中读取当前温度并写入 payload。Plan Revision 使用独立的 request-level sampling profile；其他阶段默认不发送 seed。Direct RWKV runtime 同样逐请求读取当前温度。
 
 ### Request-level temp 与全局固定 temp
 
 - 全局固定 temp：进程启动后所有请求共享一个值，无法区分规划、提取、验证和写作。
-- Request-level temp：每次模型调用都能独立选择值，并且并发隔离；这是当前 planner/replanner/cross-validation 已采用的方式。
-- 全局值仍作为未显式分类阶段的 fallback。目前 task-plan、页面提取和 final writer 还没有独立 stage policy，这是当前实现的已知不完整部分。
-- Planner 和 cross-validation 事件会记录 `sampling_temperature`、可选 `sampling_seed`、prompt 与模型输出，方便分析温度与结果的关系；并非所有模型请求都已记录独立的策略原因。
+- Request-level temp：每次模型调用都能独立选择值，并且并发隔离；这是当前 Planner、Plan Revision 和 Evidence Review 已采用的方式。
+- 全局值仍作为未显式分类阶段的 fallback；当前核心模型阶段均已有独立 stage policy。
+- Planner 和 Evidence Review 事件会记录 `sampling_temperature`、可选 `sampling_seed`、prompt 与模型输出，方便分析温度与结果的关系；并非所有模型请求都已记录独立的策略原因。
 
 ## 并发模型
 
@@ -129,9 +134,9 @@ OpenAI-compatible runtime 会在每个 `/chat/completions` 或 `/completions` �
 - 跨任务并发：实验默认最多 4 个案例；每个案例拥有独立状态。
 - 搜索 provider 与网页抓取：网络 I/O 并发，并有单 host 限制。
 - 页面证据抽取：使用独立 chunk lane，并限制单任务占用的模型槽。
-- Planner、交叉验证和最终写作：保留 control slots，避免被大量 chunk 请求挤占。
+- Planner、Evidence Resolution、Evidence Review 和最终写作：保留 control slots，避免被大量 chunk 请求挤占。
 
-共享状态只在**同一个任务内部**共享。不同用户或不同测试题不会共享证据、claim、planner transcript 或 temp scope。
+共享状态只在**同一个任务内部**共享。不同用户或不同测试题不会共享证据、Task Record、Planner transcript 或 temp scope。
 
 ## 环境要求
 
@@ -264,9 +269,9 @@ curl http://127.0.0.1:8787/metrics
 下面的流程只依赖仓库文件、你自己的模型服务和私密配置：
 
 ```bash
-git clone git@github.com:w1c2j3/rwkv-ecra-rebuild.git
-cd rwkv-ecra-rebuild
-git switch chase/agent-product-tools
+git clone git@github.com:w1c2j3/RWKV-Scout.git
+cd RWKV-Scout
+git switch chase/retrieval-agent
 
 uv sync --frozen --dev
 cp .env.example .env.local

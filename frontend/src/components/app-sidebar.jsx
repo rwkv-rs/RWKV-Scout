@@ -107,6 +107,7 @@ export function AppSidebar({
   onOpenChat,
   onStop,
   onDelete,
+  hideDelete = false,
   ...props
 }) {
   const deferredKeyword = useDeferredValue(keyword);
@@ -150,7 +151,7 @@ export function AppSidebar({
             <span className="text-[10px] font-bold tracking-[-0.04em]">R</span>
           </div>
           <div className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight text-sidebar-foreground">
-            RWKV-ECRA
+            RWKV-Scout
           </div>
         </div>
 
@@ -166,7 +167,7 @@ export function AppSidebar({
             onClick={onOpenChat}
           >
             <MessageCircle className="size-3.5" />
-            检索对话
+            模型直聊
           </Button>
           </div>
           <div className="relative">
@@ -200,6 +201,7 @@ export function AppSidebar({
                     onSelect={onSelect}
                     onStop={onStop}
                     onDelete={onDelete}
+                    allowDelete={!hideDelete}
                   />
                 ))}
               </div>
@@ -218,6 +220,7 @@ export function AppSidebar({
                       onSelect={onSelect}
                       onStop={onStop}
                       onDelete={onDelete}
+                      allowDelete={!hideDelete}
                     />
                   ))}
                 </div>
@@ -241,7 +244,7 @@ export function AppSidebar({
   );
 }
 
-function TaskItem({ item, isActive, now, onSelect, onStop, onDelete }) {
+function TaskItem({ item, isActive, now, onSelect, onStop, onDelete, allowDelete = true }) {
   const label = getTaskLabel(item);
   const relativeTime = formatRelativeTime(item.updated_at, now);
 
@@ -292,7 +295,7 @@ function TaskItem({ item, isActive, now, onSelect, onStop, onDelete }) {
             <StopCircle className="size-3.5" />
           </Button>
         ) : null}
-        <Button
+        {allowDelete ? <Button
           variant="ghost"
           size="icon-xs"
           title="删除任务"
@@ -303,7 +306,7 @@ function TaskItem({ item, isActive, now, onSelect, onStop, onDelete }) {
           }}
         >
           <Trash2 className="size-3.5" />
-        </Button>
+        </Button> : null}
       </div>
     </div>
   );

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from agent.page_evidence import extract_single_page_evidence
 from agent.retrieval_loop import merge_retrieval_results
 from agent.retrieval_synthesis import _clean_answer, build_evidence_context, synthesize_retrieval_answer
+from agent.state import AgentState
 from utils.evidence_quality import clean_page_body, evidence_kind, evidence_text, has_substantive_evidence
 
 
@@ -39,7 +40,7 @@ def test_discovery_metadata_never_enters_final_evidence_context():
     assert context["text"] == "RETRIEVED SOURCES:\nNo source text was retrieved."
 
 
-def test_date_query_keeps_multiple_substantive_sources_and_separates_page_date():
+def test_unbound_date_pages_never_enter_writer_context():
     context = build_evidence_context(
         {
             "query": "\u53d1\u5e03\u65e5\u671f\u3001\u5468\u5e74\u5e86\u65e5\u671f\u3001\u6700\u65b0\u7248\u672c\u4e3b\u9898",
@@ -50,11 +51,11 @@ def test_date_query_keeps_multiple_substantive_sources_and_separates_page_date()
             ],
         }
     )
-    assert len(context["selected_evidence"]) == 3
+    assert context["selected_evidence"] == []
+    assert "unbound_fallback_source_limit" not in context["context_stats"]
     assert "Published:" not in context["text"]
     assert "unsupported summary" not in context["text"].casefold()
     assert "2026-07-30" not in context["text"]
-    assert all(item["evidence_text"] for item in context["selected_evidence"])
 
 
 def test_merge_discards_title_only_results_before_ranking():
@@ -77,6 +78,78 @@ def test_merge_discards_title_only_results_before_ranking():
     assert merged["evidence_missing_count"] == 1
 
 
+def test_merge_retains_new_and_prior_selected_chunks_for_same_source():
+    source_chunks = [
+        {"chunk_id": "old", "index": 0, "text": _body("old fact")},
+        {"chunk_id": "new", "index": 1, "text": _body("new fact")},
+    ]
+    merged = merge_retrieval_results(
+        "two-part question",
+        "web_search",
+        [
+            (
+                "first point",
+                {
+                    "results": [
+                        {
+                            "url": "https://example.com/shared",
+                            "content": _body("shared page"),
+                            "source_chunks": source_chunks,
+                            "selected_source_chunks": [source_chunks[0]],
+                        }
+                    ]
+                },
+            ),
+            (
+                "missing second point",
+                {
+                    "results": [
+                        {
+                            "url": "https://example.com/shared",
+                            "content": _body("shared page"),
+                            "source_chunks": source_chunks,
+                            "selected_source_chunks": [source_chunks[1]],
+                        }
+                    ]
+                },
+            ),
+        ],
+    )
+
+    selected = merged["results"][0]["selected_source_chunks"]
+    assert [row["chunk_id"] for row in selected] == ["new", "old"]
+
+
+def test_shared_state_retains_replan_selected_chunks_for_same_source():
+    state = AgentState()
+    source_chunks = [
+        {"chunk_id": "old", "index": 0, "text": _body("old fact")},
+        {"chunk_id": "new", "index": 1, "text": _body("new fact")},
+    ]
+    for query, selected in (
+        ("first point", source_chunks[0]),
+        ("missing second point", source_chunks[1]),
+    ):
+        state.retrieval.record_query(
+            query,
+            {
+                "status": "ok",
+                "results": [
+                    {
+                        "url": "https://example.com/shared",
+                        "content": _body("shared page"),
+                        "source_chunks": source_chunks,
+                        "selected_source_chunks": [selected],
+                    }
+                ],
+            },
+            task_record_id="",
+        )
+
+    selected = state.retrieval.source_records()[0]["selected_source_chunks"]
+    assert [row["chunk_id"] for row in selected] == ["new", "old"]
+
+
 def test_model_extraction_is_not_the_final_evidence_body():
     context = build_evidence_context(
         {
@@ -86,14 +159,14 @@ def test_model_extraction_is_not_the_final_evidence_body():
                     "url": "https://example.com/body",
                     "page_excerpt": _body("The original source body"),
                     "chunk_candidates": [
-                        {"supported": True, "facts": ["A model-only unsupported claim"], "quote": ""}
+                        {"supported": True, "facts": ["A model-only unsupported task_record"], "quote": ""}
                     ],
                 }
             ],
         }
     )
-    assert "The original source body" in context["text"]
-    assert "model-only unsupported claim" not in context["text"]
+    assert "The original source body" not in context["text"]
+    assert "model-only unsupported task_record" not in context["text"]
 
 
 def test_final_context_repeats_only_grounded_locator_spans():
@@ -111,8 +184,8 @@ def test_final_context_repeats_only_grounded_locator_spans():
         }
     )
 
-    assert "VERBATIM SOURCE LOCATORS" in context["text"]
-    assert "tool --version" in context["text"]
+    assert "VERBATIM SOURCE LOCATORS" not in context["text"]
+    assert "tool --version" not in context["text"]
     assert "other --version" not in context["text"]
 
 

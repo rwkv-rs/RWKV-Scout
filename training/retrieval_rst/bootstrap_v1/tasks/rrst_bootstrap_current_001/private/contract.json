@@ -1,0 +1,68 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "current_version",
+      "expected": "3.2",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "version 3.2 launched on 2040-02-14"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C2",
+      "point_id": "P1",
+      "field": "current_release_date",
+      "expected": "2040-02-14",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "version 3.2 launched on 2040-02-14"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C3",
+      "point_id": "P1",
+      "field": "current_theme",
+      "expected": "Cobalt Tides",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "release title and theme are Cobalt Tides"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    }
+  ],
+  "forbidden_values": [
+    "version 2.7 is current"
+  ],
+  "behavior": {
+    "max_tool_calls": 2
+  },
+  "reward_dimensions": [
+    "field_coverage",
+    "freshness",
+    "fact_binding",
+    "citation_grounding"
+  ]
+}

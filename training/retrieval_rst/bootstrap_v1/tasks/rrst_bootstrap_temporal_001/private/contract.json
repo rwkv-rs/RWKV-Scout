@@ -1,0 +1,103 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "first_reveal_date",
+      "expected": "2034-01-17",
+      "evidence_refs": [
+        "S1"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S1",
+          "text": "first publicly revealed on 2034-01-17"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C2",
+      "point_id": "P1",
+      "field": "launch_date",
+      "expected": "2035-05-09",
+      "evidence_refs": [
+        "S2"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S2",
+          "text": "entered public live service on 2035-05-09"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C3",
+      "point_id": "P2",
+      "field": "first_anniversary_event_date",
+      "expected": "2036-05-09",
+      "evidence_refs": [
+        "S3"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S3",
+          "text": "first anniversary event for Blue Orchard begins on 2036-05-09"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C4",
+      "point_id": "P3",
+      "field": "current_version",
+      "expected": "4.3",
+      "evidence_refs": [
+        "S4"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S4",
+          "text": "current live release is Blue Orchard version 4.3"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C5",
+      "point_id": "P3",
+      "field": "current_theme",
+      "expected": "Clouds Remember",
+      "evidence_refs": [
+        "S4"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S4",
+          "text": "with theme Clouds Remember"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    }
+  ],
+  "forbidden_values": [
+    "first anniversary event was 2035-05-09",
+    "first reveal was 2035-05-09"
+  ],
+  "behavior": {
+    "max_tool_calls": 3
+  },
+  "reward_dimensions": [
+    "temporal_roles",
+    "field_coverage",
+    "internal_consistency",
+    "fact_binding"
+  ]
+}

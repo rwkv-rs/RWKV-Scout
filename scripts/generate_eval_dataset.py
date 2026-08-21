@@ -1,4 +1,4 @@
-"""Generate a versioned evaluation JSONL dataset for RWKV-ECRA."""
+"""Generate a versioned evaluation JSONL dataset for RWKV-Scout."""
 
 from __future__ import annotations
 

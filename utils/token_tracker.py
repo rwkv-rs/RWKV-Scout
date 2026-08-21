@@ -1,4 +1,4 @@
-# RWKV-ECRA/utils/token_tracker.py
+# RWKV-Scout/utils/token_tracker.py
 import os
 import json
 import threading

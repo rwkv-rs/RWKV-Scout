@@ -1,0 +1,107 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "records": [
+          {
+            "record_id": "P1",
+            "question": "Source the launch date and derive the requested calendar anniversary.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "direct_page",
+      "args": {
+        "url": "https://records.marble-calendar.invalid/launch"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "direct_page",
+      "content": {
+        "source_id": "S1",
+        "url": "https://records.marble-calendar.invalid/launch",
+        "title": "Marble Calendar launch record",
+        "authority": "official",
+        "published_at": "2031-04-18",
+        "retrieved_at": "2045-01-15T12:00:00Z",
+        "content": "Marble Calendar public service launched on 2031-04-18. No anniversary campaign is documented here."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "date_diff",
+      "args": {
+        "operation": "add_years",
+        "date": "2031-04-18",
+        "years": 2
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "date_diff",
+      "content": {
+        "result": "2033-04-18"
+      }
+    },
+    {
+      "type": "oracle_evidence_assessment",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ],
+            "supported_facts": [
+              {
+                "field": "calendar_anniversary_date",
+                "value": "2033-04-18",
+                "evidence_ref": "S1",
+                "quote": "public service launched on 2031-04-18"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "Marble Calendar launched on **2031-04-18** [S1]. Adding **2 calendar years** gives **2033-04-18**, its second calendar anniversary. This is a deterministic derivation; the source does not announce an anniversary event."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "final",
+      "failure_class": "derived_fact_presented_as_sourced_event",
+      "prompt": {
+        "source_date": "2031-04-18",
+        "operation": "add 2 years"
+      },
+      "rejected": {
+        "content": "The official source announces an anniversary event on 2033-04-18."
+      },
+      "chosen": {
+        "content": "Marble Calendar launched on **2031-04-18** [S1]. Adding **2 calendar years** gives **2033-04-18**, its second calendar anniversary. This is a deterministic derivation; the source does not announce an anniversary event."
+      }
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-# RWKV-ECRA 架构交接与目标架构
+# RWKV-Scout 架构交接与目标架构
 
 > 文档状态：架构交接稿（2026-08-04）
 > 代码依据：当前工作区 `c85927b` 及其之后可见的工作区评测资料
@@ -6,7 +6,7 @@
 
 ## 0. 先看结论
 
-RWKV-ECRA 不是一个普通的聊天机器人，而是一个面向长文本研究和网页取证的、可回放的 Agent 工作台。它的核心价值链是：
+RWKV-Scout 不是一个普通的聊天机器人，而是一个面向长文本研究和网页取证的、可回放的 Agent 工作台。它的核心价值链是：
 
 ```text
 用户问题
@@ -151,7 +151,7 @@ sequenceDiagram
     A->>R: 提交后台执行
     R->>S: run_started / runtime_gate
     R->>O: run(query, task_id, metadata)
-    O->>P: 创建 task_plan.v1
+    O->>P: 创建全局 Task Plan（rwkv.ecra.runtime.task-plan）
     loop 全局有界循环
         O->>P: 提供共享状态和上一轮观察
         P-->>O: web_search 或 finish_task
@@ -389,7 +389,7 @@ src/                         如果暂时不迁移根目录，也可保持现有
     query_service.py         报告、事件和 trace 查询
   domain/
     task.py                  Task、状态机、终态规则
-    plan.py                  task_plan.v1
+    plan.py                  Task Plan（唯一运行态合约）
     retrieval.py             RetrievalRequest/Result、Ledger
     evidence.py              Page、Chunk、EvidenceSpan、Source
     answer.py                Answer、CitationRef、ValidationResult
@@ -557,7 +557,7 @@ discover → fetch → clean → chunk → extract → dedupe → rank → selec
 3. 再迁移 `RetrievalGateway`；
 4. 最后让 `ResearchWorkflow` 只保留循环和状态转换。
 
-每一步都用旧实现和新实现跑同一个 fixture，比较事件序列和最终 `trace.v1`，而不是只比较字符串答案。
+每一步都用旧实现和新实现跑同一个 fixture，比较事件序列和最终 trace contract，而不是只比较字符串答案。
 
 ### Phase 4：把任务执行从 API 线程中抽象出来
 

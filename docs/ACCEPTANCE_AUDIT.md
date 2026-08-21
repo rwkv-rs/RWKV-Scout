@@ -1,6 +1,6 @@
 # Current acceptance audit
 
-This is an evidence-based status record for the RWKV-ECRA production goal. It
+This is an evidence-based status record for the RWKV-Scout production goal. It
 is intentionally not a claim that the system is ready while the human
 reference set and blind review gates are incomplete.
 

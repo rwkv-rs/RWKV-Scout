@@ -1,0 +1,14 @@
+{
+  "schema_version": "rwkv-retrieval-rst-build.v1",
+  "task_count": 5,
+  "tasks": [
+    "tasks/rrst_seed_lumen_current_001",
+    "tasks/rrst_r1_lumen_temporal_001",
+    "tasks/rrst_seed_derived_anniversary_001",
+    "tasks/rrst_seed_portable_bundle_menu_001",
+    "tasks/rrst_seed_direct_page_policy_001"
+  ],
+  "fictional_data_only": true,
+  "benchmark_answers_used": false,
+  "paper_method": "Recursive Synthesis for Long-Horizon Terminal Tasks, arXiv:2608.05466v1"
+}

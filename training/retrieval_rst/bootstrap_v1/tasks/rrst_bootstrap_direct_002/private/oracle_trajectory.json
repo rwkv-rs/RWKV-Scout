@@ -1,0 +1,102 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "records": [
+          {
+            "record_id": "P1",
+            "question": "Read the explicit page and bind both requested settings.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "direct_page",
+      "args": {
+        "url": "https://docs.cedar-queue.invalid/consumers/wildcard"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "direct_page",
+      "content": {
+        "source_id": "S1",
+        "url": "https://docs.cedar-queue.invalid/consumers/wildcard",
+        "title": "Cedar Queue reference",
+        "authority": "official",
+        "published_at": "2042-01-12",
+        "retrieved_at": "2045-01-15T12:00:00Z",
+        "content": "Skip to content | Log in | Images | Products. consumer: * means all registered consumers in the group. ack: explicit means messages remain pending until acknowledged. Related tutorials | Account | Footer navigation."
+      }
+    },
+    {
+      "type": "oracle_evidence_assessment",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_setting_meaning",
+                "value": "all registered consumers in the group",
+                "evidence_ref": "S1",
+                "quote": "consumer: * means all registered consumers in the group"
+              },
+              {
+                "field": "second_setting_meaning",
+                "value": "messages remain pending until acknowledged",
+                "evidence_ref": "S1",
+                "quote": "ack: explicit means messages remain pending until acknowledged"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "On the specified page, `consumer: *` means **all registered consumers in the group**, while `ack: explicit` means **messages remain pending until acknowledged** [S1]."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "tool_call",
+      "failure_class": "direct_url_scope_expansion",
+      "prompt": {
+        "explicit_url": "https://docs.cedar-queue.invalid/consumers/wildcard"
+      },
+      "rejected": {
+        "tool": "web_search",
+        "args": {
+          "query": "Cedar Queue setting explanation"
+        }
+      },
+      "chosen": {
+        "tool": "direct_page",
+        "args": {
+          "url": "https://docs.cedar-queue.invalid/consumers/wildcard"
+        }
+      }
+    }
+  ]
+}

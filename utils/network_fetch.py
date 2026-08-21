@@ -190,6 +190,15 @@ def _replace_loopback_proxy_host(value: str) -> str:
     return parsed._replace(netloc=netloc).geturl()
 
 
+def _normalize_proxy_url(value: str) -> str:
+    """Normalize an explicitly configured proxy without changing its host."""
+
+    candidate = str(value or "").strip()
+    if not candidate:
+        return ""
+    return candidate if "://" in candidate else f"http://{candidate}"
+
+
 def _windows_proxy_settings() -> dict[str, str]:
     """Read the Windows Internet Settings proxy when running inside WSL."""
 
@@ -241,19 +250,20 @@ def _windows_proxy_settings() -> dict[str, str]:
 
 
 def get_network_proxies() -> dict[str, str]:
-    """Resolve explicit, environment, then Windows-system proxy settings.
+    """Resolve explicit, environment, then opt-in Windows proxy settings.
 
     Requests sessions in this project deliberately disable ``trust_env`` so a
     broken inherited proxy cannot silently change the route.  This function is
-    the single explicit opt-in route for proxies and also translates a Windows
-    loopback proxy to the WSL2 gateway address.
+    the single route for proxies. Explicit project and shell proxy addresses
+    are preserved verbatim; only the opt-in Windows registry adapter translates
+    a Windows loopback proxy to the WSL2 gateway address.
     """
 
     explicit = os.environ.get("RWKV_ECRA_HTTP_PROXY", "").strip()
     explicit_https = os.environ.get("RWKV_ECRA_HTTPS_PROXY", "").strip() or explicit
     if explicit or explicit_https:
         return {
-            key: _replace_loopback_proxy_host(value)
+            key: _normalize_proxy_url(value)
             for key, value in {"http": explicit or explicit_https, "https": explicit_https or explicit}.items()
             if value
         }
@@ -263,10 +273,10 @@ def get_network_proxies() -> dict[str, str]:
         "https": os.environ.get("HTTPS_PROXY", "").strip() or os.environ.get("https_proxy", "").strip(),
     }
     if any(environment.values()):
-        return {key: _replace_loopback_proxy_host(value) for key, value in environment.items() if value}
+        return {key: _normalize_proxy_url(value) for key, value in environment.items() if value}
 
-    auto = os.environ.get("RWKV_ECRA_AUTO_WINDOWS_PROXY", "1").strip().casefold()
-    if auto not in {"0", "false", "no", "off"}:
+    auto = os.environ.get("RWKV_ECRA_AUTO_WINDOWS_PROXY", "0").strip().casefold()
+    if auto in {"1", "true", "yes", "on"}:
         return _windows_proxy_settings()
     return {}
 

@@ -1,4 +1,4 @@
-# RWKV-ECRA/utils/chunker.py
+# RWKV-Scout/utils/chunker.py
 import re
 from utils.rwkv_tokenizer import RWKVTokenizer
 

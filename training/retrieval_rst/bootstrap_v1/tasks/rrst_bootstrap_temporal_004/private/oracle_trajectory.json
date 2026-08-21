@@ -1,0 +1,205 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "records": [
+          {
+            "record_id": "P1",
+            "question": "Separate first reveal from launch.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          },
+          {
+            "record_id": "P2",
+            "question": "Find the dated first-anniversary event.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          },
+          {
+            "record_id": "P3",
+            "question": "Bind current version and theme.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "Willow Transit official reveal launch first anniversary"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S1",
+            "url": "https://news.willow-transit.invalid/reveal",
+            "title": "Willow Transit reveal",
+            "authority": "official",
+            "published_at": "2037-09-19",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Willow Transit was first publicly revealed on 2037-09-19; this was not the live launch."
+          },
+          {
+            "source_id": "S2",
+            "url": "https://news.willow-transit.invalid/launch",
+            "title": "Willow Transit launch",
+            "authority": "official",
+            "published_at": "2038-12-07",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Willow Transit entered public live service on 2038-12-07."
+          },
+          {
+            "source_id": "S3",
+            "url": "https://events.willow-transit.invalid/anniversary-one",
+            "title": "Willow Transit first anniversary",
+            "authority": "official",
+            "published_at": "2039-12-07",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "The first anniversary event for Willow Transit begins on 2039-12-07."
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "site:updates.willow-transit.invalid current live release"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S4",
+            "url": "https://updates.willow-transit.invalid/current",
+            "title": "Willow Transit current release",
+            "authority": "official",
+            "published_at": "2043-03-18",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "The current live release is Willow Transit version 9.2, launched on 2043-03-18, with theme Last Train to Dawn."
+          }
+        ]
+      }
+    },
+    {
+      "type": "oracle_evidence_assessment",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1",
+              "S2"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_reveal_date",
+                "value": "2037-09-19",
+                "evidence_ref": "S1",
+                "quote": "first publicly revealed on 2037-09-19"
+              },
+              {
+                "field": "launch_date",
+                "value": "2038-12-07",
+                "evidence_ref": "S2",
+                "quote": "entered public live service on 2038-12-07"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P2": {
+            "status": "supported",
+            "evidence_refs": [
+              "S3"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_anniversary_event_date",
+                "value": "2039-12-07",
+                "evidence_ref": "S3",
+                "quote": "first anniversary event for Willow Transit begins on 2039-12-07"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P3": {
+            "status": "supported",
+            "evidence_refs": [
+              "S4"
+            ],
+            "supported_facts": [
+              {
+                "field": "current_version",
+                "value": "9.2",
+                "evidence_ref": "S4",
+                "quote": "current live release is Willow Transit version 9.2"
+              },
+              {
+                "field": "current_theme",
+                "value": "Last Train to Dawn",
+                "evidence_ref": "S4",
+                "quote": "with theme Last Train to Dawn"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "- First public reveal: **2037-09-19** [S1].\n- Public live launch: **2038-12-07** [S2].\n- First anniversary event: **2039-12-07** [S3].\n- Current live release: **version 9.2**, themed **Last Train to Dawn** [S4]."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "final",
+      "failure_class": "temporal_role_conflation",
+      "prompt": {
+        "required_fields": [
+          "first_reveal_date",
+          "launch_date",
+          "first_anniversary_event_date",
+          "current_version",
+          "current_theme"
+        ]
+      },
+      "rejected": {
+        "content": "Willow Transit was revealed, launched, and first celebrated on 2038-12-07."
+      },
+      "chosen": {
+        "content": "- First public reveal: **2037-09-19** [S1].\n- Public live launch: **2038-12-07** [S2].\n- First anniversary event: **2039-12-07** [S3].\n- Current live release: **version 9.2**, themed **Last Train to Dawn** [S4]."
+      }
+    }
+  ]
+}

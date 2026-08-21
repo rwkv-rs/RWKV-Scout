@@ -1,4 +1,4 @@
-"""Bounded public-web discovery and evidence extraction for RWKV-ECRA.
+"""Bounded public-web discovery and evidence extraction for RWKV-Scout.
 
 This module is deliberately self-contained.  It borrows the useful ideas of
 bounded candidate admission, domain pivots, one-hop expansion and an explicit
@@ -14,6 +14,7 @@ from typing import Any, Iterable
 from urllib.parse import parse_qs, urldefrag, urlencode, urljoin, urlparse
 
 from utils.network_fetch import NetworkFetchError, fetch_text
+from utils.html_markdown import html_to_markdown
 
 
 _SKIP_TAGS = {"script", "style", "noscript", "svg", "canvas", "template"}
@@ -95,6 +96,30 @@ def normalize_url(value: str, base: str = "") -> str:
     return parsed._replace(query=urlencode(query), path=path).geturl()
 
 
+def retrieval_url_identity(value: str, base: str = "") -> str:
+    """Return a conservative URL identity for retrieval deduplication.
+
+    The fetch URL remains untouched.  Only the identity used to merge provider
+    candidates treats a non-root trailing slash as equivalent.  This prevents
+    the same documentation page discovered as ``/page`` and ``/page/`` from
+    consuming two fetch/model budgets while preserving the original URL for
+    transport and citations.
+    """
+
+    normalized = normalize_url(value, base)
+    if not normalized:
+        return ""
+    parsed = urlparse(normalized)
+    path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/") or "/"
+    return parsed._replace(
+        scheme=parsed.scheme.casefold(),
+        netloc=parsed.netloc.casefold(),
+        path=path,
+    ).geturl()
+
+
 def hostname(value: str) -> str:
     return (urlparse(value).hostname or "").casefold().removeprefix("www.")
 
@@ -172,7 +197,7 @@ def extract_page(url: str, *, max_chars: int = 14000, timeout: int = 15) -> dict
     html = fetch_text(url, timeout=timeout)
     parser = _PageParser()
     parser.feed(html[:300_000])
-    text = " ".join(parser.text_parts)
+    text = html_to_markdown(html[:300_000], max_chars=max_chars)
     title = " ".join(parser.title_parts).strip()
     meta = parser.meta
     links: list[dict[str, str]] = []
@@ -220,4 +245,3 @@ def attach_page(item: dict[str, Any], *, timeout: int = 15) -> dict[str, Any]:
         value.setdefault("page_excerpt", "")
         value.setdefault("content", "")
     return value
-

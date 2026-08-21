@@ -1,0 +1,207 @@
+{
+  "schema_version": "rwkv-retrieval-rst-selection.v1",
+  "requested_limit": 10000,
+  "selected_count": 20,
+  "tasks": [
+    {
+      "task_id": "rrst_bootstrap_current_001",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_current_001",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_product_updates",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_current_release",
+      "bundle_sha256": "0d12cae667f3142c244f0949d6577878220ef207ff86d0bee2e28f884b419ff7"
+    },
+    {
+      "task_id": "rrst_bootstrap_current_002",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_current_002",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_product_updates",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_current_release",
+      "bundle_sha256": "89283d4d2dd3d4c226674c06f6fd6d9e0f7157a24352b8137e1c3b287a233df0"
+    },
+    {
+      "task_id": "rrst_bootstrap_current_003",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_current_003",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_product_updates",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_current_release",
+      "bundle_sha256": "627d1197303d727d999322c519c3be3d11fb26fe4a50354b52ca6b7c2481a008"
+    },
+    {
+      "task_id": "rrst_bootstrap_current_004",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_current_004",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_product_updates",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_current_release",
+      "bundle_sha256": "d394764278cb35a0d742e7078d401b46e7ce7e8187a35c50fc2553de93472a4f"
+    },
+    {
+      "task_id": "rrst_bootstrap_derived_001",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_derived_001",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_event_calendar",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_deterministic_date_derivation",
+      "bundle_sha256": "51921f1bae8ae7f58326c9eb33f808b22e7ae6d42a59b248cf9545f1dcd41071"
+    },
+    {
+      "task_id": "rrst_bootstrap_derived_002",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_derived_002",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_event_calendar",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_deterministic_date_derivation",
+      "bundle_sha256": "34b0c5f889aa7dffcf54919198ca619b810619f4ed0468e859bbad21f6589644"
+    },
+    {
+      "task_id": "rrst_bootstrap_derived_003",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_derived_003",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_event_calendar",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_deterministic_date_derivation",
+      "bundle_sha256": "a8cf0f02463e03585bb0105b2f7364ae7c6b8b14d43f46ba9e00e9a1e031fc1c"
+    },
+    {
+      "task_id": "rrst_bootstrap_derived_004",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_derived_004",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_event_calendar",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_deterministic_date_derivation",
+      "bundle_sha256": "5b00c329f71335b5847dfa9a0c53f91ae8f37bcd0eaf572fc22067191b4eb569"
+    },
+    {
+      "task_id": "rrst_bootstrap_direct_001",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_direct_001",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_technical_documentation",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_direct_page",
+      "bundle_sha256": "79ba218ce4080f570a6500b241fbff28a3ca0e7f5f2b3640488d0e911eff113f"
+    },
+    {
+      "task_id": "rrst_bootstrap_direct_002",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_direct_002",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_technical_documentation",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_direct_page",
+      "bundle_sha256": "ed6d28c5a2ca3f6e46ae185e64cf3b5134c30370cd52e0a196eb8b1d2fd3cbcc"
+    },
+    {
+      "task_id": "rrst_bootstrap_direct_003",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_direct_003",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_technical_documentation",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_direct_page",
+      "bundle_sha256": "e911eefd36d8d007754c3e84f98a7119b52204dbe7c347f176e9b77b666c90f5"
+    },
+    {
+      "task_id": "rrst_bootstrap_direct_004",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_direct_004",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_technical_documentation",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_direct_page",
+      "bundle_sha256": "93b6026cad61f74d9412538871ecdb3364907ad44050ef998b67ce8af24d4b5e"
+    },
+    {
+      "task_id": "rrst_bootstrap_howto_001",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_howto_001",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_desktop_howto",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_source_role_howto",
+      "bundle_sha256": "fd8499036a38a05623665dab1971fed7a83f18b261218d83bc1fd06158e466f7"
+    },
+    {
+      "task_id": "rrst_bootstrap_howto_002",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_howto_002",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_desktop_howto",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_source_role_howto",
+      "bundle_sha256": "befbb8410b976e14b5f99b35fd0e4feea8d12e5cd35d9f34a3a15974818a6e93"
+    },
+    {
+      "task_id": "rrst_bootstrap_howto_003",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_howto_003",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_desktop_howto",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_source_role_howto",
+      "bundle_sha256": "194e6eb09cf4e314065c4cfa8f81cc4762db1cd4a0b7da69099d184f2a24376a"
+    },
+    {
+      "task_id": "rrst_bootstrap_howto_004",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_howto_004",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_desktop_howto",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_source_role_howto",
+      "bundle_sha256": "ee2dbca11844f51dc39ec925f2d48995e2c07ea188f76ec62d523570bcceaf82"
+    },
+    {
+      "task_id": "rrst_bootstrap_temporal_001",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_temporal_001",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_live_service_history",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_temporal_roles",
+      "bundle_sha256": "063c78176f26b12cafe30fe030e473bc4460701a7d3723b116e34733045547f9"
+    },
+    {
+      "task_id": "rrst_bootstrap_temporal_002",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_temporal_002",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_live_service_history",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_temporal_roles",
+      "bundle_sha256": "0a99f2e59d1820ed219db1f39185d299ca7ce5f89fd765cc235b375c15bd05e1"
+    },
+    {
+      "task_id": "rrst_bootstrap_temporal_003",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_temporal_003",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_live_service_history",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_temporal_roles",
+      "bundle_sha256": "2e2f2d3901dd5a38f4a3c7668f6fc3cfe1949ca896f4e290ab483127ed183536"
+    },
+    {
+      "task_id": "rrst_bootstrap_temporal_004",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/bootstrap_v1/tasks/rrst_bootstrap_temporal_004",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_live_service_history",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_temporal_roles",
+      "bundle_sha256": "c5f0a022bd18e3eaf042993dfbf9311f39da6c21514e794d9892ad26e37f3559"
+    }
+  ]
+}

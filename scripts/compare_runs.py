@@ -1,4 +1,4 @@
-"""Compare local RWKV-ECRA vs external rwkv-search on the 54-case numbered set.
+"""Compare local RWKV-Scout vs external rwkv-search on the 54-case numbered set.
 
 Loads the four acceptance runs (local 7.2B / 13.3B, rwkv-search 7.2B / 13.3B),
 aligns them by case id, and reports operational metrics that are comparable

@@ -5,10 +5,30 @@ import unittest
 from unittest.mock import patch
 
 from agent.retrieval_loop import merge_retrieval_results
-from tools.paper_search import search_papers
+from tools.paper_search import _arxiv, search_papers
 
 
 class PaperSearchTests(unittest.TestCase):
+    def test_arxiv_record_keeps_version_and_revision_date(self):
+        atom = """<?xml version="1.0" encoding="UTF-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <entry>
+            <id>https://arxiv.org/abs/2501.00663v2</id>
+            <updated>2025-02-03T09:30:00Z</updated>
+            <published>2024-12-31T12:00:00Z</published>
+            <title>Titans: Learning to Memorize at Test Time</title>
+            <summary>Paper abstract.</summary>
+            <author><name>Researcher</name></author>
+            <link rel="alternate" href="https://arxiv.org/abs/2501.00663v2"/>
+          </entry>
+        </feed>"""
+        with patch("tools.paper_search.fetch_text", return_value=atom):
+            records = _arxiv("Titans", 4)
+
+        self.assertEqual(records[0]["version"], "v2")
+        self.assertEqual(records[0]["published"], "2024-12-31")
+        self.assertEqual(records[0]["updated"], "2025-02-03")
+
     def test_agentic_paper_search_is_discovery_only(self):
         record = {
             "title": "RWKV retrieval",

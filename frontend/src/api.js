@@ -1,4 +1,4 @@
-// RWKV-ECRA/frontend/src/api.js
+// RWKV-Scout/frontend/src/api.js
 
 export async function apiFetch(path, options) {
   const response = await fetch(path, options);

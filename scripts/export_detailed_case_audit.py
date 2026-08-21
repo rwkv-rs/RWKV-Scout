@@ -33,6 +33,9 @@ _PLANNING_EVENTS = {
     "task_replan",
     "retrieval_strategy_selected",
     "research_loop_started",
+    "planner_session_rebuilt",
+    "task_replan_attempt",
+    "task_replan_limit_reached",
 }
 _RETRIEVAL_EVENTS = {
     "model_tool_decision",
@@ -45,6 +48,7 @@ _RETRIEVAL_EVENTS = {
     "page_chunk",
     "page_chunk_candidate",
     "page_candidate_merge",
+    "web_candidate_pool_shadow",
     "retrieval_ledger",
     "retrieval_fork_started",
     "retrieval_fork_completed",
@@ -185,7 +189,7 @@ def _retrieval_queries(events: Iterable[Mapping[str, Any]]) -> list[dict[str, An
                         "phase": event.get("phase"),
                         "query": query,
                         "action": event.get("action") or "",
-                        "task_point_id": event.get("task_point_id") or "",
+                        "task_record_id": event.get("task_record_id") or "",
                     }
                 )
                 pending.setdefault(key_for(query, event.get("action")), []).append(row_index)
@@ -220,9 +224,9 @@ def _retrieval_queries(events: Iterable[Mapping[str, Any]]) -> list[dict[str, An
     return rows
 
 
-def _latest_claim_ledger(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+def _latest_evidence_ledger(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     for event in reversed(list(events)):
-        ledger = event.get("claim_ledger")
+        ledger = event.get("evidence_ledger")
         if isinstance(ledger, Mapping):
             return dict(ledger)
     return {}
@@ -380,7 +384,7 @@ def _manual_review_template() -> dict[str, Any]:
             "retrieval_queries_appropriate": None,
             "selected_pages_relevant": None,
             "selected_chunks_support_claims": None,
-            "claim_ledger_complete_and_correct": None,
+            "evidence_ledger_complete_and_correct": None,
             "final_context_preserves_required_evidence": None,
             "model_output_adds_no_unsupported_facts": None,
             "citations_bind_to_correct_spans": None,
@@ -405,7 +409,7 @@ def build_case_audit(
     groups, timeline = _group_events(events)
     final_event = _last_event(events, "final")
     synthesis = _latest_synthesis(events)
-    claim_ledger = _latest_claim_ledger(events)
+    evidence_ledger = _latest_evidence_ledger(events)
     answer = _final_answer(case, final_event)
     selected_evidence = synthesis.get("selected_evidence") or []
     context_text = synthesis.get("context_text") or ""
@@ -476,7 +480,7 @@ def build_case_audit(
             "post_gate_candidates": post_gate_candidate_metrics,
         },
         "evidence_chain": {
-            "claim_ledger": claim_ledger,
+            "evidence_ledger": evidence_ledger,
             "selected_evidence": selected_evidence,
             "final_context_text": context_text,
             "final_context_stats": synthesis.get("context_stats") or {},
@@ -526,7 +530,7 @@ def build_case_audit(
                 for event in groups["model_io"]
             ),
             "selected_evidence_count": len(selected_evidence),
-            "claim_count": int(claim_ledger.get("claim_count") or 0),
+            "task_record_count": int(evidence_ledger.get("task_record_count") or 0),
         },
         "manual_review": _manual_review_template(),
     }
@@ -644,7 +648,7 @@ def export_audit_bundle(result_paths: Iterable[Path], output_dir: Path) -> dict[
                     "rejected_ungrounded_count"
                 ],
                 "selected_evidence_count": audit["integrity"]["selected_evidence_count"],
-                "claim_count": audit["integrity"]["claim_count"],
+                "task_record_count": audit["integrity"]["task_record_count"],
                 "audit_file": relative_path,
                 "audit_sha256": _file_hash(audit_path),
                 "review_verdict": "unreviewed",

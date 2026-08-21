@@ -1,1 +1,1 @@
-"""Application-layer modules for RWKV-ECRA."""
+"""Application-layer modules for RWKV-Scout."""

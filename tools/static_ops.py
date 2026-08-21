@@ -1,8 +1,12 @@
-# RWKV-ECRA/tools/static_ops.py
+# RWKV-Scout/tools/static_ops.py
 import os
 import json
 from utils.file_reader import read_local_file
-from config import DATA_PIPELINE
+from config import (
+    DATA_PIPELINE,
+    get_model_stage_temperature,
+    model_sampling_parameters,
+)
 from tools.registry import ToolRegistry
 from clients.slm_client import SLMClient
 from prompts.slm_prompts import build_slm_preview_prompt
@@ -166,7 +170,13 @@ def preview_document_content(file_paths: list = None, actual_file_ids: list = No
             user_msg += f"--- 文件ID: {c_fid} | 文件名: {c_fname} ---\n{preview_text}\n\n"
 
         try:
-            resp = llm.chat_completion([{"role": "system", "content": sys_msg}, {"role": "user", "content": user_msg}]).content
+            temperature = get_model_stage_temperature("asset_classification")
+            with model_sampling_parameters(
+                temperature,
+                stage="asset_classification",
+                policy_reason="structured_local_asset_classification",
+            ):
+                resp = llm.chat_completion([{"role": "system", "content": sys_msg}, {"role": "user", "content": user_msg}]).content
             match = re.search(r'\{.*\}', resp, re.DOTALL)
             return json.loads(match.group(0))
         except Exception:
@@ -212,7 +222,13 @@ def preview_document_content(file_paths: list = None, actual_file_ids: list = No
         merge_user_msg = "待合并的初步类别列表：\n" + json.dumps(list(unique_pairs), ensure_ascii=False)
 
         try:
-            merge_resp = llm.chat_completion([{"role": "system", "content": merge_sys_msg}, {"role": "user", "content": merge_user_msg}]).content
+            temperature = get_model_stage_temperature("asset_classification")
+            with model_sampling_parameters(
+                temperature,
+                stage="asset_classification",
+                policy_reason="structured_asset_taxonomy_merge",
+            ):
+                merge_resp = llm.chat_completion([{"role": "system", "content": merge_sys_msg}, {"role": "user", "content": merge_user_msg}]).content
             match = re.search(r'\{.*\}', merge_resp, re.DOTALL)
             merge_mapping = json.loads(match.group(0))
 

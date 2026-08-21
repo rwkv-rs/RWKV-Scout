@@ -1,0 +1,1 @@
+Cinder Mail launched on **2032-08-26** [S1]. Adding **1 calendar year** gives **2033-08-26**, its first calendar anniversary. This is a deterministic derivation; the source does not announce an anniversary event.

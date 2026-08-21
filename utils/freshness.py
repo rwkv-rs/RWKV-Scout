@@ -15,10 +15,18 @@ from typing import Any
 _ISO_DATE = re.compile(r"\b((?:19|20)\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b")
 _ZH_DATE = re.compile(r"((?:19|20)\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
 _EN_DATE = re.compile(
-    r"\b(?:on\s+)?(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+((?:19|20)\d{2})\b",
+    r"\b(?:on\s+)?(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
+    r"Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|"
+    r"Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2}),?\s+((?:19|20)\d{2})\b",
     re.IGNORECASE,
 )
-_MONTHS = {name: index for index, name in enumerate(("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"), start=1)}
+_MONTHS = {
+    name: index
+    for index, name in enumerate(
+        ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"),
+        start=1,
+    )
+}
 
 
 def _date_value(year: str, month: str, day: str) -> str:
@@ -40,7 +48,7 @@ def extract_explicit_date(value: Any) -> str:
         return _date_value(match.group(1), match.group(2), match.group(3))
     match = _EN_DATE.search(text)
     if match:
-        return _date_value(match.group(3), str(_MONTHS[match.group(1).capitalize()]), match.group(2))
+        return _date_value(match.group(3), str(_MONTHS[match.group(1)[:3].casefold()]), match.group(2))
     return ""
 
 
@@ -74,8 +82,20 @@ def annotate_freshness(row: dict[str, Any], policy: dict[str, Any]) -> dict[str,
         source_date = extract_explicit_date(item.get(key))
         if source_date:
             break
+    source_date_origin = "declared_metadata" if source_date else ""
+    # Search snippets can quote an arbitrary sentence from the body. Treating
+    # the first date in that sentence as the date of the whole source caused a
+    # product announcement, CVE row, or footer date to be presented to RWKV as
+    # publication metadata. URL/title dates identify the source record itself;
+    # body dates remain inside the exact evidence chunks for RWKV to compare.
     if not source_date:
-        source_date = extract_explicit_date(item.get("snippet"))
+        source_date = extract_explicit_date(item.get("url"))
+        if source_date:
+            source_date_origin = "url_record_identity"
+    if not source_date:
+        source_date = extract_explicit_date(item.get("title"))
+        if source_date:
+            source_date_origin = "title_record_identity"
     if as_of and source_date:
         state = "within_cutoff" if source_date <= as_of else "after_cutoff"
     elif as_of:
@@ -86,6 +106,7 @@ def annotate_freshness(row: dict[str, Any], policy: dict[str, Any]) -> dict[str,
         "policy": "explicit_cutoff" if as_of else "retrieval_time_only",
         "as_of": as_of or None,
         "source_date": source_date or None,
+        "source_date_origin": source_date_origin or None,
         "state": state,
     }
     return item

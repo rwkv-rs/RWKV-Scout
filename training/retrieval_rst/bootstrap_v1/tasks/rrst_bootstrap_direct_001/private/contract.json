@@ -1,0 +1,54 @@
+{
+  "schema_version": "rwkv-retrieval-verifier-contract.v1",
+  "claims": [
+    {
+      "claim_id": "C1",
+      "point_id": "P1",
+      "field": "first_setting_meaning",
+      "expected": "every service in the workspace",
+      "evidence_refs": [
+        "S1"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S1",
+          "text": "selector: {} means every service in the workspace"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    },
+    {
+      "claim_id": "C2",
+      "point_id": "P1",
+      "field": "second_setting_meaning",
+      "expected": "filtering in both directions",
+      "evidence_refs": [
+        "S1"
+      ],
+      "quotes": [
+        {
+          "evidence_ref": "S1",
+          "text": "modes: [Receive, Send] means filtering in both directions"
+        }
+      ],
+      "required": true,
+      "may_be_public": false
+    }
+  ],
+  "forbidden_values": [
+    "according to an external source"
+  ],
+  "behavior": {
+    "max_tool_calls": 1,
+    "direct_urls_only": true,
+    "allowed_urls": [
+      "https://docs.quartz-mesh.invalid/policy/empty-selector"
+    ]
+  },
+  "reward_dimensions": [
+    "direct_url_scope",
+    "noise_rejection",
+    "field_grounding"
+  ]
+}

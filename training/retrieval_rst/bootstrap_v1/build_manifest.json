@@ -1,0 +1,31 @@
+{
+  "schema_version": "rwkv-retrieval-rst-build.v1",
+  "pool_role": "verified_bootstrap",
+  "task_count": 20,
+  "tasks": [
+    "tasks/rrst_bootstrap_current_001",
+    "tasks/rrst_bootstrap_current_002",
+    "tasks/rrst_bootstrap_current_003",
+    "tasks/rrst_bootstrap_current_004",
+    "tasks/rrst_bootstrap_temporal_001",
+    "tasks/rrst_bootstrap_temporal_002",
+    "tasks/rrst_bootstrap_temporal_003",
+    "tasks/rrst_bootstrap_temporal_004",
+    "tasks/rrst_bootstrap_direct_001",
+    "tasks/rrst_bootstrap_direct_002",
+    "tasks/rrst_bootstrap_direct_003",
+    "tasks/rrst_bootstrap_direct_004",
+    "tasks/rrst_bootstrap_howto_001",
+    "tasks/rrst_bootstrap_howto_002",
+    "tasks/rrst_bootstrap_howto_003",
+    "tasks/rrst_bootstrap_howto_004",
+    "tasks/rrst_bootstrap_derived_001",
+    "tasks/rrst_bootstrap_derived_002",
+    "tasks/rrst_bootstrap_derived_003",
+    "tasks/rrst_bootstrap_derived_004"
+  ],
+  "fictional_data_only": true,
+  "benchmark_answers_used": false,
+  "model_service_used": false,
+  "paper_method": "Recursive Synthesis for Long-Horizon Terminal Tasks, arXiv:2608.05466v1"
+}

@@ -1,0 +1,313 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "records": [
+          {
+            "record_id": "P1",
+            "question": "Find first public reveal date.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          },
+          {
+            "record_id": "P2",
+            "question": "Find first anniversary event date.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          },
+          {
+            "record_id": "P3",
+            "question": "Find current live version and theme.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "Project Lumen official reveal launch anniversary"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S1",
+            "url": "https://news.project-lumen.invalid/first-reveal",
+            "title": "Project Lumen first reveal",
+            "authority": "official",
+            "published_at": "2032-02-03",
+            "retrieved_at": "2035-09-20T12:00:00Z",
+            "content": "Project Lumen was first publicly revealed on 2032-02-03. This is an announcement, not the live launch."
+          },
+          {
+            "source_id": "S2",
+            "url": "https://news.project-lumen.invalid/global-launch",
+            "title": "Project Lumen global launch",
+            "authority": "official",
+            "published_at": "2033-06-12",
+            "retrieved_at": "2035-09-20T12:00:00Z",
+            "content": "Project Lumen entered public live service on 2033-06-12 across all supported platforms."
+          },
+          {
+            "source_id": "S3",
+            "url": "https://events.project-lumen.invalid/first-anniversary",
+            "title": "First Anniversary Week",
+            "authority": "official",
+            "published_at": "2034-05-30",
+            "retrieved_at": "2035-09-20T12:00:00Z",
+            "content": "The first anniversary celebration begins on 2034-06-12 and runs for seven days."
+          },
+          {
+            "source_id": "S4",
+            "url": "https://community.lumen-watch.invalid/latest-version",
+            "title": "Lumen Watch version list",
+            "authority": "community",
+            "published_at": "2035-03-02",
+            "retrieved_at": "2035-09-20T12:00:00Z",
+            "content": "Community archive last checked in March 2035: version 1.8, Glass Harbor, appears current."
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "site:updates.project-lumen.invalid current live update"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S5",
+            "url": "https://updates.project-lumen.invalid/v2-4",
+            "title": "Project Lumen 2.4: Orbit After Rain",
+            "authority": "official",
+            "published_at": "2035-09-18",
+            "retrieved_at": "2035-09-20T12:00:00Z",
+            "content": "Official live update. Project Lumen version 2.4 launched on 2035-09-18. The current theme is Orbit After Rain."
+          }
+        ]
+      }
+    },
+    {
+      "type": "oracle_evidence_assessment",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_reveal_date",
+                "value": "2032-02-03",
+                "evidence_ref": "S1",
+                "quote": "first publicly revealed on 2032-02-03"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P2": {
+            "status": "supported",
+            "evidence_refs": [
+              "S3"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_anniversary_date",
+                "value": "2034-06-12",
+                "evidence_ref": "S3",
+                "quote": "first anniversary celebration begins on 2034-06-12"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P3": {
+            "status": "supported",
+            "evidence_refs": [
+              "S5"
+            ],
+            "supported_facts": [
+              {
+                "field": "current_version",
+                "value": "2.4",
+                "evidence_ref": "S5",
+                "quote": "version 2.4 launched on 2035-09-18"
+              },
+              {
+                "field": "current_theme",
+                "value": "Orbit After Rain",
+                "evidence_ref": "S5",
+                "quote": "The current theme is Orbit After Rain"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "- First public reveal: **2032-02-03** [S1].\n- First anniversary event: **2034-06-12** [S3]. This is the event date, not the original launch date.\n- Current live release: **version 2.4**, themed **Orbit After Rain** [S5].\n\nThe community page is stale and still lists version 1.8, so it does not determine the current state [S4]."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "oracle_evidence_assessment",
+      "failure_class": "supported_without_answer_ready_facts",
+      "prompt": {
+        "task_points": [
+          "P1",
+          "P2",
+          "P3"
+        ],
+        "evidence_refs": [
+          "S1",
+          "S3",
+          "S5"
+        ]
+      },
+      "rejected": {
+        "decision": "finish",
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ]
+          }
+        }
+      },
+      "chosen": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_reveal_date",
+                "value": "2032-02-03",
+                "evidence_ref": "S1",
+                "quote": "first publicly revealed on 2032-02-03"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P2": {
+            "status": "supported",
+            "evidence_refs": [
+              "S3"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_anniversary_date",
+                "value": "2034-06-12",
+                "evidence_ref": "S3",
+                "quote": "first anniversary celebration begins on 2034-06-12"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P3": {
+            "status": "supported",
+            "evidence_refs": [
+              "S5"
+            ],
+            "supported_facts": [
+              {
+                "field": "current_version",
+                "value": "2.4",
+                "evidence_ref": "S5",
+                "quote": "version 2.4 launched on 2035-09-18"
+              },
+              {
+                "field": "current_theme",
+                "value": "Orbit After Rain",
+                "evidence_ref": "S5",
+                "quote": "The current theme is Orbit After Rain"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "stage": "final",
+      "failure_class": "internal_date_conflict",
+      "prompt": {
+        "supported_facts": [
+          {
+            "field": "first_reveal_date",
+            "value": "2032-02-03",
+            "evidence_ref": "S1",
+            "quote": "first publicly revealed on 2032-02-03"
+          },
+          {
+            "field": "first_anniversary_date",
+            "value": "2034-06-12",
+            "evidence_ref": "S3",
+            "quote": "first anniversary celebration begins on 2034-06-12"
+          },
+          {
+            "field": "current_version",
+            "value": "2.4",
+            "evidence_ref": "S5",
+            "quote": "version 2.4 launched on 2035-09-18"
+          },
+          {
+            "field": "current_theme",
+            "value": "Orbit After Rain",
+            "evidence_ref": "S5",
+            "quote": "The current theme is Orbit After Rain"
+          }
+        ]
+      },
+      "rejected": {
+        "content": "The first anniversary was 2033-06-12, therefore it took place on 2034-06-12."
+      },
+      "chosen": {
+        "content": "- First public reveal: **2032-02-03** [S1].\n- First anniversary event: **2034-06-12** [S3]. This is the event date, not the original launch date.\n- Current live release: **version 2.4**, themed **Orbit After Rain** [S5].\n\nThe community page is stale and still lists version 1.8, so it does not determine the current state [S4]."
+      }
+    }
+  ]
+}

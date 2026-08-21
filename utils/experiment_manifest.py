@@ -438,6 +438,9 @@ def reconstruct_run(task_id: str, output_directory: str | os.PathLike[str] | Non
                 "duration_ms": event.get("duration_ms"),
                 "prompt_tokens": event.get("prompt_tokens", 0),
                 "completion_tokens": event.get("completion_tokens", 0),
+                "request_max_tokens": event.get("request_max_tokens"),
+                "finish_reason": event.get("finish_reason", ""),
+                "stop": event.get("stop") or [],
             })
         if event_type in {"synthesis", "final"}:
             if event.get("content"):

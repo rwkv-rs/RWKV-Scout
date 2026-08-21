@@ -1,0 +1,1 @@
+As of the snapshot date, identify Project Lumen's current live version, its release date, and its theme. Use the frozen update sources, distinguish current from archived information, and cite the supporting source.

@@ -1,0 +1,1 @@
+Lighthouse Board launched on **2033-12-03** [S1]. Adding **3 calendar years** gives **2036-12-03**, its third calendar anniversary. This is a deterministic derivation; the source does not announce an anniversary event.

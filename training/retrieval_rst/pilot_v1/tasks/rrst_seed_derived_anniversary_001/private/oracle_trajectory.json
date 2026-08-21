@@ -1,0 +1,92 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "records": [
+          {
+            "record_id": "P1",
+            "question": "Source launch date and derive one-year anniversary.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "direct_page",
+      "args": {
+        "url": "https://docs.orbit-notes.invalid/launch-record"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "direct_page",
+      "content": {
+        "source_id": "S1",
+        "url": "https://docs.orbit-notes.invalid/launch-record",
+        "title": "Orbit Notes launch record",
+        "authority": "official",
+        "published_at": "2030-11-07",
+        "retrieved_at": "2035-09-20T12:00:00Z",
+        "content": "Orbit Notes public service launched on 2030-11-07. No anniversary campaign is documented on this page."
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "date_diff",
+      "args": {
+        "operation": "add_years",
+        "date": "2030-11-07",
+        "years": 1
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "date_diff",
+      "content": {
+        "result": "2031-11-07"
+      }
+    },
+    {
+      "type": "oracle_evidence_assessment",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ],
+            "supported_facts": [
+              {
+                "field": "first_anniversary_calendar_date",
+                "value": "2031-11-07",
+                "evidence_ref": "S1",
+                "quote": "public service launched on 2030-11-07"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "Orbit Notes launched on **2030-11-07** [S1]. Adding one calendar year gives **2031-11-07** as its first calendar anniversary. This is a deterministic date derivation, not evidence that an anniversary event was announced."
+    }
+  ],
+  "rejected_attempts": []
+}

@@ -26,7 +26,7 @@ _API_ROOT = "https://api.github.com"
 _API_HEADERS_BASE = {
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
-    "User-Agent": "RWKV-ECRA/0.1 (GitHub REST retrieval)",
+    "User-Agent": "RWKV-Scout/0.1 (GitHub REST retrieval)",
 }
 
 
@@ -229,6 +229,26 @@ def _repository_text(payload: dict[str, Any], max_chars: int) -> str:
     return "\n".join(line for line in lines if line.split(": ", 1)[-1].strip())[:max_chars]
 
 
+def _release_text(payload: dict[str, Any], max_chars: int) -> str:
+    """Render one GitHub release API record as compact source evidence."""
+
+    author = payload.get("author") if isinstance(payload.get("author"), dict) else {}
+    lines = [
+        f"Release: {payload.get('name') or payload.get('tag_name') or ''}",
+        f"Tag: {payload.get('tag_name', '')}",
+        f"Published: {payload.get('published_at', '')}",
+        f"Created: {payload.get('created_at', '')}",
+        f"Target commitish: {payload.get('target_commitish', '')}",
+        f"Draft: {payload.get('draft', '')}",
+        f"Prerelease: {payload.get('prerelease', '')}",
+        f"Author: {author.get('login', '')}",
+        f"URL: {payload.get('html_url', '')}",
+        "Release notes:",
+        str(payload.get("body") or "").strip(),
+    ]
+    return "\n".join(str(line) for line in lines if str(line).strip())[:max_chars]
+
+
 def _content_text(payload: Any, max_chars: int) -> tuple[str, str, str]:
     if isinstance(payload, list):
         lines = []
@@ -238,6 +258,14 @@ def _content_text(payload: Any, max_chars: int) -> tuple[str, str, str]:
         return "\n".join(lines)[:max_chars], "directory", ""
     if not isinstance(payload, dict):
         return json.dumps(payload, ensure_ascii=False)[:max_chars], "json", ""
+    if payload.get("tag_name") is not None and any(
+        key in payload for key in ("published_at", "prerelease", "draft")
+    ):
+        return (
+            _release_text(payload, max_chars),
+            "release",
+            str(payload.get("html_url") or ""),
+        )
     encoded = str(payload.get("content") or "").replace("\n", "")
     if encoded and str(payload.get("encoding") or "").casefold() == "base64":
         try:
@@ -290,6 +318,9 @@ def fetch_github_rest(
             default_ref = str(ref or "main")
             human_url = f"https://github.com/{owner}/{repo}/blob/{default_ref}/{selected_path}"
         title = f"{owner}/{repo}" + (f"/{selected_path}" if selected_path else "")
+        if content_type == "release" and isinstance(payload, dict):
+            release_label = str(payload.get("name") or payload.get("tag_name") or "latest release")
+            title = f"{owner}/{repo} — {release_label}"
         result = {
             "status": "ok",
             "real_network": True,
@@ -305,7 +336,23 @@ def fetch_github_rest(
                     "page_excerpt": page_text,
                     "content": page_text,
                     "source": "GitHub REST API",
+                    "full_name": f"{owner}/{repo}",
+                    "tag_name": (
+                        str(payload.get("tag_name") or "")
+                        if content_type == "release" and isinstance(payload, dict)
+                        else ""
+                    ),
                     "content_type": content_type,
+                    "published": (
+                        str(payload.get("published_at") or "")
+                        if content_type == "release" and isinstance(payload, dict)
+                        else ""
+                    ),
+                    "updated": (
+                        str(payload.get("created_at") or "")
+                        if content_type == "release" and isinstance(payload, dict)
+                        else ""
+                    ),
                     "untrusted_content": True,
                     "evidence_origin": "structured_api_record",
                     "evidence_kind": "structured_record",

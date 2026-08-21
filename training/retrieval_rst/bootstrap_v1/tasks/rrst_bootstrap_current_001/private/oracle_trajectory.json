@@ -1,0 +1,118 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "records": [
+          {
+            "record_id": "P1",
+            "question": "Bind the current release fields to the newest official source.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "Aster Vale current official release"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S1",
+            "url": "https://archive.aster-vale.invalid/2.7",
+            "title": "Aster Vale 2.7: Amber Relay",
+            "authority": "official",
+            "published_at": "2039-10-01",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Official archive: Aster Vale version 2.7, Amber Relay, launched on 2039-10-01."
+          },
+          {
+            "source_id": "S2",
+            "url": "https://updates.aster-vale.invalid/3.2",
+            "title": "Aster Vale 3.2: Cobalt Tides",
+            "authority": "official",
+            "published_at": "2040-02-14",
+            "retrieved_at": "2045-01-15T12:00:00Z",
+            "content": "Official live update: Aster Vale version 3.2 launched on 2040-02-14. The release title and theme are Cobalt Tides."
+          }
+        ]
+      }
+    },
+    {
+      "type": "oracle_evidence_assessment",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S2"
+            ],
+            "supported_facts": [
+              {
+                "field": "current_version",
+                "value": "3.2",
+                "evidence_ref": "S2",
+                "quote": "version 3.2 launched on 2040-02-14"
+              },
+              {
+                "field": "current_release_date",
+                "value": "2040-02-14",
+                "evidence_ref": "S2",
+                "quote": "version 3.2 launched on 2040-02-14"
+              },
+              {
+                "field": "current_theme",
+                "value": "Cobalt Tides",
+                "evidence_ref": "S2",
+                "quote": "release title and theme are Cobalt Tides"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "Aster Vale's current live release is **version 3.2**, launched on **2040-02-14**, with the theme **Cobalt Tides** [S2]. Version 2.7 is an older archived release [S1]."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "final",
+      "failure_class": "stale_source_selected_as_current",
+      "prompt": {
+        "source_order": [
+          "S1",
+          "S2"
+        ]
+      },
+      "rejected": {
+        "content": "Aster Vale is currently on version 2.7, Amber Relay."
+      },
+      "chosen": {
+        "content": "Aster Vale's current live release is **version 3.2**, launched on **2040-02-14**, with the theme **Cobalt Tides** [S2]. Version 2.7 is an older archived release [S1]."
+      }
+    }
+  ]
+}

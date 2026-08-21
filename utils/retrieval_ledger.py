@@ -1,9 +1,10 @@
 """Shared, model-visible retrieval progress for the retrieval episode.
 
 The ledger records what the retrieval system has attempted and what changed.
-It is shared by the active global decision loop.  It does not choose a
-replacement query, but it gives the controller enough state to block repeated
-exact or equivalent web-search queries before they reach the network.
+It is shared by the active global decision loop. It does not choose a
+replacement query. The runtime blocks only an exact repeated action+arguments
+request within the same task point. Query similarity remains an offline
+telemetry helper and never controls execution.
 """
 
 from __future__ import annotations
@@ -11,12 +12,14 @@ from __future__ import annotations
 import re
 import threading
 import json
+import hashlib
 from collections import Counter
 from copy import deepcopy
 from difflib import SequenceMatcher
 from typing import Any, Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from agent.runtime_contracts import RETRIEVAL_EVENT_LEDGER_CONTRACT
 
 _QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]")
 _CHINESE_DIGITS = str.maketrans(
@@ -46,6 +49,14 @@ def query_similarity(left: Any, right: Any) -> float:
     if len(left_tokens) < 5 or len(right_tokens) < 5:
         return 0.0
     union = left_tokens | right_tokens
+    shared = left_tokens & right_tokens
+    containment = len(shared) / min(len(left_tokens), len(right_tokens))
+    # A shared entity alone does not make two routes equivalent. A current
+    # theme, historical release date and support deadline may all mention the
+    # same product while targeting different requested fields. Require near
+    # containment before applying the 0.60 route threshold.
+    if containment < 0.80:
+        return 0.0
     jaccard = len(left_tokens & right_tokens) / len(union) if union else 0.0
     ordered = SequenceMatcher(
         None,
@@ -90,6 +101,111 @@ def canonical_url(value: Any) -> str:
     )
 
 
+def request_key(action: Any, arguments: Mapping[str, Any] | None) -> str:
+    """Return the canonical, lossless identity of one executable request."""
+
+    payload = arguments if isinstance(arguments, Mapping) else {}
+    return json.dumps(
+        {
+            "action": str(action or "").strip(),
+            "arguments": payload,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def route_id(
+    action: Any,
+    arguments: Mapping[str, Any] | None,
+    *,
+    task_record_id: str = "",
+) -> str:
+    """Return a compact identity for one request within one task record."""
+
+    identity = json.dumps(
+        {
+            "request_key": request_key(action, arguments),
+            "task_record_id": str(task_record_id or ""),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+
+
+def result_error_observation(result: Mapping[str, Any] | None) -> dict[str, str]:
+    """Project only the failure semantics already returned by a tool.
+
+    This preserves information needed by RWKV on a later replan.  It does not
+    classify the failure or prescribe a replacement route.
+    """
+
+    payload = result if isinstance(result, Mapping) else {}
+    error_class = str(
+        payload.get("error_class")
+        or payload.get("error_type")
+        or payload.get("code")
+        or ""
+    ).strip()
+    error_message = str(payload.get("message") or payload.get("error") or "").strip()
+    provider_errors = payload.get("provider_errors") or []
+    if isinstance(provider_errors, Mapping):
+        provider_errors = [provider_errors]
+    if isinstance(provider_errors, list) and provider_errors:
+        first = provider_errors[0]
+        if isinstance(first, Mapping):
+            error_class = error_class or str(
+                first.get("error_class")
+                or first.get("error_type")
+                or first.get("code")
+                or ""
+            ).strip()
+            error_message = error_message or str(
+                first.get("message") or first.get("error") or ""
+            ).strip()
+        else:
+            error_message = error_message or str(first).strip()
+    return {
+        "error_class": error_class[:160],
+        "error_message": " ".join(error_message.split())[:600],
+    }
+
+
+def bounded_request_arguments(
+    arguments: Mapping[str, Any] | None,
+    *,
+    max_items: int = 16,
+    max_text: int = 500,
+    max_depth: int = 3,
+) -> dict[str, Any]:
+    """Project model-authored arguments without changing request identity."""
+
+    def compact(value: Any, depth: int) -> Any:
+        if isinstance(value, Mapping):
+            if depth >= max_depth:
+                return str(dict(value))[:max_text]
+            return {
+                str(key)[:120]: compact(item, depth + 1)
+                for key, item in list(value.items())[:max_items]
+            }
+        if isinstance(value, (list, tuple)):
+            if depth >= max_depth:
+                return str(list(value))[:max_text]
+            return [compact(item, depth + 1) for item in list(value)[:max_items]]
+        if isinstance(value, str):
+            return value[:max_text]
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        return str(value)[:max_text]
+
+    compacted = compact(arguments if isinstance(arguments, Mapping) else {}, 0)
+    return compacted if isinstance(compacted, dict) else {}
+
+
 class RetrievalLedger:
     """Track shared retrieval progress and optional legacy branch views.
 
@@ -97,8 +213,6 @@ class RetrievalLedger:
     The stored data is intentionally compact: full pages and chunk text remain
     in the existing task events and are not duplicated in every model prompt.
     """
-
-    VERSION = "retrieval_ledger.v1"
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -124,33 +238,81 @@ class RetrievalLedger:
     def request_key(action: Any, arguments: Mapping[str, Any] | None) -> str:
         """Build a stable identity for one model-selected tool request."""
 
-        payload = arguments if isinstance(arguments, Mapping) else {}
-        return json.dumps(
-            {
-                "action": str(action or "").strip(),
-                "arguments": payload,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
+        return request_key(action, arguments)
 
-    def request_status(self, action: Any, arguments: Mapping[str, Any] | None) -> dict[str, Any] | None:
-        """Return the shared status for an exact request, if it was attempted."""
+    @staticmethod
+    def route_id(
+        action: Any,
+        arguments: Mapping[str, Any] | None,
+        *,
+        task_record_id: str = "",
+    ) -> str:
+        return route_id(action, arguments, task_record_id=task_record_id)
+
+    def request_status(
+        self,
+        action: Any,
+        arguments: Mapping[str, Any] | None,
+        *,
+        task_record_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Return an exact request status within the requested task point."""
 
         key = self.request_key(action, arguments)
+        scope = str(task_record_id or "").strip()
         with self._lock:
-            return deepcopy(self._requests.get(key))
+            value = self._requests.get(key)
+            if not value:
+                return None
+            request_scopes = set(
+                str(item or "").strip()
+                for item in (
+                    value.get("request_scopes")
+                    or value.get("task_record_ids")
+                    or []
+                )
+            )
+            # The empty scope is a whole-task extraction route, not a wildcard
+            # for every task point that has previously executed this request.
+            if scope not in request_scopes:
+                return None
+            scoped = (value.get("scope_statuses") or {}).get(scope)
+            if not isinstance(scoped, Mapping):
+                return deepcopy(value)
+            return {
+                **deepcopy(value),
+                **deepcopy(dict(scoped)),
+                "task_record_id": scope,
+            }
 
-    def query_status(self, query: Any) -> dict[str, Any]:
-        """Return whether an exact or equivalent web query already ran."""
+    def query_status(
+        self,
+        query: Any,
+        *,
+        task_record_id: str = "",
+        threshold: float = 0.88,
+        action: str = "",
+    ) -> dict[str, Any]:
+        """Describe exact/similar history as route telemetry.
+
+        This method never decides whether a request may execute.  ``action``
+        optionally keeps the observation within one tool boundary.
+        """
 
         query_key = normalize_query(query)
+        similarity_threshold = max(0.0, min(float(threshold), 1.0))
         with self._lock:
-            exact_matches = [
+            candidates = [
                 item
                 for item in self._searches
+                if (
+                    (not task_record_id or str(item.get("task_record_id") or "") == task_record_id)
+                    and (not action or str(item.get("action") or "") == str(action))
+                )
+            ]
+            exact_matches = [
+                item
+                for item in candidates
                 if query_key and item.get("query_key") == query_key
             ]
             if exact_matches:
@@ -161,16 +323,18 @@ class RetrievalLedger:
                     "attempted": True,
                     "count": len(exact_matches),
                     "match_type": "exact",
+                    "exact_match": True,
                     "matched_query": last.get("query", ""),
                     "similarity": 1.0,
+                    "threshold": similarity_threshold,
                     "last": last,
                     "blocked_count": int(self._blocked_duplicates.get(query_key, 0)),
                 }
 
             best: tuple[float, dict[str, Any]] | None = None
-            for item in self._searches:
+            for item in candidates:
                 score = query_similarity(query, item.get("query", ""))
-                if score >= 0.88 and (best is None or score > best[0]):
+                if score >= similarity_threshold and (best is None or score > best[0]):
                     best = (score, item)
             if best:
                 score, matched = best
@@ -180,8 +344,10 @@ class RetrievalLedger:
                     "attempted": True,
                     "count": 1,
                     "match_type": "equivalent",
+                    "exact_match": False,
                     "matched_query": matched.get("query", ""),
                     "similarity": round(score, 4),
+                    "threshold": similarity_threshold,
                     "last": deepcopy(matched),
                     "blocked_count": int(self._blocked_duplicates.get(query_key, 0)),
                 }
@@ -191,8 +357,10 @@ class RetrievalLedger:
                 "attempted": False,
                 "count": 0,
                 "match_type": "none",
+                "exact_match": False,
                 "matched_query": "",
                 "similarity": 0.0,
+                "threshold": similarity_threshold,
                 "last": None,
                 "blocked_count": int(self._blocked_duplicates.get(query_key, 0)),
             }
@@ -202,7 +370,7 @@ class RetrievalLedger:
         query: Any,
         *,
         step: int = 0,
-        task_point_id: str = "",
+        task_record_id: str = "",
         branch_id: str = "",
     ) -> dict[str, Any]:
         """Record a blocked duplicate without pretending a search ran."""
@@ -217,7 +385,7 @@ class RetrievalLedger:
                 "query_key": query_key,
                 "blocked_count": int(self._blocked_duplicates.get(query_key, 0)),
                 "step": step,
-                "task_point_id": task_point_id,
+                "task_record_id": task_record_id,
                 "branch_id": branch_id,
             }
 
@@ -228,7 +396,7 @@ class RetrievalLedger:
         result: Mapping[str, Any] | None,
         *,
         step: int = 0,
-        task_point_id: str = "",
+        task_record_id: str = "",
     ) -> dict[str, Any]:
         """Record one exact request and keep its compact latest status."""
 
@@ -236,6 +404,8 @@ class RetrievalLedger:
         payload = result if isinstance(result, Mapping) else {}
         status = str(payload.get("status") or "ok").casefold()
         failed = status in {"error", "failed", "unavailable", "unauthorized"}
+        error_observation = result_error_observation(payload)
+        scope = str(task_record_id or "").strip()
         with self._lock:
             previous = self._requests.get(key) or {
                 "request_key": key,
@@ -243,19 +413,42 @@ class RetrievalLedger:
                 "arguments": deepcopy(dict(arguments or {})),
                 "attempts": 0,
                 "failed_attempts": 0,
+                "task_record_ids": [],
+                "request_scopes": [],
+                "scope_statuses": {},
             }
+            previous.setdefault("request_scopes", list(previous.get("task_record_ids") or []))
+            previous.setdefault("scope_statuses", {})
             previous["attempts"] = int(previous.get("attempts") or 0) + 1
             if failed:
                 previous["failed_attempts"] = int(previous.get("failed_attempts") or 0) + 1
             previous["last_status"] = status
-            previous["last_error"] = str(
-                payload.get("message")
-                or payload.get("error")
-                or (payload.get("provider_errors") or [""])[0]
-            )[:600]
+            previous["last_error_class"] = error_observation["error_class"]
+            previous["last_error"] = error_observation["error_message"]
             previous["last_step"] = step
-            previous["task_point_id"] = task_point_id
+            previous["task_record_id"] = scope
+            if scope and scope not in previous["task_record_ids"]:
+                previous["task_record_ids"].append(scope)
+            if scope not in previous["request_scopes"]:
+                previous["request_scopes"].append(scope)
             previous["failed"] = failed
+            scoped = previous["scope_statuses"].get(scope) or {
+                "attempts": 0,
+                "failed_attempts": 0,
+            }
+            scoped["attempts"] = int(scoped.get("attempts") or 0) + 1
+            if failed:
+                scoped["failed_attempts"] = int(scoped.get("failed_attempts") or 0) + 1
+            scoped.update(
+                {
+                    "last_status": status,
+                    "last_error_class": error_observation["error_class"],
+                    "last_error": error_observation["error_message"],
+                    "last_step": step,
+                    "failed": failed,
+                }
+            )
+            previous["scope_statuses"][scope] = scoped
             self._requests[key] = previous
             return deepcopy(previous)
 
@@ -311,15 +504,19 @@ class RetrievalLedger:
         *,
         step: int = 0,
         branch_id: str = "",
-        task_point_id: str = "",
+        task_record_id: str = "",
         action: str = "",
+        arguments: Mapping[str, Any] | None = None,
         phase: str = "",
     ) -> dict[str, Any]:
         """Record one retrieval result and return its new-information delta."""
 
         payload = result if isinstance(result, Mapping) else {}
+        error_observation = result_error_observation(payload)
         raw_query = str(query or "").strip()
         query_key = normalize_query(raw_query)
+        route_arguments = dict(arguments or {})
+        route_operation = str(route_arguments.get("operation") or "").strip()
         previous_count = self._query_counts[query_key] if query_key else 0
         self._query_counts[query_key] += 1 if query_key else 0
         urls = self._result_urls(payload)
@@ -339,8 +536,10 @@ class RetrievalLedger:
         entry = {
             "step": step,
             "branch_id": branch_id,
-            "task_point_id": task_point_id,
+            "task_record_id": task_record_id,
             "action": action,
+            "operation": route_operation,
+            "arguments": route_arguments,
             "phase": phase,
             "query": raw_query,
             "query_key": query_key,
@@ -351,6 +550,8 @@ class RetrievalLedger:
             "new_url_count": len(new_urls),
             "evidence_count": evidence_count,
             "status": str(payload.get("status") or "ok"),
+            "error_class": error_observation["error_class"],
+            "error_message": error_observation["error_message"],
             "evidence_ready": bool(payload.get("evidence_ready")),
         }
         self._searches.append(entry)
@@ -362,7 +563,7 @@ class RetrievalLedger:
         self,
         *,
         branch_id: str = "",
-        task_point_id: str = "",
+        task_record_id: str = "",
         limit: int = 8,
     ) -> dict[str, Any]:
         """Return one consistent snapshot for a concurrent branch decision."""
@@ -370,7 +571,7 @@ class RetrievalLedger:
         with self._lock:
             return self._observation_unlocked(
                 branch_id=branch_id,
-                task_point_id=task_point_id,
+                task_record_id=task_record_id,
                 limit=limit,
             )
 
@@ -378,7 +579,7 @@ class RetrievalLedger:
         self,
         *,
         branch_id: str = "",
-        task_point_id: str = "",
+        task_record_id: str = "",
         limit: int = 8,
     ) -> dict[str, Any]:
         """Return a compact shared+branch view for the next RWKV decision."""
@@ -398,9 +599,9 @@ class RetrievalLedger:
             for item in recent
         ]
         return {
-            "schema_version": self.VERSION,
+            "contract": RETRIEVAL_EVENT_LEDGER_CONTRACT,
             "branch_id": branch_id,
-            "task_point_id": task_point_id,
+            "task_record_id": task_record_id,
             "total_searches": len(self._searches),
             "unique_queries": len(self._query_counts),
             "exact_repeat_count": sum(max(0, count - 1) for count in self._query_counts.values()),
@@ -413,6 +614,7 @@ class RetrievalLedger:
                     "arguments": item.get("arguments", {}),
                     "failed_attempts": item.get("failed_attempts", 0),
                     "last_step": item.get("last_step", 0),
+                    "last_error_class": item.get("last_error_class", ""),
                     "last_error": item.get("last_error", ""),
                 }
                 for item in self._requests.values()
@@ -430,7 +632,7 @@ class RetrievalLedger:
                 for item in branch_recent
             ],
             "decision_guidance": (
-                "Already-searched information is observational context. Exact or equivalent web_search repeats "
+                "Already-searched information is observational context. Exact web_search repeats "
                 "are blocked before network execution. You decide whether to refine the query, use existing "
                 "evidence, search a different aspect, or finish."
             ),
@@ -441,7 +643,7 @@ class RetrievalLedger:
 
         with self._lock:
             return {
-                "schema_version": self.VERSION,
+                "contract": RETRIEVAL_EVENT_LEDGER_CONTRACT,
                 "searches": deepcopy(self._searches),
                 "queries": dict(self._query_counts),
                 "urls": deepcopy(self._urls),

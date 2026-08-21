@@ -1,0 +1,137 @@
+{
+  "schema_version": "rwkv-retrieval-oracle-trajectory.v1",
+  "events": [
+    {
+      "type": "task_plan",
+      "content": {
+        "contract": "rwkv.ecra.runtime.task-plan",
+        "goal": "Answer every requested field from frozen evidence without inventing facts.",
+        "records": [
+          {
+            "record_id": "P1",
+            "question": "Find official launcher requirements.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          },
+          {
+            "record_id": "P2",
+            "question": "Find PortableBundle-specific community procedure and label its role.",
+            "subject": "",
+            "relation": "",
+            "fields": [],
+            "time_scope": "unspecified",
+            "set_semantics": "single",
+            "premise_requires_verification": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "web_search",
+      "args": {
+        "query": "Nova Desktop PortableBundle menu launcher specification"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "web_search",
+      "content": {
+        "results": [
+          {
+            "source_id": "S1",
+            "url": "https://docs.nova-desktop.invalid/menu-entries",
+            "title": "Nova Desktop menu entry specification",
+            "authority": "official",
+            "published_at": "2035-01-11",
+            "retrieved_at": "2035-09-20T12:00:00Z",
+            "content": "Nova Desktop discovers per-user launchers in ~/.local/share/applications. A launcher requires a [Desktop Entry] section with Type, Name, and Exec. The specification does not mention PortableBundle packages."
+          },
+          {
+            "source_id": "S2",
+            "url": "https://community.nova-users.invalid/portablebundle-menu",
+            "title": "Community guide: add a PortableBundle to the menu",
+            "authority": "community",
+            "published_at": "2035-02-20",
+            "retrieved_at": "2035-09-20T12:00:00Z",
+            "content": "Community procedure: make the .PortableBundle executable, keep it at a stable path, and create ~/.local/share/applications/example.desktop. Set Type=Application, Name to the display name, and Exec to the absolute bundle path. Log out and back in if the launcher does not refresh. The author did not publish a tested desktop version."
+          }
+        ]
+      }
+    },
+    {
+      "type": "oracle_evidence_assessment",
+      "content": {
+        "decision": "finish",
+        "missing_points": [],
+        "conflicts": [],
+        "task_point_status": {
+          "P1": {
+            "status": "supported",
+            "evidence_refs": [
+              "S1"
+            ],
+            "supported_facts": [
+              {
+                "field": "launcher_directory",
+                "value": "~/.local/share/applications",
+                "evidence_ref": "S1",
+                "quote": "per-user launchers in ~/.local/share/applications"
+              },
+              {
+                "field": "required_desktop_fields",
+                "value": "Type, Name, and Exec",
+                "evidence_ref": "S1",
+                "quote": "requires a [Desktop Entry] section with Type, Name, and Exec"
+              }
+            ],
+            "missing_fields": []
+          },
+          "P2": {
+            "status": "supported",
+            "evidence_refs": [
+              "S2"
+            ],
+            "supported_facts": [
+              {
+                "field": "portable_bundle_procedure",
+                "value": "make the .PortableBundle executable, keep it at a stable path, and create ~/.local/share/applications/example.desktop",
+                "evidence_ref": "S2",
+                "quote": "make the .PortableBundle executable, keep it at a stable path, and create ~/.local/share/applications/example.desktop"
+              }
+            ],
+            "missing_fields": []
+          }
+        },
+        "next_focus": "",
+        "reason": "All required fields have answer-ready source bindings."
+      }
+    },
+    {
+      "type": "final",
+      "content": "Community procedure: make the `.PortableBundle` executable, keep it at a stable path, and create `~/.local/share/applications/example.desktop` [S2]. The launcher needs a `[Desktop Entry]` section with at least `Type`, `Name`, and `Exec`; point `Exec` to the absolute PortableBundle path [S1].\n\nThe directory and required fields come from the official Nova Desktop menu-entry specification. The PortableBundle-specific steps are community guidance, and the sources do not establish that the procedure was tested on a particular Nova Desktop version [S2]."
+    }
+  ],
+  "rejected_attempts": [
+    {
+      "stage": "final",
+      "failure_class": "fabricated_source_role_and_testing",
+      "prompt": {
+        "sources": [
+          "S1 official",
+          "S2 community"
+        ]
+      },
+      "rejected": {
+        "content": "Official Nova documentation confirms this was tested on Nova 7.2."
+      },
+      "chosen": {
+        "content": "Community procedure: make the `.PortableBundle` executable, keep it at a stable path, and create `~/.local/share/applications/example.desktop` [S2]. The launcher needs a `[Desktop Entry]` section with at least `Type`, `Name`, and `Exec`; point `Exec` to the absolute PortableBundle path [S1].\n\nThe directory and required fields come from the official Nova Desktop menu-entry specification. The PortableBundle-specific steps are community guidance, and the sources do not establish that the procedure was tested on a particular Nova Desktop version [S2]."
+      }
+    }
+  ]
+}

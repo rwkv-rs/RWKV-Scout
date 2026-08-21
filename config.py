@@ -1,4 +1,4 @@
-# RWKV-ECRA/config.py
+# RWKV-Scout/config.py
 import os
 import json
 import tempfile
@@ -262,6 +262,38 @@ override_llm_seed: ContextVar[int | None] = ContextVar(
     "override_llm_seed",
     default=None,
 )
+override_llm_top_p: ContextVar[float | None] = ContextVar(
+    "override_llm_top_p",
+    default=None,
+)
+override_llm_top_k: ContextVar[int | None] = ContextVar(
+    "override_llm_top_k",
+    default=None,
+)
+override_llm_presence_penalty: ContextVar[float | None] = ContextVar(
+    "override_llm_presence_penalty",
+    default=None,
+)
+override_llm_frequency_penalty: ContextVar[float | None] = ContextVar(
+    "override_llm_frequency_penalty",
+    default=None,
+)
+override_llm_penalty_decay: ContextVar[float | None] = ContextVar(
+    "override_llm_penalty_decay",
+    default=None,
+)
+override_llm_no_penalty_token_ids: ContextVar[tuple[int, ...] | None] = ContextVar(
+    "override_llm_no_penalty_token_ids",
+    default=None,
+)
+override_model_request_stage: ContextVar[str] = ContextVar(
+    "override_model_request_stage",
+    default="",
+)
+override_sampling_policy_reason: ContextVar[str] = ContextVar(
+    "override_sampling_policy_reason",
+    default="",
+)
 override_model_backend: ContextVar[str] = ContextVar("override_model_backend", default=None)
 override_direct_rwkv_config: ContextVar[dict | None] = ContextVar("override_direct_rwkv_config", default=None)
 override_slm_endpoint: ContextVar[str] = ContextVar("override_slm_endpoint", default=None)
@@ -405,6 +437,8 @@ def get_model_stage_temperature(stage: str) -> float:
     ) + "_TEMPERATURE"
     sampling = MODEL_RUNTIME_CONFIG.get("sampling", {})
     configured = sampling.get(stage_name) if isinstance(sampling, dict) else None
+    if isinstance(configured, dict):
+        configured = configured.get("temperature")
     raw_value = os.environ.get(environment_name, configured)
     if raw_value is None:
         return get_llm_temperature()
@@ -414,11 +448,23 @@ def get_model_stage_temperature(stage: str) -> float:
         return get_llm_temperature()
 
 
-def get_model_replan_temperature(generation: int) -> float:
-    """Return the temperature for one planner rebuild generation.
+def get_model_replan_temperature(generation: int, reason: str = "") -> float:
+    """Return a failure-aware request temperature for one RWKV replan.
 
-    Only the request-local temperature changes.  Sampling parameters other
-    than ``temperature`` and the explicit replan ``seed`` remain untouched.
+    The complete request-local ``planner_replan`` sampling profile is applied
+    by the caller; this function selects only its failure-aware temperature.
+    No request seed is injected by the controller.
+
+    Replanning is exploratory, but a protocol repair, a source conflict and a
+    repeated frozen path are not the same kind of request.  The old policy
+    raised temperature only by generation count, even when the prompt was
+    asking for strict JSON. This policy uses the model-visible failure reason
+    first and caps every replan at 0.4; only a repeated strategy stall reaches
+    that cap. The base
+    profile is a retrieval-specific experimental policy.  Some starting values
+    came from the Math-500 NoCoT sampler, but they are not treated as validated
+    here: promotion requires retrieval Trace ablation showing a new executable
+    route without answer-quality regression.
     """
 
     sampling = MODEL_RUNTIME_CONFIG.get("sampling", {})
@@ -427,15 +473,39 @@ def get_model_replan_temperature(generation: int) -> float:
 
     def configured_float(name: str, fallback: float) -> float:
         environment_name = "RWKV_ECRA_" + name.upper() + "_TEMPERATURE"
-        raw_value = os.environ.get(environment_name, values.get(name, fallback))
+        configured_value = values.get(name, fallback)
+        if isinstance(configured_value, dict):
+            configured_value = configured_value.get("temperature", fallback)
+        raw_value = os.environ.get(environment_name, configured_value)
         try:
             return max(0.0, min(float(raw_value), 2.0))
         except (TypeError, ValueError):
             return fallback
 
-    increment = configured_float("planner_replan_increment", 0.1)
-    maximum = configured_float("planner_replan_max", 0.55)
-    return min(maximum, base + increment * max(0, int(generation or 1) - 1))
+    reason_text = str(reason or "").casefold()
+    if "protocol" in reason_text or "json" in reason_text:
+        return configured_float("planner_replan_protocol", 0.1)
+    if "conflict" in reason_text or "contradict" in reason_text:
+        return min(
+            configured_float("planner_replan_max", 0.4),
+            configured_float("planner_replan_conflict", 0.4),
+        )
+    if any(
+        marker in reason_text
+        for marker in (
+            "duplicate",
+            "frozen",
+            "stall",
+            "no_new_evidence",
+            "no new evidence",
+            "repeated",
+        )
+    ):
+        value = configured_float("planner_replan_stall", 0.3)
+        if int(generation or 1) > 1:
+            value = configured_float("planner_replan_stall_escalated", 0.4)
+        return min(configured_float("planner_replan_max", 0.4), value)
+    return min(configured_float("planner_replan_max", 0.4), base)
 
 
 def get_llm_seed() -> int | None:
@@ -453,17 +523,158 @@ def get_llm_seed() -> int | None:
     return max(-(2**63), min(value, 2**63 - 1))
 
 
+def get_model_stage_sampling(stage: str) -> dict[str, object]:
+    """Return a normalized request-level decoding profile for one model role."""
+
+    stage_name = str(stage or "").strip().casefold()
+    sampling = MODEL_RUNTIME_CONFIG.get("sampling", {})
+    configured = sampling.get(stage_name, {}) if isinstance(sampling, dict) else {}
+    profile = dict(configured) if isinstance(configured, dict) else {}
+    profile["temperature"] = get_model_stage_temperature(stage_name)
+
+    def bounded_float(name: str, minimum: float, maximum: float) -> float | None:
+        value = profile.get(name)
+        if value is None:
+            return None
+        try:
+            return max(minimum, min(float(value), maximum))
+        except (TypeError, ValueError):
+            return None
+
+    normalized: dict[str, object] = {"temperature": profile["temperature"]}
+    for name, minimum, maximum in (
+        ("top_p", 0.00001, 1.0),
+        ("presence_penalty", -2.0, 2.0),
+        ("frequency_penalty", -2.0, 2.0),
+        ("penalty_decay", 0.0, 1.0),
+    ):
+        value = bounded_float(name, minimum, maximum)
+        if value is not None:
+            normalized[name] = value
+    if profile.get("top_k") is not None:
+        try:
+            normalized["top_k"] = max(0, int(profile["top_k"]))
+        except (TypeError, ValueError):
+            pass
+    token_ids = profile.get("no_penalty_token_ids")
+    if isinstance(token_ids, (list, tuple)):
+        normalized["no_penalty_token_ids"] = tuple(
+            dict.fromkeys(max(0, int(value)) for value in token_ids)
+        )
+    return normalized
+
+
+def get_llm_sampling_parameters() -> dict[str, object]:
+    """Return the active request-local wire sampling values for audit/runtime."""
+
+    output: dict[str, object] = {"temperature": get_llm_temperature()}
+    for name, context in (
+        ("top_p", override_llm_top_p),
+        ("top_k", override_llm_top_k),
+        ("presence_penalty", override_llm_presence_penalty),
+        ("frequency_penalty", override_llm_frequency_penalty),
+        ("penalty_decay", override_llm_penalty_decay),
+        ("no_penalty_token_ids", override_llm_no_penalty_token_ids),
+    ):
+        value = context.get()
+        if value is not None:
+            output[name] = value
+    return output
+
+
+def get_model_request_stage() -> str:
+    """Return the current request role for audit logging."""
+
+    return str(override_model_request_stage.get() or "")
+
+
+def get_sampling_policy_reason() -> str:
+    """Return the auditable reason for the current request temperature."""
+
+    return str(override_sampling_policy_reason.get() or "")
+
+
 @contextmanager
-def model_sampling_parameters(temperature: float, *, seed: int | None = None):
-    """Apply task-local temperature/seed without leaking across concurrent tasks."""
+def model_sampling_parameters(
+    temperature: float,
+    *,
+    seed: int | None = None,
+    stage: str = "",
+    policy_reason: str = "",
+    top_p: float | None = None,
+    top_k: int | None = None,
+    presence_penalty: float | None = None,
+    frequency_penalty: float | None = None,
+    penalty_decay: float | None = None,
+    no_penalty_token_ids: tuple[int, ...] | list[int] | None = None,
+):
+    """Apply one complete request-local decoding policy without leakage."""
+
+    stage_profile = get_model_stage_sampling(stage) if stage else {}
+    top_p = stage_profile.get("top_p") if top_p is None else top_p
+    top_k = stage_profile.get("top_k") if top_k is None else top_k
+    presence_penalty = (
+        stage_profile.get("presence_penalty")
+        if presence_penalty is None
+        else presence_penalty
+    )
+    frequency_penalty = (
+        stage_profile.get("frequency_penalty")
+        if frequency_penalty is None
+        else frequency_penalty
+    )
+    penalty_decay = (
+        stage_profile.get("penalty_decay")
+        if penalty_decay is None
+        else penalty_decay
+    )
+    no_penalty_token_ids = (
+        stage_profile.get("no_penalty_token_ids")
+        if no_penalty_token_ids is None
+        else no_penalty_token_ids
+    )
 
     temperature_token = override_llm_temperature.set(
         max(0.0, min(float(temperature), 2.0))
     )
     seed_token = override_llm_seed.set(seed)
+    top_p_token = override_llm_top_p.set(
+        None if top_p is None else max(0.00001, min(float(top_p), 1.0))
+    )
+    top_k_token = override_llm_top_k.set(
+        None if top_k is None else max(0, int(top_k))
+    )
+    presence_token = override_llm_presence_penalty.set(
+        None
+        if presence_penalty is None
+        else max(-2.0, min(float(presence_penalty), 2.0))
+    )
+    frequency_token = override_llm_frequency_penalty.set(
+        None
+        if frequency_penalty is None
+        else max(-2.0, min(float(frequency_penalty), 2.0))
+    )
+    decay_token = override_llm_penalty_decay.set(
+        None if penalty_decay is None else max(0.0, min(float(penalty_decay), 1.0))
+    )
+    no_penalty_token = override_llm_no_penalty_token_ids.set(
+        None
+        if no_penalty_token_ids is None
+        else tuple(dict.fromkeys(max(0, int(value)) for value in no_penalty_token_ids))
+    )
+    stage_token = override_model_request_stage.set(str(stage or ""))
+    reason_token = override_sampling_policy_reason.set(str(policy_reason or ""))
     try:
         yield
     finally:
+        override_sampling_policy_reason.reset(reason_token)
+        override_model_request_stage.reset(stage_token)
+        override_llm_no_penalty_token_ids.reset(no_penalty_token)
+        override_llm_penalty_decay.reset(decay_token)
+        override_llm_frequency_penalty.reset(frequency_token)
+        override_llm_presence_penalty.reset(presence_token)
+        override_llm_top_k.reset(top_k_token)
+        override_llm_top_p.reset(top_p_token)
         override_llm_seed.reset(seed_token)
         override_llm_temperature.reset(temperature_token)
 

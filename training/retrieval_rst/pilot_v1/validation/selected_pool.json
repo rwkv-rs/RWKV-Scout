@@ -1,0 +1,57 @@
+{
+  "schema_version": "rwkv-retrieval-rst-selection.v1",
+  "requested_limit": 10000,
+  "selected_count": 5,
+  "tasks": [
+    {
+      "task_id": "rrst_seed_derived_anniversary_001",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks/rrst_seed_derived_anniversary_001",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_event_calendar",
+      "rewrite_family": "task_and_time_decomposition",
+      "rewrite_operator": "add_deterministic_date_derivation",
+      "bundle_sha256": "94e1791b61de182836f8df43c9bc96e5f425ffb69fac1a6948d13170f5c5d48f"
+    },
+    {
+      "task_id": "rrst_seed_direct_page_policy_001",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks/rrst_seed_direct_page_policy_001",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_technical_documentation",
+      "rewrite_family": "retrieval_and_source_choice",
+      "rewrite_operator": "add_direct_url_scope",
+      "bundle_sha256": "8f1830eebbd00f37d3ae36840aead16f9a6b6780c455013525d60beee9313859"
+    },
+    {
+      "task_id": "rrst_seed_lumen_current_001",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks/rrst_seed_lumen_current_001",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_product_updates",
+      "rewrite_family": "bootstrap",
+      "rewrite_operator": "bootstrap_current_version",
+      "bundle_sha256": "bc80dd283dad38b737ba63281f31d592270443e360a39ea7396572f99bd1961b"
+    },
+    {
+      "task_id": "rrst_seed_portable_bundle_menu_001",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks/rrst_seed_portable_bundle_menu_001",
+      "round": 0,
+      "parent_id": "",
+      "domain": "fictional_desktop_howto",
+      "rewrite_family": "answer_grounding",
+      "rewrite_operator": "add_source_role_trap",
+      "bundle_sha256": "ec0479b9c987e27b393ec1023b8b2a820eed3d6536f3a5fab334a481f3f1649b"
+    },
+    {
+      "task_id": "rrst_r1_lumen_temporal_001",
+      "bundle": "/home/chase/GitHub/RWKV-ECRA/training/retrieval_rst/pilot_v1/tasks/rrst_r1_lumen_temporal_001",
+      "round": 1,
+      "parent_id": "rrst_seed_lumen_current_001",
+      "domain": "fictional_product_updates",
+      "rewrite_family": "task_and_time_decomposition",
+      "rewrite_operator": "add_temporal_role_separation",
+      "bundle_sha256": "01a4b8a3ff72b58e54c3a594a9dcb6838f4b80eb1efa3a7b3e15e38561571685"
+    }
+  ]
+}

@@ -12,11 +12,10 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-USER_HEADER = "### User"
-ASSISTANT_HEADER = "### Assistant"
-SYSTEM_HEADER = USER_HEADER
-TOOL_CALL_HEADER = "**Tool Call:**"
-TOOL_OUTPUT_HEADER = "### Tool Output"
+USER_HEADER = "User:"
+ASSISTANT_HEADER = "Assistant:"
+SYSTEM_HEADER = "System:"
+TOOL_OUTPUT_HEADER = "User: Function output:"
 
 # Compatibility names used by archived tool-call traces.  They are not
 # emitted by the production renderer.
@@ -27,20 +26,19 @@ FLOWER_DELIMITER = "✿"
 # Tool calls are a JSON protocol, not a public answer.  Stops are retained for
 # that protocol so a call cannot consume a controller-owned Tool Output turn.
 JSON_CALL_STOP_SUFFIXES = (
-    "\n### Tool Output",
-    "### Tool Output",
-    "\n### User",
-    "### User",
-    "\n### Assistant",
-    "### Assistant",
-    "\n**Tool Call:**",
+    "\n```",
     "\nUser:",
     "\nSystem:",
     "\nAssistant:",
-    "\nUser✿",
-    "User✿",
-    "\nBot✿",
-    "Bot✿",
+)
+
+# Final prose is never repaired or trimmed after generation. Stop only when
+# the model starts a new transcript role, preserving Markdown/code fences and
+# every user-facing token before that protocol boundary.
+FINAL_ANSWER_STOP_SUFFIXES = (
+    "\nUser:",
+    "\nSystem:",
+    "\nAssistant:",
 )
 
 
@@ -48,24 +46,24 @@ def assistant_prose_prefix(*, enable_think: bool = False) -> str:
     """Return the native assistant continuation marker."""
 
     if enable_think:
-        return f"{ASSISTANT_HEADER}\n<think></think"
+        return f"{ASSISTANT_HEADER} <think></think"
     return ASSISTANT_HEADER
 
 
 def assistant_json_prefix(*, enable_think: bool = False, prefill_object: bool = True) -> str:
-    """Return the generic JSON continuation used by planning calls."""
+    """Return the online G1i JSON continuation used by structured calls."""
 
     if enable_think:
-        prefix = f"{ASSISTANT_HEADER}\n<think></think\n"
+        prefix = f"{ASSISTANT_HEADER} <think></think\n```json\n"
     else:
-        prefix = f"{ASSISTANT_HEADER}\n```json\n"
+        prefix = f"{ASSISTANT_HEADER} ```json\n"
     return prefix + ("{" if prefill_object else "")
 
 
 def tool_call_prefix() -> str:
-    """Return the native G1i tool-call continuation marker."""
+    """Return the online G1i function-call continuation marker."""
 
-    return f"{ASSISTANT_HEADER}\n{TOOL_CALL_HEADER}\n"
+    return assistant_json_prefix(enable_think=False, prefill_object=False)
 
 
 def render_final_continuation_prompt(user_prompt: str, *, enable_think: bool = False) -> str:
@@ -120,8 +118,9 @@ def render_tool_transcript(
         content = raw_content if isinstance(raw_content, Mapping) else str(raw_content or "")
 
         if role in {"system", "user"}:
+            header = SYSTEM_HEADER if role == "system" else USER_HEADER
             parts.append(
-                f"{USER_HEADER}\n{_sanitize_embedded_role_headers(str(content))}".rstrip()
+                f"{header} {_sanitize_embedded_role_headers(str(content))}".rstrip()
             )
             continue
 
@@ -134,7 +133,7 @@ def render_tool_transcript(
                         parts.append(_render_tool_call(payload))
                 if str(content).strip():
                     parts.append(
-                        f"{ASSISTANT_HEADER}\n{_sanitize_embedded_role_headers(str(content))}".rstrip()
+                        f"{ASSISTANT_HEADER} {_sanitize_embedded_role_headers(str(content))}".rstrip()
                     )
                 continue
             payload = _tool_call_payload(content)
@@ -142,7 +141,7 @@ def render_tool_transcript(
                 parts.append(_render_tool_call(payload))
             else:
                 parts.append(
-                    f"{ASSISTANT_HEADER}\n{_sanitize_embedded_role_headers(str(content))}".rstrip()
+                    f"{ASSISTANT_HEADER} {_sanitize_embedded_role_headers(str(content))}".rstrip()
                 )
             continue
 
@@ -151,7 +150,7 @@ def render_tool_transcript(
             continue
 
         parts.append(
-            f"{USER_HEADER}\n{_sanitize_embedded_role_headers(str(content))}".rstrip()
+            f"{USER_HEADER} {_sanitize_embedded_role_headers(str(content))}".rstrip()
         )
 
     parts.append(
@@ -187,8 +186,8 @@ def _tool_call_payload(value: Any) -> dict[str, Any] | None:
 
 def _render_tool_call(payload: Mapping[str, Any]) -> str:
     return (
-        f"{ASSISTANT_HEADER}\n{TOOL_CALL_HEADER}\n```json\n"
-        f"{json.dumps(dict(payload), ensure_ascii=False, indent=2)}\n```"
+        f"{ASSISTANT_HEADER} ```json\n"
+        f"{json.dumps(dict(payload), ensure_ascii=False, separators=(',', ':'))}"
     )
 
 
@@ -204,7 +203,7 @@ def _render_tool_output(content: Any) -> str:
         )
     else:
         rendered = json.dumps(content, ensure_ascii=False, indent=2)
-    return f"{TOOL_OUTPUT_HEADER}\n```json\n{rendered}\n```"
+    return f"{TOOL_OUTPUT_HEADER} {rendered}"
 
 
 def _json_content(value: str) -> dict[str, Any] | None:
@@ -225,7 +224,7 @@ def _looks_like_json_text(value: str) -> bool:
 def _sanitize_embedded_role_headers(value: str) -> str:
     text = str(value or "")
     return re.sub(
-        r"(?im)^\s*(###\s+(?:User|System|Assistant|Tool Output)|User:|System:|Assistant:|User✿|Bot✿)",
+        r"(?im)^\s*(###\s+(?:User|System|Assistant|Tool Output)|User:\s*(?:Function output:)?|System:|Assistant:|User✿|Bot✿)",
         lambda match: f"[embedded {match.group(1)}]",
         text,
     )

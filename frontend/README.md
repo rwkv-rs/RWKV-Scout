@@ -1,13 +1,13 @@
-# RWKV-ECRA React Frontend
+# RWKV-Scout React Frontend
 
-React + Vite 独立前端，不修改 `api.py` 或既有后端流程。
+React + Vite 独立前端，生产环境由 `frontend/server.py` 提供构建文件并代理后端 API。
 
 ## 启动
 
 先安装依赖：
 
 ```bash
-cd RWKV-ECRA
+cd RWKV-Scout
 npm install --prefix frontend
 ```
 
@@ -57,3 +57,20 @@ python frontend/server.py --host 127.0.0.1 --port 8787
 $env:RWKV_ECRA_FRONTEND_API="http://127.0.0.1:8787"
 npm run dev --prefix frontend
 ```
+
+## 生产构建与公网模式
+
+```bash
+cd frontend
+npm ci
+npm run build
+cd ..
+
+export RWKV_ECRA_API_BASE="http://127.0.0.1:8787"
+export RWKV_ECRA_PUBLIC_MODE=1
+python frontend/server.py --host 0.0.0.0 --port 5177
+```
+
+Tunnel 只应指向前端端口 `5177`，后端 API 继续监听本机地址。当前“公网模式”面向公司内部开发使用：全局历史、检索对话、直接模型聊天、events/report/trace 和 metrics 都正常开放；只隐藏并阻止文件管理、文件上传以及任务/文件删除。模型连接地址和凭证仍不会返回给浏览器。
+
+生产服务优先读取 `frontend/dist/`，未知页面路径会回退到 `dist/index.html`，因此刷新任务详情页不会返回 404。

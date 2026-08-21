@@ -24,7 +24,7 @@ class BackendResponse:
 
 
 class ModelBackend(Protocol):
-    """The model capability required by RWKV-ECRA."""
+    """The model capability required by RWKV-Scout."""
 
     @property
     def backend_name(self) -> str:
